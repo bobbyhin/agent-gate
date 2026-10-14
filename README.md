@@ -4,7 +4,7 @@ A guard that sits between an AI coding agent and the shell. Before the agent run
 command, agent-gate reads the command and decides one of four things: **pass**, **warn**,
 **ask** a human, or **block**.
 
-This repository has four parts:
+This repository has five parts:
 
 - `src/command-guard.js`: the analyzer. One function, no dependencies. `analyze(command)`
   returns `{ action, label, why }`.
@@ -13,6 +13,9 @@ This repository has four parts:
   rounds against earlier versions of the analyzer.
 - `src/gateway/`: an MCP gateway (TypeScript) that brings the same four decisions to MCP tool
   calls and holds risky calls until a human approves them. See [MCP gateway](#mcp-gateway).
+- `src/llm/`: an LLM gateway (TypeScript) in front of model providers, with routing, daily and
+  monthly budget caps per key, and a leak guard for secrets in prompts. See
+  [LLM gateway](#llm-gateway).
 
 Status: v0.1.0. It is used daily on the author's own agent setup. It is a heuristic reader of
 shell commands, not a sandbox. See [Known limits](#known-limits).
@@ -456,6 +459,358 @@ run.
 - Downstream calls use the SDK's default 60-second request timeout, and progress notifications
   are not relayed, so a tool that runs longer than a minute fails through the gateway.
 
+## LLM gateway
+
+The MCP gateway decides which tool calls an agent may make. The LLM gateway sits on the agent's
+other way out: its calls to the model itself. It is an OpenAI-compatible HTTP endpoint in front of
+one or more upstream providers, and for every chat completion it decides which upstream and model
+serve it, whether the caller's budget allows it, and whether its text may leave the machine.
+
+Every `POST /v1/chat/completions` goes through these steps, in this order. Nothing is sent upstream
+until steps 1 to 5 have passed.
+
+| Step | What happens | Refused with |
+| --- | --- | --- |
+| 1. Authenticate | The gateway key (`Authorization: Bearer <key>`) is looked up by its SHA-256 and mapped to a name, such as `search-agent`. | 401 |
+| 2. Check | The body must be JSON with a `model` alias and `messages`. `"stream": true` is refused. | 400, 413 |
+| 3. Route | Route rules pick an upstream and a model from the alias and the `x-agent-task` header. | 404 |
+| 4. Leak guard | The message text is scanned for secrets. A block rule refuses the call; a redact rule replaces the match. | 400 |
+| 5. Reserve | The call's estimated cost is reserved against the key's daily and monthly caps. | 429 |
+| 6. Call | The upstream is called, with retries and then the fallback on a 5xx or a timeout. | 502, 504 |
+| 7. Settle | The reservation is settled with the real cost from the answer's `usage`, or released if the call failed. | |
+| 8. Record | One line goes to the usage log, with no prompt or completion text. | |
+
+It is written in TypeScript on Node's own `http` module and global `fetch`, with no runtime
+dependencies.
+
+Status: new. It was built and tested against fake upstream servers on the local machine; no real
+provider has been called through it yet.
+
+### Set it up
+
+```
+npm install
+npm run build
+cp llm-gateway.config.example.json llm-gateway.config.json
+```
+
+The example config points at the fake upstream from the tests, so the whole flow can be tried
+without an account anywhere and at no cost. Start the fake on port 9101, then the gateway, with
+the upstream keys in its environment (the fake accepts any key):
+
+```
+node dist/test/llm/fake-upstream.js --port 9101 &
+CHEAP_API_KEY=fake-cheap STRONG_API_KEY=fake-strong BACKUP_API_KEY=fake-backup \
+  node bin/agent-gate.js llm serve --config llm-gateway.config.json
+```
+
+Clients use `http://127.0.0.1:8787/v1` as their OpenAI base URL and a gateway key as their API
+key. The example config accepts the key `demo-gateway-key-not-a-secret`, which the commands below
+read from `$GATEWAY_KEY`. This is the example config:
+
+```json
+{
+  "listen": { "host": "127.0.0.1", "port": 8787 },
+  "stateDir": ".agent-gate",
+  "policy": "llm-policy.example.json",
+  "upstreams": [
+    {
+      "name": "cheap",
+      "baseUrl": "http://127.0.0.1:9101/v1",
+      "apiKeyEnv": "CHEAP_API_KEY",
+      "models": { "small": "fake-small-1" },
+      "pricePerMTok": { "input": 0.15, "output": 0.6 }
+    },
+    {
+      "name": "strong",
+      "baseUrl": "http://127.0.0.1:9101/v1",
+      "apiKeyEnv": "STRONG_API_KEY",
+      "models": { "large": "fake-large-1" },
+      "pricePerMTok": { "input": 3, "output": 15 }
+    },
+    {
+      "name": "backup",
+      "baseUrl": "http://127.0.0.1:9102/v1",
+      "apiKeyEnv": "BACKUP_API_KEY",
+      "models": { "large": "fake-large-2" },
+      "pricePerMTok": { "input": 3, "output": 15 }
+    }
+  ],
+  "routes": [
+    { "id": "classify-is-cheap", "when": { "task": "classify" }, "use": { "upstream": "cheap", "model": "small" } },
+    { "id": "code-is-strong", "when": { "task": "code" }, "use": { "upstream": "strong", "model": "large" }, "fallback": { "upstream": "backup" } },
+    { "id": "cheap-models", "use": { "upstream": "cheap" } },
+    { "id": "strong-models", "use": { "upstream": "strong" }, "fallback": { "upstream": "backup" } }
+  ],
+  "keys": [
+    {
+      "name": "demo-agent",
+      "sha256": "50f762c67f800bf8729d9abff1153a2a812d6b56a74c6422cce0dfd0cae4d6eb",
+      "dailyUsd": 0.01,
+      "monthlyUsd": 1
+    }
+  ],
+  "defaultMaxTokens": 1024,
+  "timeoutMs": 30000,
+  "retries": 1,
+  "backoffMs": 250
+}
+```
+
+- `upstreams` are where calls go. `apiKeyEnv` names the environment variable that holds the
+  upstream's API key; the key itself is never in the config. `models` maps the aliases clients ask
+  for to the upstream's own model names. `pricePerMTok` is US dollars per million input and output
+  tokens. There is one price per upstream entry, so a provider with a cheap and a strong model is
+  two entries that share a `baseUrl`, like `cheap` and `strong` above.
+- `routes` are explained under [Routing](#routing).
+- `keys` has one entry per team or agent. `sha256` is the SHA-256 of the gateway key, not the key,
+  so the config can be read without handing out access. `dailyUsd` and `monthlyUsd` are the caps;
+  both are required.
+- `policy` is the leak guard's rule file. It and `stateDir` are resolved against the config file's
+  directory.
+- Optional, with their defaults: `listen` (`127.0.0.1`, port 8787), `defaultMaxTokens` (1024),
+  `timeoutMs` per attempt (60000), `retries` per upstream (1, at most 3), `backoffMs` (250) and
+  `maxBodyBytes` (1 MiB).
+
+To make a gateway key and the hash for the config:
+
+```
+KEY="agk_$(openssl rand -hex 24)"
+echo "$KEY"
+printf %s "$KEY" | shasum -a 256
+```
+
+As with the MCP gateway, a mistake in the config or the policy stops the gateway at startup with
+the field named. So does an upstream key variable that is not set; the error names the variable,
+never a value.
+
+### A request, step by step
+
+This is a real run with the example config and the fake upstream (the `Date` and connection
+headers are left out). A classification task asks for the `large` alias, and the route for
+`x-agent-task: classify` sends it to the cheap model instead:
+
+```
+$ export GATEWAY_KEY=demo-gateway-key-not-a-secret
+$ curl -s -i http://127.0.0.1:8787/v1/chat/completions \
+    -H "Authorization: Bearer $GATEWAY_KEY" \
+    -H "content-type: application/json" \
+    -H "x-agent-task: classify" \
+    -d '{"model":"large","messages":[{"role":"user","content":"Label this ticket: printer on fire"}],"max_tokens":20}'
+HTTP/1.1 200 OK
+x-agent-gate-request-id: req-a3792412
+content-type: application/json
+content-length: 286
+x-agent-gate-route: classify-is-cheap
+x-agent-gate-upstream: cheap
+x-agent-gate-cost-usd: 0.00000885
+
+{"id":"chatcmpl-fake-1","object":"chat.completion","created":1760400000,"model":"fake-small-1","choices":[{"index":0,"message":{"role":"assistant","content":"fake answer 1 from fake-small-1"},"finish_reason":"stop"}],"usage":{"prompt_tokens":23,"completion_tokens":9,"total_tokens":32}}
+```
+
+The body is the upstream's answer, unchanged. The `x-agent-gate-*` headers say which route and
+upstream served the call and what it cost: 23 input tokens at $0.15 and 9 output tokens at $0.60
+per million, from the upstream's own `usage`. The gateway's log has one line per call:
+
+```
+[agent-gate] 200 req-a3792412 key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 27ms
+```
+
+### Routing
+
+Routes are tried in order. A route applies when every condition in its `when` matches and its
+upstream offers the alias it would use. The first route that applies decides.
+
+- `when.model` matches the requested alias, and `when.task` the `x-agent-task` header. Each is a
+  glob or a list of globs, matched like the MCP policy's (the whole value, ignoring case, with `*`
+  and `?`). A route with `when.task` never matches a request without the header, and a route
+  without `when` matches every request.
+- `use.upstream` is where the call goes. `use.model` fixes the alias on that upstream. Without it,
+  the alias the client asked for is used, and the route applies only if the upstream offers that
+  alias. That is what makes `{ "id": "cheap-models", "use": { "upstream": "cheap" } }` mean "any
+  alias the cheap upstream has".
+- `fallback` is tried when the primary keeps failing. It uses the primary's alias unless it sets
+  its own. When that alias is known at startup and the fallback lacks it, the config is refused;
+  when it comes from the request and the fallback lacks it, the call simply has no fallback.
+- When no route applies, the call is refused with 404 `model_not_found`.
+
+The example's routes, for a request that asks for `large`:
+
+| `x-agent-task` | Route | Upstream and model |
+| --- | --- | --- |
+| `classify` | `classify-is-cheap` | `cheap`, `fake-small-1` |
+| `code` | `code-is-strong` | `strong`, `fake-large-1`; fallback `backup`, `fake-large-2` |
+| none, or anything else | `strong-models` | `strong`, `fake-large-1`; fallback `backup`, `fake-large-2` |
+
+The routing function (`src/llm/routing.ts`) is pure, like the policy engine, and has a table test.
+
+A 5xx answer, a timeout or a failed connection is retried on the same upstream up to `retries`
+times, waiting `backoffMs` before the first retry and twice as long before each next one. After
+that, the fallback gets the same treatment. A 4xx answer, including the upstream's own 429, is not
+retried: it would fail the same way again. When every attempt fails, the client gets 502, or 504
+if the last attempt timed out, with the gateway's own message.
+
+### Budgets
+
+Every gateway key has a daily and a monthly cap in US dollars. Before a call, the gateway reserves
+an estimate of its cost; after the call, it settles the reservation with the real cost.
+
+- **Estimate.** Input tokens are the characters of the message text divided by 4. Output tokens
+  are the request's `max_tokens` (or `max_completion_tokens`) times `n`, or `defaultMaxTokens`
+  when the request sets no limit, in which case that limit is also sent upstream as `max_tokens`.
+  The estimate is priced at the most expensive upstream the route may use, primary or fallback.
+- **Reserve.** If the key's settled spend, plus what calls in flight have reserved, plus this
+  estimate, would pass either cap, the call is refused with 429 and nothing is sent.
+- **Settle.** The real cost comes from the answer's `usage`, at the price of the upstream that
+  answered. A 2xx answer without `usage` is booked at the estimate. A call that fails releases its
+  reservation and costs nothing.
+
+Days and months are UTC. Because calls in flight hold their reservations, concurrent calls cannot
+pass a cap together; the price is that an estimate can refuse a call that would have fit. Why it
+works this way: [docs/adr/0002-reserve-then-settle-budgets.md](docs/adr/0002-reserve-then-settle-budgets.md).
+
+In the run above, the demo key has a daily cap of $0.01. A call to `large` with
+`"max_tokens": 1000` could cost up to 1000 output tokens at $15 per million, so it is refused even
+though the key has spent almost nothing (headers shortened):
+
+```
+HTTP/1.1 429 Too Many Requests
+retry-after: 45064
+
+{"error":{"message":"agent-gate: this call could cost up to $0.015015, and key \"demo-agent\" has $0.00977395 left of its daily budget of $0.01 ($0.00022605 spent, $0 held by calls in flight). Try again later, or with a lower max_tokens.","type":"insufficient_quota","param":null,"code":"budget_exceeded","cap":"daily"}}
+```
+
+`Retry-After` is the time until the next UTC day (or month) when the settled spend alone leaves no
+room, and one second when calls in flight are what is in the way.
+
+The ledger is `<stateDir>/ledger.json` (mode 0600). It is changed with the same locked
+read-modify-write and atomic rename as the approval queue, and a damaged ledger is an error, never
+an empty one, because an empty one would hand every key its whole budget again. Reservations of a
+gateway that crashed mid-call expire on their own. The CLI shows the ledger:
+
+```
+$ agent-gate usage --config llm-gateway.config.json
+key         today (2026-10-14 UTC)  this month (2026-10)  in flight
+demo-agent  $0.00022605 of $0.01    $0.00022605 of $1     0
+```
+
+`--json` prints the same as JSON.
+
+### Leak guard
+
+Before a call is forwarded, its message text is scanned with the regex rules in the policy file.
+A `block` rule refuses the call with 400 and names the rule, never the text it matched. A `redact`
+rule replaces what it matches with `[REDACTED:<id>]` and lets the call go on, and the response
+names the rules that redacted in an `x-agent-gate-redacted` header. If a redact rule's regex has
+capture groups, only the first group that took part in the match is replaced, so
+`api_key = "..."` keeps its name and quotes, and JSON in tool-call arguments stays valid JSON.
+Block rules are checked first, on the original text, so a redaction cannot hide a blocked secret.
+
+`llm-policy.example.json` ships six rules:
+
+| Rule | Matches | Action |
+| --- | --- | --- |
+| `private-key` | a PEM or OpenSSH private key block (RSA, EC, OPENSSH, PGP and others) | block |
+| `aws-access-key-id` | an AWS access key id: `AKIA`, `ASIA`, `ABIA` or `ACCA` and 16 more characters | block |
+| `github-token` | a GitHub token: `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, or a fine-grained `github_pat_` | block |
+| `slack-token` | a Slack token: `xoxb-`, `xoxp-`, `xoxa-`, `xoxo-`, `xoxs-` or `xoxr-` | block |
+| `sk-style-key` | a provider key that starts with `sk-` (`sk-proj-`, `sk-ant-` and others), 20 or more characters with a digit | block |
+| `api-key-assignment` | a value given to a name such as `api_key`, `client_secret`, `access_token` or `password`: quoted with 12 or more characters, or unquoted with 16 or more, and containing a digit; only the value is replaced | redact |
+
+The formats that are surely secrets block, because a key that was pasted into a prompt should be
+rotated, not quietly dropped. The heuristic rule redacts: it has more false positives, and a guess
+should not refuse a whole request. Every rule is also tested against prose and code that must
+pass untouched, such as `const apiKey = process.env.OPENAI_API_KEY;`,
+`password = get_password_from_vault()`, a public key block and `"api_key": "<your-api-key-here>"`.
+
+From the run above (headers shortened):
+
+```
+$ curl -s -i ... -d '{"model":"small","messages":[{"role":"user","content":"Why does ssh reject this key? -----BEGIN OPENSSH PRIVATE KEY----- (rest cut)"}]}'
+HTTP/1.1 400 Bad Request
+
+{"error":{"message":"agent-gate: the messages contain text that looks like a secret (rule private-key), so the request was not sent. Remove it and try again; if it was a real secret, rotate it.","type":"invalid_request_error","param":"messages","code":"secret_detected","rule":"private-key"}}
+
+$ curl -s -i ... -d '{"model":"small","messages":[{"role":"user","content":"Is this config line right? api_key = \"fake0000fake0000\""}]}'
+HTTP/1.1 200 OK
+x-agent-gate-route: cheap-models
+x-agent-gate-upstream: cheap
+x-agent-gate-cost-usd: 0.0000102
+x-agent-gate-redacted: api-key-assignment
+```
+
+The upstream received `Is this config line right? api_key = "[REDACTED:api-key-assignment]"`.
+
+The guard scans message `content` (a string, or the `text` of text parts) and the `arguments` of
+assistant tool calls. It does not scan image, audio or file parts, tool definitions, other request
+fields, or responses. A rule is `{ "id", "regex", "flags", "action", "description" }`; `flags` may
+use `i`, `m`, `s` and `u`, as in the MCP policy, and a regex that matches empty text is refused at
+startup.
+
+### Usage log
+
+Every authenticated call appends one JSON line to `<stateDir>/usage.jsonl` (mode 0600). These are
+the lines from the run above:
+
+```json
+{"ts":"2026-10-14T11:28:56.525Z","id":"req-a3792412","key":"demo-agent","route":"classify-is-cheap","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":23,"outputTokens":9,"costUsd":0.00000885,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":27}
+{"ts":"2026-10-14T11:28:56.546Z","id":"req-9cd325f3","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":200,"inputTokens":24,"outputTokens":9,"costUsd":0.000207,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":11}
+{"ts":"2026-10-14T11:28:56.553Z","id":"req-6de918a4","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":400,"error":"secret_detected","rule":"private-key","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":0}
+{"ts":"2026-10-14T11:28:56.570Z","id":"req-77ea652f","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":32,"outputTokens":9,"costUsd":0.0000102,"usage":"upstream","attempts":1,"fallback":false,"redacted":["api-key-assignment"],"latencyMs":10}
+{"ts":"2026-10-14T11:28:56.580Z","id":"req-96b5643f","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":429,"error":"budget_exceeded","rule":"daily","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":4}
+{"ts":"2026-10-14T11:28:56.586Z","id":"req-eadc4dd5","key":"demo-agent","status":400,"error":"stream_not_supported","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":0}
+```
+
+There is no prompt or completion text in it, on purpose. Prompts carry whatever the agent read or
+was told, including secrets and personal data, and completions repeat it. The usage log is for
+cost and availability: it is kept for a long time and read by people who need the tokens and the
+dollars, not the conversation. `id` ties a line to the `x-agent-gate-request-id` the client got.
+`usage` says whether the tokens came from the upstream or, when it reported none, from the
+estimate, and `attempts` and `fallback` show retries and fallbacks.
+
+### Keys
+
+- Gateway keys are stored only as SHA-256 hashes, and looked up by their hash.
+- Upstream keys are read from the environment once, at startup. Each is sent only to its own
+  upstream, as `Authorization: Bearer`, and is never logged or returned.
+- An upstream's error body is never passed on as it is, because a provider can quote the key it
+  was given. A 401 or 403 becomes a 502 `upstream_auth_failed` with the gateway's own message, a
+  5xx becomes the gateway's 502 or 504, and any other 4xx is passed on with the upstream keys cut
+  out.
+- Client headers are not forwarded (the client's `Authorization` holds the gateway key), and
+  redirects from an upstream are refused.
+
+The end-to-end test runs fake upstreams that quote the key they receive, and checks that no
+provider key appears in any response, in the state files or in the gateway's log.
+
+### What the LLM gateway does not cover
+
+- Streaming. `"stream": true` is refused with 400 `stream_not_supported`. Relaying a stream means
+  forwarding it chunk by chunk and reading `usage` from the last chunk.
+- Other endpoints: embeddings, images, audio, the Responses API, legacy completions. Only
+  `POST /v1/chat/completions` and `GET /healthz` exist.
+- Provider-specific features. The request body is forwarded as it is, apart from `model`, redacted
+  `messages` and a missing `max_tokens`, so provider fields pass through, but nothing translates
+  between provider APIs: an upstream has to speak the OpenAI chat completions format. A model that
+  accepts only `max_completion_tokens` needs the client to send it, because the default limit is
+  sent as `max_tokens`.
+- Exact token counting. Before a call, input tokens are characters / 4, and image or audio parts
+  count for nothing; after it, the upstream's own `usage` is booked. The ADR says what that means
+  for the caps.
+- Responses are not scanned; the leak guard looks at requests only. It is a list of regexes, so a
+  secret in a format it does not know, split across messages, or encoded (base64, for example)
+  gets through.
+- Rate limits (requests or tokens per minute), and budgets per route or per model. Budgets are per
+  key.
+- Prices are config values. Keep them in step with the providers' price lists.
+- More than one host. The ledger is a file on one machine (see the ADR).
+- TLS. The gateway speaks plain HTTP: bind it to localhost, as the example does, or put it behind a
+  proxy that terminates TLS.
+- Upstream health. `/healthz` reports that the process is up; it does not call the upstreams,
+  because a probe that did would spend money.
+- Cancellation. A client that disconnects does not cancel the upstream call; the call finishes and
+  is booked.
+
 ## Run the tests
 
 ```
@@ -463,48 +818,75 @@ npm install
 npm test
 ```
 
-`npm test` compiles the TypeScript and then runs `node --test` (Node 20 or newer) over two suites.
+`npm test` compiles the TypeScript and then runs `node --test` (Node 20 or newer) over three suites.
 
 The shell guard suite needs no dependencies; `node --test test/command-guard.test.js` runs it on
 its own. It runs 245 tests: the 239 cases in `test/cases.json`, a check that the file is well
 formed, and 5 tests that run the hook as a child process. Each case has an `expect` of `pass`,
 `warn`, `ask` or `block`; `ask_or_block` accepts either of the last two (3 cases).
 
-The gateway suite (`test/gateway/`) runs 118 tests: a policy table for each red line and for the
-shell rule (every case in `test/cases.json` is also run through the gateway's shell rule), config
-and policy validation, the approval store with a clock the test controls, the CLI's exit codes,
-and an end-to-end test. That test starts `agent-gate serve` against a fake downstream server,
-talks to it with a real MCP client, answers approvals with the real CLI, and checks what reached
-the downstream server and what was written to the audit log.
+The MCP gateway suite (`test/gateway/`) runs 118 tests: a policy table for each red line and for
+the shell rule (every case in `test/cases.json` is also run through the gateway's shell rule),
+config and policy validation, the approval store with a clock the test controls, the CLI's exit
+codes, and an end-to-end test. That test starts `agent-gate serve` against a fake downstream
+server, talks to it with a real MCP client, answers approvals with the real CLI, and checks what
+reached the downstream server and what was written to the audit log.
 
-Current result: **239/239 cases pass** (245/245 shell guard tests, 118/118 gateway tests), on Node
-20 and 22. CI runs `npm ci` and `npm test` on both.
+The LLM gateway suite (`test/llm/`) runs 156 tests: a routing table; config validation; budget
+math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
+day and month rollover, reservations left by a crashed process, a damaged file); a leak-guard table
+for every shipped rule, with 24 samples of prose and code that must pass untouched; retries and
+the fallback with a scripted `fetch`, plus a real timeout; the CLI; and an end-to-end test. That
+test starts `agent-gate llm serve` against two fake upstream HTTP servers, one healthy and one that
+always answers 500, and checks routing by alias and by `x-agent-task`, the fallback after a 500,
+costs settled from the upstream's `usage`, a 429 with no upstream call once a cap is reached,
+secrets blocked before any upstream call, redaction, a usage log without prompt text, 401 for an
+unknown key, and that no provider key ever appears in a response or a log. Every fake secret the
+tests use is in `test/llm/fake-secrets.ts`, assembled from pieces at run time, so no secret-shaped
+string appears in the source and secret scanners need no exceptions for this repository.
+
+Current result: **239/239 cases pass** (245/245 shell guard tests, 118/118 MCP gateway tests,
+156/156 LLM gateway tests), on Node 20 and 22. CI runs `npm ci` and `npm test` on both.
 
 ## Repository layout
 
 ```
-src/command-guard.js                     the analyzer: analyze(command) -> { action, label, why }
-src/command-guard.d.ts                   its types, for the TypeScript gateway
-bin/claude-pretooluse-hook.js            the Claude Code PreToolUse hook
-src/gateway/server.ts                    the MCP gateway: lists <server>__<tool>, decides, forwards
-src/gateway/policy.ts                    the policy engine (pure): evaluate(policy, call) -> verdict
-src/gateway/approvals.ts                 the approval queue in <stateDir>/approvals.json
-src/gateway/audit.ts                     the audit log, <stateDir>/audit.jsonl
-src/gateway/config.ts                    loads and checks the gateway config
-src/gateway/validate.ts                  field-by-field checks for the config and the policy
-src/gateway/cli.ts                       agent-gate serve, agent-gate approvals ...
-bin/agent-gate.js                        the CLI entry point (runs the build in dist/)
-policy.example.json                      the red lines as a gateway policy
-gateway.config.example.json              a config that proxies the fake test server
-test/cases.json                          239 cases: id, category, expect, cmd
-test/command-guard.test.js               table test over the cases, plus hook process tests
-test/gateway/*.test.ts                   gateway tests: policy, config, approvals, CLI, end to end
-test/gateway/fake-downstream.ts          the fake MCP server for the end-to-end test
-test/SANITIZED.md                        what was changed in the cases before publication
-docs/red-team.md                         the case categories, with counts
-docs/adr/0001-non-blocking-approvals.md  why "ask" answers with an error instead of waiting
-tsconfig.json                            compiles src/ and test/ into dist/
-.github/workflows/ci.yml                 npm ci and npm test on Node 20 and 22
+src/command-guard.js                          the analyzer: analyze(command) -> { action, label, why }
+src/command-guard.d.ts                        its types, for the TypeScript gateway
+bin/claude-pretooluse-hook.js                 the Claude Code PreToolUse hook
+src/gateway/server.ts                         the MCP gateway: lists <server>__<tool>, decides, forwards
+src/gateway/policy.ts                         the policy engine (pure): evaluate(policy, call) -> verdict
+src/gateway/approvals.ts                      the approval queue in <stateDir>/approvals.json
+src/gateway/audit.ts                          the audit log, <stateDir>/audit.jsonl
+src/gateway/config.ts                         loads and checks the gateway config
+src/gateway/validate.ts                       field-by-field checks for the configs and the policies
+src/gateway/state-file.ts                     lock and atomic write for approvals.json and ledger.json
+src/gateway/cli.ts                            agent-gate serve, approvals ..., llm serve, usage
+src/llm/server.ts                             the LLM gateway: HTTP, keys, the steps of a call
+src/llm/routing.ts                            routing (pure): route(config, request) -> upstream and model
+src/llm/upstream.ts                           calls the upstreams: retries, backoff, fallback
+src/llm/budget.ts                             the cost estimate and the ledger in <stateDir>/ledger.json
+src/llm/leak-guard.ts                         the leak guard (pure): block or redact secrets in messages
+src/llm/usage-log.ts                          the usage log, <stateDir>/usage.jsonl
+src/llm/config.ts                             loads and checks the LLM gateway config
+bin/agent-gate.js                             the CLI entry point (runs the build in dist/)
+policy.example.json                           the red lines as a gateway policy
+gateway.config.example.json                   a config that proxies the fake test server
+llm-policy.example.json                       the leak guard rules
+llm-gateway.config.example.json               an LLM gateway config for the fake upstream
+test/cases.json                               239 cases: id, category, expect, cmd
+test/command-guard.test.js                    table test over the cases, plus hook process tests
+test/gateway/*.test.ts                        gateway tests: policy, config, approvals, CLI, end to end
+test/gateway/fake-downstream.ts               the fake MCP server for the end-to-end test
+test/llm/*.test.ts                            LLM gateway tests: routing, budget, leak guard, upstream, end to end
+test/llm/fake-upstream.ts                     a fake OpenAI-compatible provider for the tests and the example
+test/llm/fake-secrets.ts                      every fake secret the tests use, in one file
+test/SANITIZED.md                             what was changed in the cases before publication
+docs/red-team.md                              the case categories, with counts
+docs/adr/0001-non-blocking-approvals.md       why "ask" answers with an error instead of waiting
+docs/adr/0002-reserve-then-settle-budgets.md  why budgets reserve an estimate and settle after
+tsconfig.json                                 compiles src/ and test/ into dist/
+.github/workflows/ci.yml                      npm ci and npm test on Node 20 and 22
 ```
 
 `package.json` maps `#command-guard` to `src/command-guard.js` (its `imports` field), so the

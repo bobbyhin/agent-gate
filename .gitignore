@@ -4,3 +4,4 @@ node_modules
 dist/
 .agent-gate/
 gateway.config.json
+llm-gateway.config.json

@@ -1,7 +1,7 @@
 {
   "name": "agent-gate",
   "version": "0.1.0",
-  "description": "Guards between an AI agent and its actions: a shell command guard, and an MCP gateway that holds risky tool calls for a human.",
+  "description": "Guards between an AI agent and its actions: a shell command guard, an MCP gateway that holds risky tool calls for a human, and an LLM gateway with routing, budget caps and a leak guard.",
   "license": "MIT",
   "author": "Bodinwit Jitsomruetaikul",
   "private": false,
@@ -15,7 +15,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node --test test/*.test.js dist/test/gateway/*.test.js"
+    "test": "tsc -p tsconfig.json && node --test test/*.test.js dist/test/gateway/*.test.js dist/test/llm/*.test.js"
   },
   "engines": {
     "node": ">=20"
@@ -28,7 +28,10 @@
     "guardrails",
     "mcp",
     "mcp-gateway",
-    "human-in-the-loop"
+    "human-in-the-loop",
+    "llm-gateway",
+    "budget-caps",
+    "secret-scanning"
   ],
   "devDependencies": {
     "@types/node": "^20.19.43",

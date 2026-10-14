@@ -93,7 +93,8 @@ function server(raw: unknown, at: string): ServerConfig {
   return result;
 }
 
-function readJson(file: string, what: string): unknown {
+/** Reads and parses a JSON file; any failure is a ConfigError that names the file. */
+export function readJson(file: string, what: string): unknown {
   let content: string;
   try {
     content = fs.readFileSync(file, "utf8");

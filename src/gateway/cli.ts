@@ -1,7 +1,11 @@
-// The agent-gate command line: run the gateway, and let a human answer approval requests.
+// The agent-gate command line: run the MCP gateway and let a human answer approval requests; run
+// the LLM gateway and show what each gateway key has spent.
 
 import { parseArgs } from "node:util";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { formatUsd } from "../llm/budget.js";
+import { loadLeakPolicy, loadLlmConfig } from "../llm/config.js";
+import { openLedger, startLlmGateway } from "../llm/server.js";
 import { ApprovalError, ApprovalStore, canonicalJson, isLive, type Approval } from "./approvals.js";
 import { loadConfig, loadPolicy } from "./config.js";
 import { createGateway, SEPARATOR } from "./server.js";
@@ -13,9 +17,13 @@ const USAGE = `Usage:
   agent-gate approvals show <id> [--config <file>]    print one request in full
   agent-gate approvals approve <id> [--config <file>]
   agent-gate approvals deny <id> [--config <file>]
+  agent-gate llm serve [--config <file>]              run the LLM gateway (HTTP)
+  agent-gate usage [--json] [--config <file>]         LLM spend per gateway key: today, this month, caps
 
 "list" shows the requests that are waiting; --all also shows decided, used and expired ones.
-The config file is --config, else $AGENT_GATE_CONFIG, else ./gateway.config.json.
+The MCP gateway's config file is --config, else $AGENT_GATE_CONFIG, else ./gateway.config.json.
+The LLM gateway's ("llm serve", "usage") is --config, else $AGENT_GATE_LLM_CONFIG, else
+./llm-gateway.config.json.
 `;
 
 export interface Io {
@@ -52,19 +60,24 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
     return 0;
   }
   const configFile = values.config ?? process.env.AGENT_GATE_CONFIG ?? "gateway.config.json";
+  const llmConfigFile = values.config ?? process.env.AGENT_GATE_LLM_CONFIG ?? "llm-gateway.config.json";
   const [command, action, id, ...extra] = positionals;
   const isServe = command === "serve" && action === undefined;
   const isApprovals =
     command === "approvals" &&
     extra.length === 0 &&
     (action === "list" ? id === undefined : ["show", "approve", "deny"].includes(action ?? "") && id !== undefined);
-  if (!isServe && !isApprovals) {
+  const isLlmServe = command === "llm" && action === "serve" && id === undefined;
+  const isUsage = command === "usage" && action === undefined;
+  if (!isServe && !isApprovals && !isLlmServe && !isUsage) {
     io.err(USAGE);
     return 2;
   }
 
   try {
     if (isServe) return await serve(configFile);
+    if (isLlmServe) return await serveLlm(llmConfigFile);
+    if (isUsage) return usage(llmConfigFile, values.json, io);
     const config = loadConfig(configFile);
     const store = new ApprovalStore(config.stateDir, config.approvalTtlMs);
     if (action === "list") return list(store, values.all, values.json, io);
@@ -99,6 +112,39 @@ async function serve(configFile: string): Promise<number> {
     process.once("SIGTERM", resolve);
   });
   await gateway.close();
+  return 0;
+}
+
+async function serveLlm(configFile: string): Promise<number> {
+  const config = loadLlmConfig(configFile);
+  const gateway = await startLlmGateway(config, loadLeakPolicy(config.policyFile));
+  await new Promise<void>((resolve) => {
+    process.once("SIGINT", resolve);
+    process.once("SIGTERM", resolve);
+  });
+  await gateway.close();
+  return 0;
+}
+
+function usage(configFile: string, json: boolean, io: Io): number {
+  const config = loadLlmConfig(configFile);
+  const rows = openLedger(config).usage(config.keys);
+  if (json) {
+    io.out(`${JSON.stringify(rows, null, 2)}\n`);
+    return 0;
+  }
+  const first = rows[0];
+  const table = [
+    ["key", `today (${first?.day ?? ""} UTC)`, `this month (${first?.month ?? ""})`, "in flight"],
+    ...rows.map((r) => [
+      r.key,
+      `$${formatUsd(r.dayUsd)} of $${formatUsd(r.dailyUsd)}`,
+      `$${formatUsd(r.monthUsd)} of $${formatUsd(r.monthlyUsd)}`,
+      r.inFlight === 0 ? "0" : `${r.inFlight} ($${formatUsd(r.reservedUsd)} reserved)`,
+    ]),
+  ];
+  const widths = (table[0] ?? []).map((_, column) => Math.max(...table.map((row) => (row[column] ?? "").length)));
+  for (const row of table) io.out(`${row.map((cell, column) => cell.padEnd(widths[column] ?? 0)).join("  ").trimEnd()}\n`);
   return 0;
 }
 

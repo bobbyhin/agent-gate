@@ -1,4 +1,4 @@
-// Small helpers for checking hand-written JSON (the gateway config and the policy).
+// Small helpers for checking hand-written JSON (the configs and policies of both gateways).
 // Every error names the exact field, for example: policy.rules[2].decision must be one of ...
 
 export class ConfigError extends Error {
@@ -21,6 +21,23 @@ export function array(value: unknown, at: string): unknown[] {
 
 export function text(value: unknown, at: string): string {
   if (typeof value !== "string" || value === "") fail(`${at} must be a non-empty string`);
+  return value;
+}
+
+export function positiveNumber(value: unknown, at: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) fail(`${at} must be a positive number`);
+  return value;
+}
+
+export function nonNegativeNumber(value: unknown, at: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) fail(`${at} must be a number, 0 or more`);
+  return value;
+}
+
+export function integerIn(value: unknown, at: string, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    fail(`${at} must be a whole number from ${min} to ${max}`);
+  }
   return value;
 }
 
