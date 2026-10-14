@@ -1,0 +1,25 @@
+{
+  "name": "agent-gate",
+  "version": "0.1.0",
+  "description": "A guard between an AI coding agent and the shell: each shell command is passed, warned about, sent to a human, or blocked.",
+  "license": "MIT",
+  "author": "Bodinwit Jitsomruetaikul",
+  "private": false,
+  "main": "src/command-guard.js",
+  "bin": {
+    "agent-gate-hook": "bin/claude-pretooluse-hook.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "ai-agents",
+    "claude-code",
+    "pretooluse-hook",
+    "shell",
+    "guardrails"
+  ]
+}
