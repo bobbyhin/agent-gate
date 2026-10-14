@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Placeholders only; no value here is real.
+
+project_id = "your-project-id"
+region     = "europe-west1"
+image_tag  = "0.1.0"
+
+# Who may call the gateway. Each caller also needs a gateway key from the config.
+invoker_members = [
+  "serviceAccount:your-agent@your-project-id.iam.gserviceaccount.com",
+]
+
+# Defaults: deploy/k8s/llm-gateway.config.json and llm-policy.example.json.
+# gateway_config_file = "path/to/llm-gateway.config.json"
+# leak_policy_file    = "path/to/llm-policy.json"
+
+# Optional alert on this project's Google Cloud spend (not the LLM providers' bills).
+enable_budget_alert = false
+# billing_account_id = "XXXXXX-XXXXXX-XXXXXX"
+# budget_amount      = 50
+# budget_currency    = "USD"

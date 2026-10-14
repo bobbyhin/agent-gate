@@ -1,0 +1,46 @@
+{
+  "listen": { "host": "0.0.0.0", "port": 8787 },
+  "stateDir": "/var/lib/agent-gate",
+  "policy": "/etc/agent-gate/policy/llm-policy.json",
+  "upstreams": [
+    {
+      "name": "cheap",
+      "baseUrl": "http://fake-upstream:9101/v1",
+      "apiKeyEnv": "CHEAP_API_KEY",
+      "models": { "small": "fake-small-1" },
+      "pricePerMTok": { "input": 0.15, "output": 0.6 }
+    },
+    {
+      "name": "strong",
+      "baseUrl": "http://fake-upstream:9101/v1",
+      "apiKeyEnv": "STRONG_API_KEY",
+      "models": { "large": "fake-large-1" },
+      "pricePerMTok": { "input": 3, "output": 15 }
+    },
+    {
+      "name": "backup",
+      "baseUrl": "http://fake-upstream:9101/v1",
+      "apiKeyEnv": "BACKUP_API_KEY",
+      "models": { "large": "fake-large-2" },
+      "pricePerMTok": { "input": 3, "output": 15 }
+    }
+  ],
+  "routes": [
+    { "id": "classify-is-cheap", "when": { "task": "classify" }, "use": { "upstream": "cheap", "model": "small" } },
+    { "id": "code-is-strong", "when": { "task": "code" }, "use": { "upstream": "strong", "model": "large" }, "fallback": { "upstream": "backup" } },
+    { "id": "cheap-models", "use": { "upstream": "cheap" } },
+    { "id": "strong-models", "use": { "upstream": "strong" }, "fallback": { "upstream": "backup" } }
+  ],
+  "keys": [
+    {
+      "name": "demo-agent",
+      "sha256": "50f762c67f800bf8729d9abff1153a2a812d6b56a74c6422cce0dfd0cae4d6eb",
+      "dailyUsd": 0.01,
+      "monthlyUsd": 1
+    }
+  ],
+  "defaultMaxTokens": 1024,
+  "timeoutMs": 30000,
+  "retries": 1,
+  "backoffMs": 250
+}

@@ -1,0 +1,94 @@
+# The LLM gateway.
+#
+# replicas: 1 and strategy: Recreate, on purpose. The budget ledger is one file with one writer:
+# its lock is a directory on the local filesystem, which keeps two processes on one host apart,
+# not two pods. Two replicas would each check the caps against their own reads of the file and
+# could overwrite each other's bookings, so together they could pass a cap. Recreate stops the old
+# pod before the new one starts (a rolling update would run both for a while), at the cost of a
+# few seconds of downtime per rollout. More replicas need the ledger in a shared transactional
+# store first: docs/adr/0003-single-writer-state.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-gateway
+  labels:
+    app.kubernetes.io/name: llm-gateway
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llm-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llm-gateway
+    spec:
+      serviceAccountName: llm-gateway
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532 # the image's user (distroless "nonroot")
+        runAsGroup: 65532
+        fsGroup: 65532 # makes the state volume writable for that group
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: llm-gateway
+          image: agent-gate-llm-gateway
+          args: ["llm", "serve", "--config", "/etc/agent-gate/config/llm-gateway.config.json"]
+          ports:
+            - name: http
+              containerPort: 8787
+          envFrom:
+            # The provider API keys, one variable per apiKeyEnv in the config. The Secret is not in
+            # this directory: create it with kubectl create secret (deploy/README.md). A variable
+            # that is missing stops the gateway at startup, and the log names it, never a value.
+            - secretRef:
+                name: llm-gateway-provider-keys
+          # /healthz says the process is up. It does not call the providers, because a probe that
+          # did would spend money.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true # the state volume is the only writable path
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/agent-gate
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/agent-gate
+      volumes:
+        - name: config
+          configMap:
+            name: llm-gateway-config
+            items:
+              - key: llm-gateway.config.json
+                path: config/llm-gateway.config.json
+              - key: llm-policy.json
+                path: policy/llm-policy.json
+        - name: state
+          persistentVolumeClaim:
+            claimName: llm-gateway-state

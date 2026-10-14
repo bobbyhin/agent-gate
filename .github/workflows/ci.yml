@@ -21,3 +21,74 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+
+  # The deploy files, checked with no cloud account and no credentials: nothing is applied,
+  # pushed or deployed. See deploy/README.md.
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      KUBECONFORM_VERSION: "0.8.0"
+      KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.16.6
+          terraform_wrapper: false
+
+      - name: Terraform fmt, validate and test (mocked provider)
+        working-directory: deploy/terraform
+        run: |
+          terraform fmt -check -recursive -diff
+          terraform init -backend=false -input=false
+          terraform validate
+          terraform test
+
+      - name: Kustomize and kubeconform
+        run: |
+          curl -fsSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf kubeconform.tar.gz kubeconform
+          kubectl kustomize deploy/k8s | ./kubeconform -strict -summary
+
+      - name: Build the image
+        run: docker build -t agent-gate-llm-gateway:ci .
+
+      - name: Check the image's user and what it can write
+        run: |
+          docker run --rm --entrypoint /nodejs/bin/node agent-gate-llm-gateway:ci -e '
+            const fs = require("node:fs");
+            if (process.getuid() !== 65532) throw new Error(`runs as uid ${process.getuid()}`);
+            fs.writeFileSync("/var/lib/agent-gate/probe", "ok");
+            for (const file of ["/app/probe", "/app/bin/probe", "/app/dist/probe"]) {
+              try {
+                fs.writeFileSync(file, "x");
+              } catch (err) {
+                if (err.code === "EACCES") continue;
+                throw err;
+              }
+              throw new Error(`${file} is writable by the gateway user`);
+            }
+            console.log("uid 65532; /var/lib/agent-gate is writable; /app is not");
+          '
+
+      - name: Compose demo against the fake upstream
+        env:
+          GATEWAY_KEY: demo-gateway-key-not-a-secret
+        run: |
+          docker compose up --build --wait --wait-timeout 120
+          curl -fsS http://127.0.0.1:8787/healthz
+          echo
+          curl -fsS http://127.0.0.1:8787/v1/chat/completions \
+            -H "Authorization: Bearer $GATEWAY_KEY" \
+            -H "content-type: application/json" \
+            -d '{"model":"small","messages":[{"role":"user","content":"hello"}],"max_tokens":5}'
+          echo
+          docker compose exec -T llm-gateway /nodejs/bin/node bin/agent-gate.js usage
+
+      - name: Compose logs and clean-up
+        if: always()
+        run: |
+          docker compose logs
+          docker compose down -v

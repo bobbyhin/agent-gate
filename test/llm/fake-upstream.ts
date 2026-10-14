@@ -9,7 +9,8 @@
 // gateway never passes the key on.
 // It records every request it receives, so a test can prove which calls reached it.
 //
-// On its own: node dist/test/llm/fake-upstream.js [--port 9101] [--mode ok|fail]
+// On its own: node dist/test/llm/fake-upstream.js [--port 9101] [--mode ok|fail] [--host 127.0.0.1]
+// (the compose demo passes --host 0.0.0.0, because there the gateway runs in another container).
 
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -21,6 +22,8 @@ export interface FakeUpstreamOptions {
   /** The usage block to report. Left out: derived from the request (characters / 4 + 7, and 9). */
   usage?: { prompt_tokens: number; completion_tokens: number };
   port?: number;
+  /** The address to listen on. Left out: 127.0.0.1. */
+  host?: string;
 }
 
 export interface ReceivedRequest {
@@ -82,7 +85,7 @@ export async function startFakeUpstream(options: FakeUpstreamOptions): Promise<F
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(options.port ?? 0, "127.0.0.1", () => resolve());
+    server.listen(options.port ?? 0, options.host ?? "127.0.0.1", () => resolve());
   });
   const { port } = server.address() as AddressInfo;
   return {
@@ -102,8 +105,9 @@ if (require.main === module) {
     return at >= 0 ? process.argv[at + 1] : undefined;
   };
   const mode = arg("--mode") === "fail" ? "fail" : "ok";
-  startFakeUpstream({ mode, port: Number(arg("--port") ?? 9101) }).then(
-    (fake) => process.stderr.write(`fake upstream (${mode}) on ${fake.url}/v1\n`),
+  const host = arg("--host") ?? "127.0.0.1";
+  startFakeUpstream({ mode, host, port: Number(arg("--port") ?? 9101) }).then(
+    (fake) => process.stderr.write(`fake upstream (${mode}) on ${host}, port ${new URL(fake.url).port}, path /v1\n`),
     (err: unknown) => {
       process.stderr.write(`fake-upstream: ${String(err)}\n`);
       process.exit(1);

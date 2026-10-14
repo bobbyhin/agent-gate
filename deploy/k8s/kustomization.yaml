@@ -1,0 +1,34 @@
+# The LLM gateway on Kubernetes.
+#
+#   kubectl kustomize deploy/k8s      render the manifests
+#   kubectl apply -k deploy/k8s       apply them (create the provider-key Secret too; see deploy/README.md)
+#
+# Before a real deployment, edit llm-gateway.config.json (upstreams, prices, gateway key hashes)
+# and point the image at your registry:
+#   cd deploy/k8s && kustomize edit set image agent-gate-llm-gateway=<registry>/llm-gateway:<tag>
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: agent-gate
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - networkpolicy.yaml
+
+# The gateway config and the leak-guard policy as one ConfigMap. Its name gets a hash of the
+# content, so changing either file rolls the Deployment. llm-policy.json is a copy of
+# llm-policy.example.json (kustomize reads only files below this directory); npm test fails if the
+# two differ.
+configMapGenerator:
+  - name: llm-gateway-config
+    files:
+      - llm-gateway.config.json
+      - llm-policy.json
+
+images:
+  - name: agent-gate-llm-gateway
+    newTag: 0.1.0

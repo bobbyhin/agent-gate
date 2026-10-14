@@ -1,0 +1,41 @@
+{
+  "leakGuard": [
+    {
+      "id": "private-key",
+      "action": "block",
+      "regex": "-----BEGIN[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\\s\\S]*?(?:-----END[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)",
+      "description": "A PEM or OpenSSH private key block (RSA, EC, OPENSSH, PGP and others)."
+    },
+    {
+      "id": "aws-access-key-id",
+      "action": "block",
+      "regex": "\\b(?:AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16}\\b",
+      "description": "An AWS access key id (AKIA..., ASIA..., ABIA..., ACCA...)."
+    },
+    {
+      "id": "github-token",
+      "action": "block",
+      "regex": "\\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{40,255})\\b",
+      "description": "A GitHub token: ghp_, gho_, ghu_, ghs_, ghr_ or a fine-grained github_pat_."
+    },
+    {
+      "id": "slack-token",
+      "action": "block",
+      "regex": "\\bxox[abposr]-[A-Za-z0-9-]{10,250}",
+      "description": "A Slack token: xoxb-, xoxp-, xoxa-, xoxo-, xoxs-, xoxr-."
+    },
+    {
+      "id": "sk-style-key",
+      "action": "block",
+      "regex": "\\bsk-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{20,}",
+      "description": "A provider key that starts with sk- (sk-..., sk-proj-..., sk-ant-...), 20 or more characters with a digit."
+    },
+    {
+      "id": "api-key-assignment",
+      "action": "redact",
+      "flags": "i",
+      "regex": "(?:api[_-]?key|api[_-]?secret|secret[_-]?(?:access[_-]?)?key|client[_-]?secret|(?:access|auth|refresh|bearer)[_-]?token|password|passwd)[\"']?\\s*[:=]\\s*(?:\"((?=[^\"\\s]*[0-9])[^\"\\s]{12,})\"|'((?=[^'\\s]*[0-9])[^'\\s]{12,})'|((?=[A-Za-z0-9_+/=-]*[0-9])[A-Za-z0-9_+/=-]{16,})(?![A-Za-z0-9_.(+/=-]))",
+      "description": "A value given to a name such as api_key, client_secret, access_token or password: quoted with 12+ characters, or unquoted with 16+, and containing a digit. Only the value is replaced."
+    }
+  ]
+}

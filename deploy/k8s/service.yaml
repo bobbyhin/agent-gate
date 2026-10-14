@@ -1,0 +1,18 @@
+# Inside the cluster, clients use http://llm-gateway.agent-gate.svc.cluster.local:8787/v1 as their
+# OpenAI base URL and a gateway key as their API key. Plain HTTP: TLS between pods is left to a
+# service mesh, if the cluster has one.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-gateway
+  labels:
+    app.kubernetes.io/name: llm-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: llm-gateway
+  ports:
+    - name: http
+      port: 8787
+      targetPort: http
+      protocol: TCP

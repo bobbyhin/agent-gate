@@ -1,0 +1,18 @@
+# The gateway's state directory: ledger.json (budgets: settled spend and calls in flight) and
+# usage.jsonl. It must outlive the pod, or a restart would reset every budget to zero.
+# ReadWriteOnce: one node at a time, and the Deployment runs one pod. ReadWriteOncePod (one pod,
+# not one node) is stricter where the storage driver supports it.
+# The cluster's default StorageClass is used. A few MB are enough; some providers round small
+# disks up to their minimum size.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-gateway-state
+  labels:
+    app.kubernetes.io/name: llm-gateway
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

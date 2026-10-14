@@ -1,0 +1,11 @@
+# An allowlist: the build context holds only what the image build reads. Everything else, such
+# as local configs, state directories (.agent-gate/), dist/, node_modules/, .env files and the
+# Terraform working directory, never reaches the Docker daemon.
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!LICENSE
+!bin/agent-gate.js
+!src/
+!test/

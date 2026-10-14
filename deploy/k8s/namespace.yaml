@@ -1,0 +1,10 @@
+# The gateway's own namespace. Pod Security Admission enforces the "restricted" profile here, and
+# the gateway's pod meets it: non-root, no privilege escalation, every capability dropped,
+# RuntimeDefault seccomp, only configMap and persistentVolumeClaim volumes.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-gate
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

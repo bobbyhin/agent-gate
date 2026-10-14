@@ -1,0 +1,44 @@
+# Local demo: the LLM gateway image in front of the fake provider from the tests.
+# No real provider is called, no real key is used, and nothing is spent.
+#
+#   docker compose up --build --wait
+#   curl -s http://127.0.0.1:8787/healthz
+#   docker compose down -v      # -v also deletes the demo ledger
+#
+# deploy/README.md has a full walk-through. The gateway accepts the demo key
+# demo-gateway-key-not-a-secret (its SHA-256 is in deploy/compose/llm-gateway.config.json).
+name: agent-gate-demo
+
+services:
+  fake-upstream:
+    build:
+      context: .
+      target: fake-upstream
+    image: agent-gate-fake-upstream:0.1.0
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  llm-gateway:
+    build:
+      context: .
+      target: runtime
+    image: agent-gate-llm-gateway:0.1.0
+    depends_on: [fake-upstream]
+    ports:
+      - "127.0.0.1:8787:8787" # reachable from this machine only
+    environment:
+      # The fake upstream accepts any non-empty key; these are placeholders, not secrets.
+      CHEAP_API_KEY: fake-cheap
+      STRONG_API_KEY: fake-strong
+      BACKUP_API_KEY: fake-backup
+    volumes:
+      - ./deploy/compose/llm-gateway.config.json:/etc/agent-gate/config/llm-gateway.config.json:ro
+      - ./llm-policy.example.json:/etc/agent-gate/policy/llm-policy.json:ro
+      - gateway-state:/var/lib/agent-gate
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  gateway-state:

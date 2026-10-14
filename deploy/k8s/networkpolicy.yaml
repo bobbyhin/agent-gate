@@ -1,0 +1,49 @@
+# Who may connect to the gateway, and where the gateway may connect.
+#
+# Ingress: only from pods in namespaces labelled agent-gate/llm-client=true, on port 8787:
+#   kubectl label namespace <your-agents-namespace> agent-gate/llm-client=true
+# Egress: DNS on port 53 to any address (kube-dns, NodeLocal DNSCache and GKE's Cloud DNS answer
+# at different addresses), and HTTPS on port 443 to public IPv4 addresses only. The providers are
+# reachable; cluster services, private networks and the metadata server (169.254.169.254) are
+# not. An upstream on a private address, or a dual-stack cluster (add ::/0), needs a rule here.
+#
+# A NetworkPolicy does nothing unless the cluster's network plugin enforces it (for example GKE
+# Dataplane V2, Calico or Cilium). The kubelet's probes come from the node, not from a pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-gateway
+  labels:
+    app.kubernetes.io/name: llm-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: llm-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              agent-gate/llm-client: "true"
+      ports:
+        - protocol: TCP
+          port: 8787
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443

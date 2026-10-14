@@ -3,5 +3,12 @@ node_modules
 .DS_Store
 dist/
 .agent-gate/
-gateway.config.json
-llm-gateway.config.json
+# Local configs made from the examples at the root. Anchored, so deploy/*/llm-gateway.config.json is tracked.
+/gateway.config.json
+/llm-gateway.config.json
+# Terraform: local working files, state and real variable values. .terraform.lock.hcl is tracked.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log

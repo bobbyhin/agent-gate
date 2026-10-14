@@ -17,6 +17,9 @@ This repository has five parts:
   monthly budget caps per key, and a leak guard for secrets in prompts. See
   [LLM gateway](#llm-gateway).
 
+The LLM gateway also comes as a container image, with Kubernetes manifests and Terraform for Google
+Cloud Run. See [Deploy](#deploy).
+
 Status: v0.1.0. It is used daily on the author's own agent setup. It is a heuristic reader of
 shell commands, not a sandbox. See [Known limits](#known-limits).
 
@@ -811,6 +814,24 @@ provider key appears in any response, in the state files or in the gateway's log
 - Cancellation. A client that disconnects does not cancel the upstream call; the call finishes and
   is booked.
 
+## Deploy
+
+The LLM gateway ships as a container image, with three ways to run it.
+[deploy/README.md](deploy/README.md) has the steps and the details.
+
+| What | Where |
+| --- | --- |
+| A multi-stage image: distroless Node 22, non-root, production dependencies only, `HEALTHCHECK` on `/healthz` | `Dockerfile`, `.dockerignore` |
+| A local demo against the fake upstream, with no account and no key | `docker-compose.yml` |
+| Kubernetes with kustomize: one replica, probes, resource limits, a locked-down `securityContext`, a NetworkPolicy | `deploy/k8s/` |
+| Google Cloud Run with Terraform: Artifact Registry, a least-privilege service account, Secret Manager, a state bucket, 0 to 1 instance, an optional budget alert | `deploy/terraform/` |
+
+The gateway runs as one replica, because its budget ledger is a file with a single writer;
+[ADR 0003](docs/adr/0003-single-writer-state.md) says what it takes to run more. Nothing has been
+deployed to a real cloud project or cluster. The Terraform and the manifests are validated without
+credentials, locally and in CI; the image build and the compose demo run in CI only.
+deploy/README.md lists what ran where.
+
 ## Run the tests
 
 ```
@@ -832,7 +853,7 @@ codes, and an end-to-end test. That test starts `agent-gate serve` against a fak
 server, talks to it with a real MCP client, answers approvals with the real CLI, and checks what
 reached the downstream server and what was written to the audit log.
 
-The LLM gateway suite (`test/llm/`) runs 156 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 161 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file); a leak-guard table
 for every shipped rule, with 24 samples of prose and code that must pass untouched; retries and
@@ -841,12 +862,16 @@ test starts `agent-gate llm serve` against two fake upstream HTTP servers, one h
 always answers 500, and checks routing by alias and by `x-agent-task`, the fallback after a 500,
 costs settled from the upstream's `usage`, a 429 with no upstream call once a cap is reached,
 secrets blocked before any upstream call, redaction, a usage log without prompt text, 401 for an
-unknown key, and that no provider key ever appears in a response or a log. Every fake secret the
-tests use is in `test/llm/fake-secrets.ts`, assembled from pieces at run time, so no secret-shaped
-string appears in the source and secret scanners need no exceptions for this repository.
+unknown key, and that no provider key ever appears in a response or a log. Five more check the
+gateway configs under `deploy/`: they load, they use the container's paths, the deployable one
+refuses the demo key, and the Kubernetes copy of the leak-guard policy matches the example. Every
+fake secret the tests use is in `test/llm/fake-secrets.ts`, assembled from pieces at run time, so
+no secret-shaped string appears in the source and secret scanners need no exceptions for this
+repository.
 
 Current result: **239/239 cases pass** (245/245 shell guard tests, 118/118 MCP gateway tests,
-156/156 LLM gateway tests), on Node 20 and 22. CI runs `npm ci` and `npm test` on both.
+161/161 LLM gateway tests), on Node 20 and 22. CI runs `npm ci` and `npm test` on both, and a
+second job checks the deploy files (see [Deploy](#deploy)).
 
 ## Repository layout
 
@@ -874,19 +899,29 @@ policy.example.json                           the red lines as a gateway policy
 gateway.config.example.json                   a config that proxies the fake test server
 llm-policy.example.json                       the leak guard rules
 llm-gateway.config.example.json               an LLM gateway config for the fake upstream
+Dockerfile                                    the LLM gateway image (and the demo's fake upstream image)
+.dockerignore                                 what the image build may read: an allowlist
+docker-compose.yml                            local demo: the gateway image in front of the fake upstream
+deploy/README.md                              compose, Kubernetes and Cloud Run steps; what was checked
+deploy/compose/llm-gateway.config.json        the demo's gateway config
+deploy/k8s/                                   kustomize: Deployment, Service, PVC, NetworkPolicy, ConfigMap
+deploy/k8s/llm-gateway.config.json            the config template for Kubernetes and Cloud Run
+deploy/terraform/                             Cloud Run, Artifact Registry, Secret Manager, state bucket
+deploy/terraform/tests/                       plan-only Terraform tests with a mocked provider
 test/cases.json                               239 cases: id, category, expect, cmd
 test/command-guard.test.js                    table test over the cases, plus hook process tests
 test/gateway/*.test.ts                        gateway tests: policy, config, approvals, CLI, end to end
 test/gateway/fake-downstream.ts               the fake MCP server for the end-to-end test
-test/llm/*.test.ts                            LLM gateway tests: routing, budget, leak guard, upstream, end to end
-test/llm/fake-upstream.ts                     a fake OpenAI-compatible provider for the tests and the example
+test/llm/*.test.ts                            LLM gateway tests: routing, budget, leak guard, upstream, end to end, deploy configs
+test/llm/fake-upstream.ts                     a fake OpenAI-compatible provider for the tests, the example and the demo
 test/llm/fake-secrets.ts                      every fake secret the tests use, in one file
 test/SANITIZED.md                             what was changed in the cases before publication
 docs/red-team.md                              the case categories, with counts
 docs/adr/0001-non-blocking-approvals.md       why "ask" answers with an error instead of waiting
 docs/adr/0002-reserve-then-settle-budgets.md  why budgets reserve an estimate and settle after
+docs/adr/0003-single-writer-state.md          why the gateway runs as one replica, and the way to more
 tsconfig.json                                 compiles src/ and test/ into dist/
-.github/workflows/ci.yml                      npm ci and npm test on Node 20 and 22
+.github/workflows/ci.yml                      npm test on Node 20 and 22; checks and a build of the deploy files
 ```
 
 `package.json` maps `#command-guard` to `src/command-guard.js` (its `imports` field), so the
