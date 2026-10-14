@@ -122,7 +122,7 @@ This is the history of the analyzer's earlier versions, from the author's notes:
 | --- | --- | --- |
 | v2 (regex rules) | red team 1, 48 cases | 21 of 48 got through |
 | v3 | Codex as the attacker, 55 cases | 43 of 55 got through |
-| v4 | red team 2, 38 cases | 20 of 38 got through; 16 cases were worse than in the previous version |
+| v4 | red team 2, 38 cases | 20 of 38 got through; in 16 cases it did worse than the hook it was meant to replace |
 | v5 (this code) | all of the above plus the earlier suites, 239 cases | 239 of 239 get the expected decision |
 
 Before v5, an oracle ran the real hook against 22 bypasses and all 22 passed silently, including
@@ -233,9 +233,10 @@ docs/red-team.md                the case categories, with counts
 
 ## Origin
 
-agent-gate started as a private hook the author wrote for their own Claude Code setup, called
-`safety-blocker` there (the name still appears inside a few test commands). The code here is its
-fifth version. The comments, labels and messages were written in Thai and have been translated to
+agent-gate started as a private hook for the author's own Claude Code setup, called
+`safety-blocker` there (the name still appears inside a few test commands). The author designed
+it and directed Claude Code and Codex as coding agents, and Codex also served as one of the
+attackers in the red-team rounds. The code here is its fifth version. The comments, labels and messages were written in Thai and have been translated to
 English, and personal paths and names were removed from the test cases. `test/SANITIZED.md` lists
 every case that was changed.
 
