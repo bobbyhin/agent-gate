@@ -4,13 +4,15 @@ A guard that sits between an AI coding agent and the shell. Before the agent run
 command, agent-gate reads the command and decides one of four things: **pass**, **warn**,
 **ask** a human, or **block**.
 
-This repository has three parts:
+This repository has four parts:
 
 - `src/command-guard.js`: the analyzer. One function, no dependencies. `analyze(command)`
   returns `{ action, label, why }`.
 - `bin/claude-pretooluse-hook.js`: a Claude Code `PreToolUse` hook built on the analyzer.
 - `test/cases.json`: 239 commands, each with the decision it must get. They come from red-team
   rounds against earlier versions of the analyzer.
+- `src/gateway/`: an MCP gateway (TypeScript) that brings the same four decisions to MCP tool
+  calls and holds risky calls until a human approves them. See [MCP gateway](#mcp-gateway).
 
 Status: v0.1.0. It is used daily on the author's own agent setup. It is a heuristic reader of
 shell commands, not a sandbox. See [Known limits](#known-limits).
@@ -206,30 +208,307 @@ analyze("ls");
 `action` is always one of `pass`, `warn`, `ask`, `block`. `label` is present unless the action is
 `pass`, and `why` is present for `ask`.
 
+## MCP gateway
+
+The shell guard only sees shell commands. Spending money and posting usually happen through tools
+instead: an MCP server for payments, email, chat or a code host. The MCP gateway is the layer for
+those. It is a stdio MCP server that sits between the agent and one or more downstream MCP
+servers. The agent sees every downstream tool as `<server>__<tool>`, and before a call is
+forwarded, a policy decides one of four things:
+
+| Decision | What happens |
+| --- | --- |
+| allow | The call is forwarded. The downstream result comes back unchanged. |
+| warn | The same as allow, plus a note on the gateway's stderr. |
+| ask | The call is not forwarded. A pending approval is recorded, and the agent gets an error result that names its id. A human answers it with the CLI. |
+| block | The call is not forwarded and not queued. The agent gets an error result. |
+
+Every decision is written to an audit log. The gateway is written in TypeScript on the official
+MCP SDK (`@modelcontextprotocol/sdk`), which is its only runtime dependency besides `zod`.
+
+Status: new. It is covered by the tests in [Run the tests](#run-the-tests), but unlike the shell
+guard it has not been used day to day yet.
+
+### Set it up
+
+```
+npm install
+npm run build
+cp gateway.config.example.json gateway.config.json
+```
+
+`gateway.config.json` lists the downstream servers, the policy file and a directory for state:
+
+```json
+{
+  "servers": [
+    {
+      "name": "demo",
+      "command": "node",
+      "args": ["dist/test/gateway/fake-downstream.js"]
+    }
+  ],
+  "policy": "policy.example.json",
+  "stateDir": ".agent-gate",
+  "approvalTtlHours": 24
+}
+```
+
+The example proxies the fake server from the end-to-end test. Its three tools (`echo`,
+`delete_file`, `run_command`) only pretend, so the whole flow can be tried safely; its path is
+relative, so run the gateway from the repository root. For real use, list real servers, for
+example `{ "name": "files", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/srv/agent-work"] }`.
+
+- `name` becomes the tool prefix. It may use letters, digits, `-` and single `_`, never `__`.
+- `command` and `args` start the server. A server gets only a short list of safe environment
+  variables (such as `PATH` and `HOME`), not the gateway's whole environment. Add an `env` object
+  for the variables it needs.
+- `policy` and `stateDir` are resolved against the config file's directory.
+- `approvalTtlHours` (default 24) is how long a request stays open. `auditArguments` (default
+  `false`) is explained under [Audit log](#audit-log).
+
+Then give the agent the gateway instead of the downstream servers. For Claude Code, in `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "gate": {
+      "command": "node",
+      "args": ["/path/to/agent-gate/bin/agent-gate.js", "serve", "--config", "/path/to/gateway.config.json"]
+    }
+  }
+}
+```
+
+Some clients add their own prefix (Claude Code shows `mcp__gate__demo__delete_file`) and limit
+the length of tool names, so keep server names short.
+
+### An approval, step by step
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant G as agent-gate
+    participant Q as approvals.json
+    participant H as Human (CLI)
+    participant D as Downstream server
+    A->>G: demo__delete_file, path notes/old.md
+    G->>Q: record a pending request
+    G-->>A: error result: needs a human, approval id ap-f646780e
+    H->>Q: agent-gate approvals approve ap-f646780e
+    A->>G: the same call again
+    G->>Q: find the approval, mark it used
+    G->>D: delete_file, path notes/old.md
+    D-->>G: result
+    G-->>A: the result, unchanged
+```
+
+In a checkout, `agent-gate` is `node bin/agent-gate.js`. This is a real run with the example
+policy and the fake server. The agent calls `demo__delete_file` with `{"path": "notes/old.md"}` and gets an error
+result (`isError: true`) with this text:
+
+```
+agent-gate: this call needs a human decision, so it was not run.
+Reason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)
+Approval id: ap-f646780e (expires 2026-10-15T08:55:58.716Z)
+A human can approve it with: agent-gate approvals approve ap-f646780e
+Once it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.
+Do not try to get the same result another way.
+```
+
+The human looks at the queue and approves:
+
+```
+$ agent-gate approvals list
+ap-f646780e  pending  demo__delete_file
+  why:     Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)
+  args:    {"path":"notes/old.md"}
+  created: 2026-10-14T08:55:58.716Z  expires: 2026-10-15T08:55:58.716Z
+
+$ agent-gate approvals approve ap-f646780e
+approved ap-f646780e: demo__delete_file {"path":"notes/old.md"}
+The agent can now make this exact call once, until 2026-10-15T08:55:58.716Z.
+```
+
+The agent makes the same call again. This time it is forwarded, and the agent gets the downstream
+server's result, `pretended to delete notes/old.md`. If it makes the call a third time, it gets a
+new approval id: the approval was used up.
+
+The CLI commands are:
+
+```
+agent-gate approvals list [--all] [--json]   waiting requests (--all: also decided, used, expired)
+agent-gate approvals show <id>               one request in full, with all of its arguments
+agent-gate approvals approve <id>
+agent-gate approvals deny <id>
+```
+
+Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.config.json`).
+
+### Approval rules
+
+- An approval is bound to one exact call: the server, the tool, and a SHA-256 hash of the
+  arguments as canonical JSON (object keys sorted). Changing any argument value needs a new
+  approval. The order of keys does not matter.
+- It lets that call through once. It is marked used before the call is forwarded, so a call that
+  then fails downstream has still used it up.
+- Repeating a call that is still waiting does not queue a second request. The agent gets the same
+  id back.
+- A denied call stays denied. Repeating it gets "a human denied this exact call", and nothing new is
+  queued until the denial expires. `deny` also takes back an approval that has not been used yet.
+- A request expires `approvalTtlHours` after it was made. An expired request cannot be approved,
+  and an expired approval lets nothing through. The next identical call queues a new request.
+- `block` is never queued and cannot be approved.
+- The queue is one file, `<stateDir>/approvals.json` (mode 0600). Every change is a locked
+  read-modify-write, and every write goes to a temporary file that is flushed and then renamed
+  over the old one. A damaged file is an error, never an empty queue, because an empty queue would
+  forget denials.
+
+Why the gateway answers with an error and lets the agent retry, instead of holding the call open
+until a human answers: [docs/adr/0001-non-blocking-approvals.md](docs/adr/0001-non-blocking-approvals.md).
+
+### Policy
+
+A policy is JSON: a default decision and an ordered list of rules. The first rule that matches a
+call decides; when none matches, the default decides. The engine (`src/gateway/policy.ts`) is a
+pure function with no I/O, so the same policy and call always get the same verdict, and every
+verdict carries the id of the rule that decided and a `why`.
+
+`policy.example.json` maps the red lines:
+
+| Rule | Matches | Decision |
+| --- | --- | --- |
+| `no-self-approval` | a shell tool whose command answers an approval or touches `.agent-gate` | block |
+| `protect-gateway-state` | any tool whose `path` argument points into `.agent-gate` | block |
+| `shell-guard` | a shell tool (`run_command`, `exec`, `bash` and others): its `command` goes through the shell guard | the guard's decision |
+| `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order | ask |
+| `red-line-2-public` | post, publish, send, tweet, retweet, reply, comment, email, share | ask |
+| `red-line-3-ship` | push, merge, deploy, create pull request, create pr, create release | ask |
+| `red-line-4-delete` | delete, remove, drop, destroy, overwrite, purge, erase, wipe, truncate | ask |
+| default | everything else | allow |
+
+A rule can match on any of these, and all that are present must match:
+
+- `server` and `tool`: a glob, `{ "regex": "...", "flags": "i" }`, or a list of them. A glob must
+  match the whole name, ignoring case; `*` matches any run of characters and `?` one character.
+  Regexes are objects rather than `/.../` strings so that a path such as `/etc/` is never read as
+  one. The `g` and `y` flags are refused: they make `test()` remember where it stopped, so a rule
+  could match one call and miss the next.
+- `toolWords`: words or phrases. The tool name is split into lowercase words at every character
+  that is not a letter or digit and at camelCase humps, so `delete_file`, `deleteFile` and
+  `delete-file` all read as "delete file". Whole
+  words must match: `post` matches `post_message` and `publishPost` but not `postgres_query`, and
+  `comment` matches `add_comment` but not `list_comments`.
+- `args`: argument name to matcher. Each listed argument must be present and match. Strings are
+  matched as they are; other values as their JSON text.
+
+A rule with `"type": "shell"` has no fixed decision. It runs the shell guard's `analyze()` on one
+string argument (`"argument"`, default `command`) and maps pass, warn, ask and block to allow,
+warn, ask and block. A missing or non-string argument is asked about. If the analyzer itself fails,
+the legacy rules decide and anything they do not block is asked about, as in the hook.
+
+Mistakes in the policy or the config stop the gateway at startup with the field named, for
+example `policy.rules[2].decision must be one of allow, warn, ask, block`. Unknown fields are
+errors too, so a typo cannot silently turn a rule off.
+
+### Audit log
+
+Every decision appends one JSON line to `<stateDir>/audit.jsonl` (mode 0600). These are the
+lines from the run above, plus a blocked shell call:
+
+```json
+{"ts":"2026-10-14T08:55:58.727Z","server":"demo","tool":"delete_file","decision":"ask","rule":"red-line-4-delete","why":"Red line 4: this tool looks like it deletes or overwrites data.","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","forwarded":false,"approvalId":"ap-f646780e"}
+{"ts":"2026-10-14T08:55:58.931Z","server":"demo","tool":"delete_file","decision":"ask","rule":"red-line-4-delete","why":"Red line 4: this tool looks like it deletes or overwrites data.","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","forwarded":true,"approvalId":"ap-f646780e"}
+{"ts":"2026-10-14T08:55:58.938Z","server":"demo","tool":"delete_file","decision":"ask","rule":"red-line-4-delete","why":"Red line 4: this tool looks like it deletes or overwrites data.","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","forwarded":false,"approvalId":"ap-ed722973"}
+{"ts":"2026-10-14T08:55:58.940Z","server":"demo","tool":"run_command","decision":"block","rule":"shell-guard","why":"shell guard: force push","argsHash":"sha256:2c29a8326969480173c60a2f1083c6dbf5b73aa28539723243a204c8793dc5e9","forwarded":false}
+```
+
+`forwarded` says whether the call reached the downstream server. Argument values are not logged:
+tool arguments often carry secrets (tokens, passwords) and personal data (names, message bodies),
+while an audit log is kept for a long time and read by more people than the call itself. The hash
+is enough to tie a line to an approval, or to a call that someone already has in hand. Set
+`"auditArguments": true` to log the values anyway. If a line cannot be written, the call is not
+run.
+
+### What the gateway does not cover
+
+- It trusts the downstream server's tool names, and it cannot see what a tool does inside. A tool
+  called `sync` that pushes, or `get_report` that also sends an email, gets the default decision.
+  The filesystem reference server's `write_file` replaces a file's content, but its name has no
+  red-line word, so the example policy allows it. For an unfamiliar server, consider
+  `"default": "ask"` with allow rules for the tools you know only read.
+- Word matching has false positives too: `get_email` and `get_comment` are asked about. Put an
+  allow rule for them before the red-line rules.
+- It does not use MCP tool annotations such as `destructiveHint`. They come from the same server
+  whose names it already has to trust.
+- Argument matching is text matching. It does not resolve paths, symlinks or the working
+  directory.
+- An approval is only as safe as the place it is stored. Anyone who can run the CLI or write
+  `<stateDir>` can approve, including an agent that has its own shell or file tools outside the
+  gateway. The example policy stops this through the gateway (`no-self-approval`,
+  `protect-gateway-state`), but an agent's native shell, such as Claude Code's Bash tool, never
+  passes through it. Keep the state directory out of the agent's reach, for example owned by
+  another OS user.
+- Only tools are proxied. Resources, prompts, and requests from a downstream server back to the
+  client (sampling, elicitation) are not.
+- Downstream servers are started once. If one fails to start, the gateway does not start; if one
+  dies later, its calls fail until the gateway is restarted.
+- Downstream calls use the SDK's default 60-second request timeout, and progress notifications
+  are not relayed, so a tool that runs longer than a minute fails through the gateway.
+
 ## Run the tests
 
 ```
+npm install
 npm test
 ```
 
-This runs `node --test` (Node 20 or newer, no dependencies). It runs 245 tests: the 239 cases in
-`test/cases.json`, a check that the file is well formed, and 5 tests that run the hook as a child
-process. Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts
-either of the last two (3 cases).
+`npm test` compiles the TypeScript and then runs `node --test` (Node 20 or newer) over two suites.
 
-Current result: **239/239 cases pass** (245/245 tests). CI runs the same command on Node 20 and 22.
+The shell guard suite needs no dependencies; `node --test test/command-guard.test.js` runs it on
+its own. It runs 245 tests: the 239 cases in `test/cases.json`, a check that the file is well
+formed, and 5 tests that run the hook as a child process. Each case has an `expect` of `pass`,
+`warn`, `ask` or `block`; `ask_or_block` accepts either of the last two (3 cases).
+
+The gateway suite (`test/gateway/`) runs 118 tests: a policy table for each red line and for the
+shell rule (every case in `test/cases.json` is also run through the gateway's shell rule), config
+and policy validation, the approval store with a clock the test controls, the CLI's exit codes,
+and an end-to-end test. That test starts `agent-gate serve` against a fake downstream server,
+talks to it with a real MCP client, answers approvals with the real CLI, and checks what reached
+the downstream server and what was written to the audit log.
+
+Current result: **239/239 cases pass** (245/245 shell guard tests, 118/118 gateway tests), on Node
+20 and 22. CI runs `npm ci` and `npm test` on both.
 
 ## Repository layout
 
 ```
-src/command-guard.js            the analyzer: analyze(command) -> { action, label, why }
-bin/claude-pretooluse-hook.js   the Claude Code PreToolUse hook
-test/cases.json                 239 cases: id, category, expect, cmd
-test/command-guard.test.js      table test over the cases, plus hook process tests
-test/SANITIZED.md               what was changed in the cases before publication
-docs/red-team.md                the case categories, with counts
-.github/workflows/ci.yml        npm test on Node 20 and 22
+src/command-guard.js                     the analyzer: analyze(command) -> { action, label, why }
+src/command-guard.d.ts                   its types, for the TypeScript gateway
+bin/claude-pretooluse-hook.js            the Claude Code PreToolUse hook
+src/gateway/server.ts                    the MCP gateway: lists <server>__<tool>, decides, forwards
+src/gateway/policy.ts                    the policy engine (pure): evaluate(policy, call) -> verdict
+src/gateway/approvals.ts                 the approval queue in <stateDir>/approvals.json
+src/gateway/audit.ts                     the audit log, <stateDir>/audit.jsonl
+src/gateway/config.ts                    loads and checks the gateway config
+src/gateway/validate.ts                  field-by-field checks for the config and the policy
+src/gateway/cli.ts                       agent-gate serve, agent-gate approvals ...
+bin/agent-gate.js                        the CLI entry point (runs the build in dist/)
+policy.example.json                      the red lines as a gateway policy
+gateway.config.example.json              a config that proxies the fake test server
+test/cases.json                          239 cases: id, category, expect, cmd
+test/command-guard.test.js               table test over the cases, plus hook process tests
+test/gateway/*.test.ts                   gateway tests: policy, config, approvals, CLI, end to end
+test/gateway/fake-downstream.ts          the fake MCP server for the end-to-end test
+test/SANITIZED.md                        what was changed in the cases before publication
+docs/red-team.md                         the case categories, with counts
+docs/adr/0001-non-blocking-approvals.md  why "ask" answers with an error instead of waiting
+tsconfig.json                            compiles src/ and test/ into dist/
+.github/workflows/ci.yml                 npm ci and npm test on Node 20 and 22
 ```
+
+`package.json` maps `#command-guard` to `src/command-guard.js` (its `imports` field), so the
+compiled gateway in `dist/` loads the analyzer straight from `src/`, with no copy.
 
 ## Origin
 

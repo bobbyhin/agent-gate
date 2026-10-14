@@ -1,0 +1,12 @@
+{
+  "servers": [
+    {
+      "name": "demo",
+      "command": "node",
+      "args": ["dist/test/gateway/fake-downstream.js"]
+    }
+  ],
+  "policy": "policy.example.json",
+  "stateDir": ".agent-gate",
+  "approvalTtlHours": 24
+}

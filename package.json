@@ -1,16 +1,21 @@
 {
   "name": "agent-gate",
   "version": "0.1.0",
-  "description": "A guard between an AI coding agent and the shell: each shell command is passed, warned about, sent to a human, or blocked.",
+  "description": "Guards between an AI agent and its actions: a shell command guard, and an MCP gateway that holds risky tool calls for a human.",
   "license": "MIT",
   "author": "Bodinwit Jitsomruetaikul",
   "private": false,
   "main": "src/command-guard.js",
   "bin": {
+    "agent-gate": "bin/agent-gate.js",
     "agent-gate-hook": "bin/claude-pretooluse-hook.js"
   },
+  "imports": {
+    "#command-guard": "./src/command-guard.js"
+  },
   "scripts": {
-    "test": "node --test"
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test test/*.test.js dist/test/gateway/*.test.js"
   },
   "engines": {
     "node": ">=20"
@@ -20,6 +25,17 @@
     "claude-code",
     "pretooluse-hook",
     "shell",
-    "guardrails"
-  ]
+    "guardrails",
+    "mcp",
+    "mcp-gateway",
+    "human-in-the-loop"
+  ],
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.7"
+  }
 }

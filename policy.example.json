@@ -1,0 +1,48 @@
+{
+  "default": "allow",
+  "rules": [
+    {
+      "id": "no-self-approval",
+      "tool": ["run_command", "run_shell_command", "execute_command", "exec", "shell", "shell_exec", "bash"],
+      "args": { "command": { "regex": "approvals\\s+(approve|deny)\\b|\\.agent-gate\\b" } },
+      "decision": "block",
+      "why": "An agent must not answer its own approval requests or touch the gateway's state."
+    },
+    {
+      "id": "protect-gateway-state",
+      "args": { "path": ["*.agent-gate", "*.agent-gate/*"] },
+      "decision": "block",
+      "why": "The approval queue and the audit log are off limits to agents."
+    },
+    {
+      "id": "shell-guard",
+      "type": "shell",
+      "tool": ["run_command", "run_shell_command", "execute_command", "exec", "shell", "shell_exec", "bash"],
+      "argument": "command"
+    },
+    {
+      "id": "red-line-1-money",
+      "toolWords": ["pay", "charge", "purchase", "buy", "transfer", "checkout", "refund", "create payment", "place order", "create order"],
+      "decision": "ask",
+      "why": "Red line 1: this tool looks like it spends or moves money."
+    },
+    {
+      "id": "red-line-2-public",
+      "toolWords": ["post", "publish", "send", "tweet", "retweet", "reply", "comment", "email", "share"],
+      "decision": "ask",
+      "why": "Red line 2: this tool looks like it posts or sends something from a real account."
+    },
+    {
+      "id": "red-line-3-ship",
+      "toolWords": ["push", "merge", "deploy", "create pull request", "create pr", "create release"],
+      "decision": "ask",
+      "why": "Red line 3: this tool looks like a push, merge, pull request, release or deploy."
+    },
+    {
+      "id": "red-line-4-delete",
+      "toolWords": ["delete", "remove", "drop", "destroy", "overwrite", "purge", "erase", "wipe", "truncate"],
+      "decision": "ask",
+      "why": "Red line 4: this tool looks like it deletes or overwrites data."
+    }
+  ]
+}
