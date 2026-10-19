@@ -46,10 +46,10 @@ What lands where:
 - **warn** is for `DROP DATABASE|TABLE|SCHEMA`, `TRUNCATE TABLE`, `kill -9` and `taskkill /f`.
 
 Why most of it asks instead of blocking: the first version blocked dangerous commands outright.
-In 46 days of the author's own logs it blocked 34 times, and about 32 of those were legitimate
-work (cleaning a scratch folder, `__pycache__`, a `.venv`). The author also noticed the agent
-working around those blocks quietly, 32 times, without the operator knowing. Asking puts the
-decision in front of a human instead of hiding it.
+In 46 days of the author's own logs it blocked 33 times. Read one by one, about 32 of those were
+legitimate work (23 were the agent cleaning its own scratch folder, about 5 were text that only
+mentioned a command), and none of them stopped a real disaster. Asking puts the decision in
+front of a human instead of refusing work that was fine.
 
 ## The red lines
 
