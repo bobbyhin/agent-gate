@@ -20,8 +20,9 @@ This repository has five parts:
 The LLM gateway also comes as a container image, with Kubernetes manifests and Terraform for Google
 Cloud Run. See [Deploy](#deploy).
 
-Status: v0.1.0. It is used daily on the author's own agent setup. It is a heuristic reader of
-shell commands, not a sandbox. See [Known limits](#known-limits).
+Status: v0.1.0. It is extracted from the guard that runs daily on the author's own agent setup,
+where a newer private copy is in use. It is a heuristic reader of shell commands, not a sandbox.
+See [Known limits](#known-limits).
 
 ## The four decisions
 

@@ -4,6 +4,10 @@
   "description": "Guards between an AI agent and its actions: a shell command guard, an MCP gateway that holds risky tool calls for a human, and an LLM gateway with routing, budget caps and a leak guard.",
   "license": "MIT",
   "author": "Bodinwit Jitsomruetaikul",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bobbyhin/agent-gate.git"
+  },
   "private": false,
   "main": "src/command-guard.js",
   "bin": {
