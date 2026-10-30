@@ -23,6 +23,22 @@ export const FAKE = {
   githubFineGrainedToken: join("github", "_pat_", "FAKEfakeFAKEfake0000_000000000000000000000000000000000000"),
   slackToken: join("xo", "xb-", "0000000000-0000000000-FAKEfakeFAKEfake"),
   skKey: join("sk-", "proj-", "FAKEfake0000FAKEfake0000"),
+  /** hf_ and exactly 34 letters or digits. */
+  huggingfaceToken: join("hf", "_", "FAKEfake".repeat(4), "00"),
+  /** AIza and 35 more characters; this one ends in "-", which a \b at the end would miss. */
+  googleApiKey: join("AI", "za", "FAKE-fake_".repeat(3), "0000-"),
+  /** The shape of a Google Cloud service-account key file, with a made-up key in it. */
+  serviceAccountJson: JSON.stringify(
+    {
+      type: "service_account",
+      project_id: "fake-project-0000",
+      private_key_id: "0000fake0000fake0000fake0000fake0000fake",
+      private_key: join("-----BEGIN ", "PRIVATE KEY-----\n", "FAKEFAKEFAKEFAKE\n", "-----END ", "PRIVATE KEY-----\n"),
+      client_email: "fake-sa@fake-project-0000.iam.example",
+    },
+    null,
+    2,
+  ),
   /** A value for api_key = "...": long enough and with a digit, so the redact rule takes it. */
   apiKeyValue: "fake0000fake0000",
 } as const;

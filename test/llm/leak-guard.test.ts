@@ -18,18 +18,26 @@ function passed(result: GuardResult): Extract<GuardResult, { action: "pass" }> {
 }
 
 describe("llm-policy.example.json", () => {
-  it("has the six shipped rules, in this order", () => {
+  it("has the nine shipped rules, in this order", () => {
     assert.deepEqual(
       policy.rules.map((r) => [r.id, r.action]),
       [
+        ["gcp-service-account-key", "block"],
         ["private-key", "block"],
         ["aws-access-key-id", "block"],
         ["github-token", "block"],
         ["slack-token", "block"],
         ["sk-style-key", "block"],
+        ["huggingface-token", "block"],
+        ["google-api-key", "block"],
         ["api-key-assignment", "redact"],
       ],
     );
+  });
+
+  it("the fake values have the real formats' lengths", () => {
+    assert.equal(FAKE.huggingfaceToken.length, "hf_".length + 34);
+    assert.equal(FAKE.googleApiKey.length, "AIza".length + 35);
   });
 });
 
@@ -45,6 +53,11 @@ describe("leak guard: secrets are blocked by rule id", () => {
     ["slack-token", `SLACK_BOT_TOKEN=${FAKE.slackToken}`],
     ["sk-style-key", `OPENAI_API_KEY=${FAKE.skKey}`],
     ["sk-style-key", `client = Client(api_key="${FAKE.skKey}")`],
+    ["gcp-service-account-key", `is this key file valid?\n${FAKE.serviceAccountJson}`],
+    ["huggingface-token", `HF_TOKEN=${FAKE.huggingfaceToken}`],
+    ["huggingface-token", `huggingface-cli login --token ${FAKE.huggingfaceToken} --add-to-git-credential`],
+    ["google-api-key", `GOOGLE_API_KEY=${FAKE.googleApiKey}`],
+    ["google-api-key", `fetch("https://maps.example/api/geocode?key=${FAKE.googleApiKey}&address=1")`],
   ];
   for (const [rule, text] of table) {
     it(`${rule}: ${JSON.stringify(text.slice(0, 50))}`, () => {
@@ -64,6 +77,12 @@ describe("leak guard: secrets are blocked by rule id", () => {
 
   it("reports the first block rule in policy order when several match", () => {
     assert.deepEqual(guardMessages(policy, user(`${FAKE.awsAccessKeyId}\n${FAKE.privateKey}`)), { action: "block", rule: "private-key" });
+  });
+
+  it("names a service-account key file by its own rule, and a bare PEM key still as private-key", () => {
+    // the JSON holds a PEM header too, so the more specific rule comes first in the policy
+    assert.deepEqual(guardMessages(policy, user(FAKE.serviceAccountJson)), { action: "block", rule: "gcp-service-account-key" });
+    assert.deepEqual(guardMessages(policy, user(FAKE.privateKey)), { action: "block", rule: "private-key" });
   });
 });
 
@@ -116,6 +135,11 @@ describe("leak guard: no false positives on prose and code without secrets", () 
     "for (const key of Object.keys(config)) console.log(key, config[key]);",
     "export GITHUB_TOKEN=$(gh auth token)",
     "SECRET_KEY = env('DJANGO_SECRET_KEY')",
+    "from huggingface_hub import hf_hub_download",
+    "model = hf_AutoModelForCausalLM.from_pretrained(name)",
+    'token = os.environ["HF_TOKEN"]  # starts with hf_',
+    "Google API keys start with AIza; keep yours in Secret Manager.",
+    '{"type": "service_account", "private_key_id": "<id>", "private_key": "<paste the key here>"}',
   ];
   for (const text of clean) {
     it(JSON.stringify(text.slice(0, 60)), () => {

@@ -767,19 +767,26 @@ capture groups, only the first group that took part in the match is replaced, so
 `api_key = "..."` keeps its name and quotes, and JSON in tool-call arguments stays valid JSON.
 Block rules are checked first, on the original text, so a redaction cannot hide a blocked secret.
 
-`llm-policy.example.json` ships six rules:
+`llm-policy.example.json` ships nine rules:
 
 | Rule | Matches | Action |
 | --- | --- | --- |
+| `gcp-service-account-key` | the `private_key` field of a Google Cloud service-account JSON key file: a PEM private key inside a JSON string | block |
 | `private-key` | a PEM or OpenSSH private key block (RSA, EC, OPENSSH, PGP and others) | block |
 | `aws-access-key-id` | an AWS access key id: `AKIA`, `ASIA`, `ABIA` or `ACCA` and 16 more characters | block |
 | `github-token` | a GitHub token: `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, or a fine-grained `github_pat_` | block |
 | `slack-token` | a Slack token: `xoxb-`, `xoxp-`, `xoxa-`, `xoxo-`, `xoxs-` or `xoxr-` | block |
 | `sk-style-key` | a provider key that starts with `sk-` (`sk-proj-`, `sk-ant-` and others), 20 or more characters with a digit | block |
+| `huggingface-token` | a Hugging Face access token: `hf_` and exactly 34 letters or digits | block |
+| `google-api-key` | a Google API key: `AIza` and 35 more letters, digits, `-` or `_` | block |
 | `api-key-assignment` | a value given to a name such as `api_key`, `client_secret`, `access_token` or `password`: quoted with 12 or more characters, or unquoted with 16 or more, and containing a digit; only the value is replaced | redact |
 
 The formats that are surely secrets block, because a key that was pasted into a prompt should be
-rotated, not quietly dropped. The heuristic rule redacts: it has more false positives, and a guess
+rotated, not quietly dropped. The service-account rule comes before `private-key`, so a pasted
+key file is reported under its own name. Model-hub and cloud keys tend to travel through setup
+notes, notebooks and shell history (a token saved to a text file while deploying a model, for
+example), which is how they end up in prompts; the Hugging Face rule takes exactly 34 characters
+so that long `hf_...` names in code are not blocked. The heuristic rule redacts: it has more false positives, and a guess
 should not refuse a whole request. Every rule is also tested against prose and code that must
 pass untouched, such as `const apiKey = process.env.OPENAI_API_KEY;`,
 `password = get_password_from_vault()`, a public key block and `"api_key": "<your-api-key-here>"`.
@@ -915,10 +922,10 @@ real CLI, and checks what reached the downstream server and what was written to 
 One step plays a prompt injection: a tool result tells the agent to upload its SSH key, the agent
 obeys, and the gateway blocks the call before it reaches the server.
 
-The LLM gateway suite (`test/llm/`) runs 161 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 173 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file); a leak-guard table
-for every shipped rule, with 24 samples of prose and code that must pass untouched; retries and
+for every shipped rule, with 29 samples of prose and code that must pass untouched; retries and
 the fallback with a scripted `fetch`, plus a real timeout; the CLI; and an end-to-end test. That
 test starts `agent-gate llm serve` against two fake upstream HTTP servers, one healthy and one that
 always answers 500, and checks routing by alias and by `x-agent-task`, the fallback after a 500,
@@ -932,7 +939,7 @@ no secret-shaped string appears in the source and secret scanners need no except
 repository.
 
 Current result: **239/239 cases and 73/73 upload cases pass** (320/320 shell guard tests, 120/120
-MCP gateway tests, 161/161 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
+MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22, and a second job checks the deploy files (see [Deploy](#deploy)).
 
 ## Repository layout

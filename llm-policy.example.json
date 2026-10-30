@@ -1,6 +1,12 @@
 {
   "leakGuard": [
     {
+      "id": "gcp-service-account-key",
+      "action": "block",
+      "regex": "\"private_key\"\\s*:\\s*\"-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----",
+      "description": "The private_key field of a Google Cloud service-account JSON key file: a PEM private key inside a JSON string."
+    },
+    {
       "id": "private-key",
       "action": "block",
       "regex": "-----BEGIN[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\\s\\S]*?(?:-----END[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)",
@@ -29,6 +35,18 @@
       "action": "block",
       "regex": "\\bsk-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{20,}",
       "description": "A provider key that starts with sk- (sk-..., sk-proj-..., sk-ant-...), 20 or more characters with a digit."
+    },
+    {
+      "id": "huggingface-token",
+      "action": "block",
+      "regex": "\\bhf_[A-Za-z0-9]{34}\\b",
+      "description": "A Hugging Face access token: hf_ and exactly 34 letters or digits."
+    },
+    {
+      "id": "google-api-key",
+      "action": "block",
+      "regex": "\\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])",
+      "description": "A Google API key: AIza and 35 more letters, digits, - or _."
     },
     {
       "id": "api-key-assignment",
