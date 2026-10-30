@@ -189,6 +189,36 @@ place.
 Treating quoted text as data is deliberate. It is what keeps a commit message that talks about
 `git push` from being flagged, and it is also the source of several items above.
 
+## Why there is no model in the guard
+
+The shell guard is code, not a model, for three reasons:
+
+- **Same input, same answer.** Its decisions can be replayed, argued with and fixed, and each one
+  names the rule that made it. That is how the first version's 33 blocks could be reviewed one by one.
+- **Testable.** The 239 + 73 cases, the held-out set and a hash of 20,594 answers run in CI.
+- **It runs on every command.** It answers in milliseconds with no network call and no model to load,
+  so nobody has a reason to switch it off.
+
+Two tests in `test/command-guard.test.js` keep it that way: the analyzer may load only `fs` and the
+hook only the analyzer, and the hook must give its usual answers when it runs with
+`test/no-network-preload.js`, which makes every network module and global throw.
+
+### Three lanes
+
+| Lane | Good at | In agent-gate |
+| --- | --- | --- |
+| Code | Policy: the same answer every time, testable, cheap | The shell guard; the MCP gateway's policy; the LLM gateway's budgets and leak guard |
+| Classifier | Ambiguous cases that rules cannot see | Not built. [Known limits](#known-limits) lists it as a separate layer. |
+| LLM | Reading a situation and explaining it | Not used at runtime |
+
+The model reads the situation; the code holds the policy. What neither can decide goes to a human, and
+that threshold is code too: an approval bound to the exact call (`argsHash`) and used once.
+[ADR 0004](docs/adr/0004-decisions-in-code.md) gives the reasoning, including why the rules are not
+instructions in the agent's prompt.
+
+AI was used to build agent-gate: the author designed it and directed Claude Code and Codex as coding
+agents, and Codex was one of the red teams. At runtime there is no model in any of the three guards.
+
 ## Red-team history
 
 This is the history of the analyzer's earlier versions, from the author's notes:
@@ -1012,14 +1042,15 @@ npm test
 `npm test` compiles the TypeScript and then runs `node --test` (Node 20 or newer) over three suites.
 
 The shell guard suite needs no dependencies; `node --test test/command-guard.test.js` runs it on
-its own. It runs 348 tests: the 239 cases in `test/cases.json` and a check that the file is well
+its own. It runs 351 tests: the 239 cases in `test/cases.json` and a check that the file is well
 formed; the 73 upload cases of suite G in `test/cases-exfil.json`, a check that that file is well
 formed, and a hook test for a blocked upload; 5 tests that run the hook as a child process; 15 timing
 tests on crafted long commands (each must finish within 1 or 3 seconds, where v5.1 took from 2.8
 seconds to hours); 10 tests of the 32-word reading limit; a differential test: the answers for
 20,594 generated commands (`test/generated-commands.js`) must hash to the value recorded from v5.1;
-and 2 tests of the held-out set: it is well formed, and its score is no worse than
-`test/heldout-baseline.json`. `npm run redteam` prints that score per category.
+2 tests of the held-out set: it is well formed, and its score is no worse than
+`test/heldout-baseline.json` (`npm run redteam` prints that score per category); and 3 tests that
+the guard needs no network: what it may load, and the hook run with every network module made to throw.
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
@@ -1052,7 +1083,7 @@ no secret-shaped string appears in the source and secret scanners need no except
 repository.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (348/348 shell guard tests, 199/199 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
+stopped (351/351 shell guard tests, 199/199 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
 
@@ -1103,12 +1134,14 @@ test/gateway/fake-downstream.ts               the fake MCP server for the end-to
 test/llm/*.test.ts                            LLM gateway tests: routing, budget, leak guard, upstream, end to end, deploy configs
 test/llm/fake-upstream.ts                     a fake OpenAI-compatible provider for the tests, the example and the demo
 test/llm/fake-secrets.ts                      every fake secret the tests use, in one file
+test/no-network-preload.js                    makes network modules throw, for the no-network test
 test/SANITIZED.md                             what was changed in the cases before publication
 test/HELDOUT.md                               where the held-out cases come from, and their score
 docs/red-team.md                              the case categories, with counts
 docs/adr/0001-non-blocking-approvals.md       why "ask" answers with an error instead of waiting
 docs/adr/0002-reserve-then-settle-budgets.md  why budgets reserve an estimate and settle after
 docs/adr/0003-single-writer-state.md          why the gateway runs as one replica, and the way to more
+docs/adr/0004-decisions-in-code.md            why the guards decide in code, not in a prompt or a model
 tsconfig.json                                 compiles src/ and test/ into dist/
 AGENTS.md                                     build, layout and rules for coding agents
 CLAUDE.md                                     one line that points Claude Code to AGENTS.md
