@@ -992,6 +992,8 @@ docs/adr/0001-non-blocking-approvals.md       why "ask" answers with an error in
 docs/adr/0002-reserve-then-settle-budgets.md  why budgets reserve an estimate and settle after
 docs/adr/0003-single-writer-state.md          why the gateway runs as one replica, and the way to more
 tsconfig.json                                 compiles src/ and test/ into dist/
+AGENTS.md                                     build, layout and rules for coding agents
+CLAUDE.md                                     one line that points Claude Code to AGENTS.md
 .github/workflows/ci.yml                      npm test on Node 20 and 22; checks and a build of the deploy files
 ```
 
