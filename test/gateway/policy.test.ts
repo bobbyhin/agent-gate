@@ -84,6 +84,15 @@ describe("policy.example.json: the shell rule runs the slice-1 analyzer", () => 
     }
   });
 
+  it("every case in test/cases-exfil.json (uploads) gets the mapped decision", () => {
+    const exfil: Case[] = JSON.parse(fs.readFileSync(path.join(ROOT, "test", "cases-exfil.json"), "utf8"));
+    for (const c of exfil) {
+      const got = check(example, "run_command", { command: c.cmd });
+      assert.equal(got.decision, SHELL_TO_DECISION[c.expect as "pass" | "warn" | "ask" | "block"], `${c.id}: got ${got.decision} for ${JSON.stringify(c.cmd)}`);
+      assert.equal(got.rule, "shell-guard", c.id);
+    }
+  });
+
   it("covers the other common shell tool names", () => {
     for (const tool of ["exec", "bash", "execute_command", "shell_exec"]) {
       expectVerdict(tool, "block", "shell-guard", { command: "git push --force origin main" });
