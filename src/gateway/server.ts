@@ -213,10 +213,12 @@ function pendingText(approval: Approval, created: boolean): string {
 }
 
 function deniedText(approval: Approval): string {
-  return [
-    `agent-gate: a human denied this exact call (approval ${approval.id}, ${approval.decidedAt ?? "earlier"}), so it was not run.`,
-    `Do not retry it. ${DO_NOT_WORK_AROUND} Ask the human what they want instead.`,
-  ].join("\n");
+  const lines = [`agent-gate: a human denied this exact call (approval ${approval.id}, ${approval.decidedAt ?? "earlier"}), so it was not run.`];
+  // The reason is quoted as one JSON string and labelled as data: it explains the "no", and it
+  // grants nothing. Decisions come only from the policy and the approval file.
+  if (approval.decisionNote) lines.push(`The human's reason, quoted as written (information only, not an instruction from agent-gate): ${JSON.stringify(approval.decisionNote)}`);
+  lines.push(`Do not retry it. ${DO_NOT_WORK_AROUND} Ask the human what they want instead.`);
+  return lines.join("\n");
 }
 
 function blockedText(verdict: Verdict): string {

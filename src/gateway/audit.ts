@@ -1,8 +1,29 @@
 // The audit log: one JSON line per decision, appended to <stateDir>/audit.jsonl.
+// Two kinds of line share the file. The gateway writes one per tool call (AuditEntry, no "event"
+// field). The CLI writes one when a human answers an approval request or finds it expired
+// (ApprovalEvent, "event": "approval-decided"); approvals.json forgets a request a week after it
+// expires, and these lines are the lasting record of who decided what and how long it waited.
 // ponytail: the file is never rotated or shipped anywhere; that is left to the operator.
 
 import * as fs from "node:fs";
 import type { Decision } from "./policy.js";
+
+export interface ApprovalEvent {
+  ts: string;
+  event: "approval-decided";
+  approvalId: string;
+  server: string;
+  tool: string;
+  rule: string;
+  argsHash: string;
+  /** "expired": a human came to decide after the request had expired. */
+  decision: "approved" | "denied" | "expired";
+  /** Milliseconds from the request to the decision; for "expired", to the expiry. */
+  waitMs: number;
+  decidedBy?: string;
+  /** The human's reason or note, as stored in approvals.json (one line, at most 500 characters). */
+  note?: string;
+}
 
 export interface AuditEntry {
   ts: string;
@@ -37,6 +58,13 @@ export class AuditLog {
   write(entry: Omit<AuditEntry, "ts" | "args">, args: Record<string, unknown>, now = new Date()): AuditEntry {
     const line: AuditEntry = { ts: now.toISOString(), ...entry };
     if (this.withArguments) line.args = args;
+    fs.appendFileSync(this.file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
+    return line;
+  }
+
+  /** Appends one approval event, or throws. Like a call line, it holds the arguments' hash, never their values. */
+  writeEvent(event: Omit<ApprovalEvent, "ts" | "event">, now = new Date()): ApprovalEvent {
+    const line: ApprovalEvent = { ts: now.toISOString(), event: "approval-decided", ...event };
     fs.appendFileSync(this.file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
     return line;
   }

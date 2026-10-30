@@ -34,7 +34,20 @@ export interface Approval {
   /** createdAt + TTL. After this, the record cannot be approved and cannot allow a call. */
   expiresAt: string;
   decidedAt?: string;
+  /** Who approved or denied it: the OS user that ran the CLI. */
+  decidedBy?: string;
+  /**
+   * What the human wrote with the decision: the reason for a denial (--reason), a note for an
+   * approval (--note). One line, cleaned by cleanNote(). A denial's reason is shown to the agent.
+   */
+  decisionNote?: string;
   usedAt?: string;
+}
+
+/** Who decided and what they wrote: the optional extras of approve() and deny(). */
+export interface DecisionInput {
+  by?: string;
+  note?: string;
 }
 
 export interface AskRequest {
@@ -57,10 +70,48 @@ export type AskOutcome =
 /** A request the CLI cannot carry out, such as approving an expired id. */
 export class ApprovalError extends Error {
   override name = "ApprovalError";
+  /** Set when the request had expired, so the CLI can record that it was found expired. */
+  constructor(
+    message: string,
+    readonly expired?: Approval,
+  ) {
+    super(message);
+  }
 }
 
 const FILE_VERSION = 1;
 const KEEP_AFTER_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+export const NOTE_MAX_CHARS = 500;
+const BY_MAX_CHARS = 64;
+
+// C0 and C1 control characters, DEL, the Unicode line and paragraph separators and the bidirectional
+// text marks. Built from code points so that none of these characters has to appear in this file.
+const range = (from: number, to: number): string => `${String.fromCharCode(from)}-${String.fromCharCode(to)}`;
+const UNSAFE_CHARS = new RegExp(`[${range(0x00, 0x1f)}${range(0x7f, 0x9f)}${range(0x200e, 0x200f)}${range(0x2028, 0x202e)}${range(0x2066, 0x2069)}]`, "g");
+
+/**
+ * Makes what a human typed safe to store and to show to an agent: control characters, line breaks
+ * and bidirectional-text marks become spaces, runs of spaces become one, and the text is cut at
+ * `max` characters. Returns undefined when nothing is left. The agent sees the result only as a
+ * quoted string, and it never changes a decision.
+ */
+export function cleanNote(text: string | undefined, max = NOTE_MAX_CHARS): string | undefined {
+  if (text === undefined) return undefined;
+  const one = text.replace(UNSAFE_CHARS, " ").replace(/\s+/g, " ").trim();
+  if (one === "") return undefined;
+  const chars = [...one];
+  return chars.length <= max ? one : `${chars.slice(0, max - 1).join("")}…`;
+}
+
+function applyDecision(approval: Approval, now: number, input: DecisionInput): void {
+  approval.decidedAt = new Date(now).toISOString();
+  const by = cleanNote(input.by, BY_MAX_CHARS);
+  const note = cleanNote(input.note);
+  if (by === undefined) delete approval.decidedBy;
+  else approval.decidedBy = by;
+  if (note === undefined) delete approval.decisionNote;
+  else approval.decisionNote = note;
+}
 
 /** JSON with object keys sorted at every level, so equal arguments always give the same text. */
 export function canonicalJson(value: unknown): string {
@@ -141,27 +192,27 @@ export class ApprovalStore {
     });
   }
 
-  approve(id: string): Approval {
+  approve(id: string, input: DecisionInput = {}): Approval {
     return this.update((approvals, now) => {
       const approval = find(approvals, id);
       if (approval.status !== "pending") throw new ApprovalError(`${id} is ${approval.status}; only a pending request can be approved`);
-      if (!isLive(approval, now)) throw new ApprovalError(`${id} expired at ${approval.expiresAt}; the agent has to make the call again to ask again`);
+      if (!isLive(approval, now)) throw new ApprovalError(`${id} expired at ${approval.expiresAt}; the agent has to make the call again to ask again`, { ...approval });
       approval.status = "approved";
-      approval.decidedAt = new Date(now).toISOString();
+      applyDecision(approval, now, input);
       return approval;
     });
   }
 
   /** Denies a pending request, or takes back an approval that has not been used yet. */
-  deny(id: string): Approval {
+  deny(id: string, input: DecisionInput = {}): Approval {
     return this.update((approvals, now) => {
       const approval = find(approvals, id);
       if (approval.status !== "pending" && approval.status !== "approved") {
         throw new ApprovalError(`${id} is ${approval.status}; only a pending or an unused approved request can be denied`);
       }
-      if (!isLive(approval, now)) throw new ApprovalError(`${id} expired at ${approval.expiresAt}; it can no longer allow anything`);
+      if (!isLive(approval, now)) throw new ApprovalError(`${id} expired at ${approval.expiresAt}; it can no longer allow anything`, { ...approval });
       approval.status = "denied";
-      approval.decidedAt = new Date(now).toISOString();
+      applyDecision(approval, now, input);
       return approval;
     });
   }

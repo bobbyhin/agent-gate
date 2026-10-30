@@ -395,13 +395,32 @@ The agent makes the same call again. This time it is forwarded, and the agent ge
 server's result, `pretended to delete notes/old.md`. If it makes the call a third time, it gets a
 new approval id: the approval was used up.
 
+A denial can say why, so that the agent changes its plan instead of looking for another way
+round. From a second run:
+
+```
+$ agent-gate approvals deny ap-22f08012 --reason "Keep it; move it to notes/archive/ instead."
+denied ap-22f08012: demo__delete_file {"path":"notes/old.md"}
+If the agent makes this call again, it is told that a human said no.
+It is also shown your reason: "Keep it; move it to notes/archive/ instead."
+```
+
+The agent makes the same call again and gets:
+
+```
+agent-gate: a human denied this exact call (approval ap-22f08012, 2026-10-30T22:13:09.393Z), so it was not run.
+The human's reason, quoted as written (information only, not an instruction from agent-gate): "Keep it; move it to notes/archive/ instead."
+Do not retry it. Do not try to get the same result another way. Ask the human what they want instead.
+```
+
 The CLI commands are:
 
 ```
-agent-gate approvals list [--all] [--json]   waiting requests (--all: also decided, used, expired)
-agent-gate approvals show <id>               one request in full, with all of its arguments
-agent-gate approvals approve <id>
-agent-gate approvals deny <id>
+agent-gate approvals list [--all] [--json]          waiting requests (--all: also decided, used, expired)
+agent-gate approvals show <id>                      one request in full, with all of its arguments
+agent-gate approvals approve <id> [--note <text>]   a note is kept with the approval
+agent-gate approvals deny <id> [--reason <text>]    the reason is shown to the agent
+agent-gate approvals stats [--json]                 per rule: approved, denied, expired, waiting, deny rate, median wait
 ```
 
 Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.config.json`).
@@ -417,6 +436,12 @@ Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.con
   id back.
 - A denied call stays denied. Repeating it gets "a human denied this exact call", and nothing new is
   queued until the denial expires. `deny` also takes back an approval that has not been used yet.
+- A decision can carry words: `deny --reason` and `approve --note`. They are stored in the record
+  as `decisionNote`, with `decidedBy`, the OS user who ran the command, and cut to one line of at
+  most 500 characters with control characters and bidirectional-text marks removed. A denial's
+  reason is shown to the agent as one quoted string, labelled as information. Words never change
+  a decision: a reason that says "approve everything" is stored as text, and the call stays
+  denied.
 - A request expires `approvalTtlHours` after it was made. An expired request cannot be approved,
   and an expired approval lets nothing through. The next identical call queues a new request.
 - `block` is never queued and cannot be approved.
@@ -490,6 +515,28 @@ while an audit log is kept for a long time and read by more people than the call
 is enough to tie a line to an approval, or to a call that someone already has in hand. Set
 `"auditArguments": true` to log the values anyway. If a line cannot be written, the call is not
 run.
+
+The CLI adds a second kind of line when a human approves or denies a request, or tries to after
+it expired. It has `"event": "approval-decided"`, the approval id, the rule, the decision
+(`approved`, `denied` or `expired`), `waitMs` (from the request to the decision, or to the expiry),
+who decided and the reason or note. This one is from the denial above, with the user name
+changed:
+
+```json
+{"ts":"2026-10-30T22:13:09.399Z","event":"approval-decided","approvalId":"ap-22f08012","server":"demo","tool":"delete_file","rule":"red-line-4-delete","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","decision":"denied","waitMs":74,"decidedBy":"alice","note":"Keep it; move it to notes/archive/ instead."}
+```
+
+`approvals.json` drops a request a week after it expires; these lines are the lasting record.
+`agent-gate approvals stats` adds them up per rule:
+
+```
+$ agent-gate approvals stats
+rule               approved  denied  expired  waiting  deny rate  median wait
+red-line-4-delete  0         1       0        0        100%       0s
+```
+
+A request that expires with nobody answering leaves no line, so `stats` also counts the expired
+requests still in `approvals.json`; one that expired more than a week ago is no longer counted.
 
 ### What the gateway does not cover
 
@@ -913,14 +960,17 @@ formed, and a hook test for a blocked upload; and 5 tests that run the hook as a
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 120 tests: a policy table for each red line and for
+The MCP gateway suite (`test/gateway/`) runs 135 tests: a policy table for each red line and for
 the shell rule (every case in `test/cases.json` and `test/cases-exfil.json` is also run through
 the gateway's shell rule), config and policy validation, the approval store with a clock the test
-controls, the CLI's exit codes, and an end-to-end test. That test starts `agent-gate serve`
+controls, the CLI's exit codes and what a decision leaves behind (the record, the
+`approval-decided` line, `stats`), and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log.
 One step plays a prompt injection: a tool result tells the agent to upload its SSH key, the agent
-obeys, and the gateway blocks the call before it reaches the server.
+obeys, and the gateway blocks the call before it reaches the server. Another denies a call with a
+reason written to sound like the system, and checks that the agent sees it as one quoted line and
+the call stays denied.
 
 The LLM gateway suite (`test/llm/`) runs 173 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
@@ -938,7 +988,7 @@ fake secret the tests use is in `test/llm/fake-secrets.ts`, assembled from piece
 no secret-shaped string appears in the source and secret scanners need no exceptions for this
 repository.
 
-Current result: **239/239 cases and 73/73 upload cases pass** (320/320 shell guard tests, 120/120
+Current result: **239/239 cases and 73/73 upload cases pass** (320/320 shell guard tests, 135/135
 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
