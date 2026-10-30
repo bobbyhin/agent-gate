@@ -11,7 +11,8 @@ The cases come from the author's private run logs. Personal paths, names and Tha
 before publication; see [test/SANITIZED.md](../test/SANITIZED.md) for every change.
 
 A second file, `test/cases-exfil.json`, holds suite G: 73 uploads of local files, added for v5.1.
-See [Suite G: uploads of local files](#suite-g-uploads-of-local-files).
+See [Suite G: uploads of local files](#suite-g-uploads-of-local-files). v5.2 made the analyzer fast on
+long crafted commands without changing its answers; see [Slow inputs](#slow-inputs-v52).
 
 ## Expected decisions
 
@@ -191,6 +192,63 @@ directory or `/`, that counts as secret too. Names are compared without regard t
 
 Result: 73 of 73 get the expected decision. The 239 cases in `test/cases.json` get exactly the
 same answers as under v5 (action, label and reason compared case by case).
+
+## Slow inputs (v5.2)
+
+A command must not stall the hook. On 31 Oct 2026 a timing review found commands under the
+100,000-character limit that took v5.1 minutes, and some that took exponential time. v5.2
+(31 Oct 2026) rewrites the patterns so that each one runs in time roughly proportional to the length
+of the command, and asks about what it will not read. The answers do not change: the 239 cases, the
+73 cases of suite G, and 20,594 generated commands (`test/generated-commands.js`) get the same action
+and label as under v5.1 (a test compares a hash of all the answers).
+
+Times for one call of `analyze()` on a laptop (Apple silicon, Node 22). `npm test` times each of these
+inputs against a bound; "> 120 s" means the run was stopped after 120 seconds.
+
+| Input | Length | v5.1 | v5.2 |
+| --- | --- | --- | --- |
+| `\|bash` repeated 19,000 times | 95,000 | 152 s | 74 ms |
+| `$(` repeated 40,000 times | 80,000 | 299 s | 38 ms |
+| 99,000 backticks | 99,000 | 304 s | 46 ms |
+| 99,000 newlines | 99,000 | > 120 s | 46 ms |
+| `sudo` and a newline, 19,000 times | 95,000 | > 120 s | 483 ms |
+| `` `sudo `` and a space, 16,000 times | 96,000 | > 120 s | 301 ms |
+| `rm -` and 99,996 letters `r` | 100,000 | 20.0 s | 11 ms |
+| `<<a ` repeated 24,000 times (heredocs with no end line) | 96,000 | 2.6 s | 20 ms |
+| `cat <<EOF` and a newline, 9,000 times | 90,000 | 1.1 s | 29 ms |
+| `git ` repeated 24,000 times | 96,000 | 2.6 s | 19 ms |
+| `echo` with 50,000 characters, then `\| bash` 7,000 times | 99,005 | 33.9 s | 61 ms |
+| `python3 -c` with a 4,700-line script | 94,013 | 64.4 s | 31 ms |
+| `sudo ` repeated 200 times | 1,001 | > 120 s | under 1 ms |
+| `git` and `-c ` repeated 200 times | 605 | > 120 s | under 1 ms |
+
+What made them slow, and what changed:
+
+- **A directory prefix scanned to the end of the text.** A rule such as "git at command position"
+  allowed an optional prefix like `/usr/bin/` written as `\S*/`. A command can start after `;`, `&`,
+  `|`, `(`, `)`, `{`, a backtick, `$(` or a newline, and from every such place the regex engine read
+  every non-space character that followed, looking for a `/`: quadratic in the length. The prefix
+  now stops at the next of those characters. A match that crossed one can start at that character
+  instead, because it is a place where a command can start, so no match is lost.
+- **Two readings of the same words.** In `sudo sudo sudo …` each `sudo` could be a wrapper command or
+  an argument of the one before, and the regex tried all 2^n ways when nothing matched; `git -c -c
+  -c …` (an option with a value, or two options) did the same. Each text now has one reading: one
+  wrapper command at command position, after which every word may be where the real command starts,
+  and an option that takes a value takes the next word unless it starts with `-`.
+- **Letter runs with two loops.** `-[a-zA-Z]*r[a-zA-Z]*` (a recursive flag) could split a run of
+  letters around any `r`. It now splits at the first `r`, which gives the same matches.
+- **Searches that started over.** The heredoc stripper looked for each `<<word`'s end line from the
+  start again, the old rules scanned to the end of the line from every `git`, and the upload reader
+  read the same `echo` text again for every shell in `echo … | bash | bash`. Each now finds the answer
+  once: a table of the lines that can end a heredoc, a scan that stops where the same rule could start
+  again, and one reading per `echo`.
+- **A reading limit.** After a wrapper command (`sudo`, `env`, `xargs`, …), after a deploy or publish
+  tool (`netlify`, `wrangler`, `fly`, `firebase`, `gcloud`, the package managers), and before a `git`,
+  `gh` or `docker` subcommand, the rules read at most 32 options or arguments in a row. When a run is
+  longer, a rule could have matched further on, so the command is asked about (label "more than 32
+  options or arguments in a row"). This is the one place where v5.2 answers differently from v5.1, and
+  it only adds asks: a `git` command with 40 global options before `reset --hard` now asks instead of
+  being blocked, and `sudo apt-get install` with 40 packages asks instead of passing.
 
 ## Adding a case
 

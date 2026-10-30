@@ -13,6 +13,7 @@ agent-gate guards an AI agent's actions: a shell command guard, an MCP gateway a
 
 ## Rules
 - `test/cases.json` stays at exactly 239 cases, a number quoted outside this repository. New shell cases go in a suite file of their own (see `docs/red-team.md`).
+- `analyze()`'s answers are pinned by a hash over `test/generated-commands.js` (in `test/command-guard.test.js`). A change meant to alter answers records the new hash and says why in `docs/red-team.md`.
 - Fake secrets are built at run time from pieces, in `test/llm/fake-secrets.ts`; `gitleaks git --pre-commit --staged .` must find nothing before a commit.
 - The repository is public: English only, made-up names, hosts and paths (`example.com`, `/path/to/agent-gate`), no personal data or real credentials.
 - Each README rule table mirrors its policy file (`policy.example.json`, `llm-policy.example.json`), and `deploy/k8s/llm-policy.json` is a byte-identical copy of the latter: change them together.

@@ -33,6 +33,15 @@
 //   $(cat file) in an argument. Text fed to a shell (sh -c, eval, echo … | bash) is read too.
 //   The 239 cases get exactly the same answers as v5. Suite: test/cases-exfil.json (suite G)
 //
+// ── v5.2 · 31 Oct 2026: linear time ──────────────────────────────────────────────────
+// Evidence: a timing review found commands under the 100k limit that stalled the hook for minutes:
+//   "|bash" x 19,000 (152 s) · "$(" x 40,000 (299 s) · 99,000 backticks (304 s) · "sudo " x 30 or
+//   "git -c" x 40 (exponential) · "rm -rrr…" (20 s) · echo … | bash | bash … (34 s), and others.
+// The patterns are rewritten to match the same texts in linear time (see "Linear time" below), and a
+//   run of more than 32 options or arguments after a wrapper or a deploy/publish tool is asked about
+//   instead of read. Same answers as v5.1 on the 239 + 73 cases and on 20,594 generated commands
+//   (test/generated-commands.js). Timings: docs/red-team.md
+//
 // How it reads a command the way a shell does (not a full parser):
 //   1. heredoc: strip only the body that is not fed to a shell · the command line itself is
 //      always kept · an unclosed heredoc = keep everything
@@ -51,7 +60,8 @@
 //      heredocs stripped → take the "stronger" verdict, so nothing the old rules caught can
 //      slip through (red team 2 showed the new reader alone could miss things)
 //   7. if the guard itself breaks midway, the legacy rules decide; if they do not block, ask
-//      the human · a command longer than 100k characters = ask
+//      the human · a command longer than 100k characters = ask · more than 32 options or
+//      arguments in a row after a wrapper or a deploy/publish tool = ask (v5.2 reading limit)
 // Holes that remain (these need other layers: deny rules in the agent's settings · a
 // classifier · not letting the agent hold credentials):
 //   a git alias · a variable ($g push) · a script written earlier and run later ·
@@ -62,24 +72,51 @@
 // ─────────────────────────────────────────────────────────────────────────────────────
 const fs = require("fs");
 
-const SHELL = String.raw`(?:\S*\/)?(?:ba|z|k|da)?sh`;
+// ── Linear time (v5.2, 31 Oct 2026) ─────────────────────────────────────────────────
+// The regexes below run on the whole command, which may be up to 100k characters long. Three
+// shapes used to make them slow, and each is now written so that the answers stay the same:
+//   · a directory prefix (/usr/bin/git) was matched with \S*/, so from every place where a command
+//     can start the engine scanned to the end of the text: quadratic, 150 to 300 s for 100k
+//     characters of "|bash", "$(" or backticks. DIR stops at the next start character instead. A
+//     match that crossed one can begin at that character (it is a start of its own), so nothing is lost.
+//   · keywords and wrapper commands (sudo, env, …) could be read in 2^n ways ("sudo sudo sudo …" is
+//     each word a wrapper, or an argument of the one before?), and so could "git -c -c -c …":
+//     exponential, minutes for 30 words. Each text now has one reading.
+//   · a run of options or arguments is read for at most CHAIN words. A longer run is asked about
+//     (rule "too many words to inspect") instead of being read slowly.
+// test/command-guard.test.js times crafted inputs; docs/red-team.md has the numbers.
+const DIR = String.raw`(?:[^\s;&|(){\x60]*\/)?`; // an optional directory prefix that does not cross a start character
+const SHELL_NAME = String.raw`(?:ba|z|k|da)?sh`;
+const SHELL = DIR + SHELL_NAME;
 const TOK = String.raw`[^\s;&|()]+`; // one word within a single command (does not cross a separator)
 const SEG = String.raw`[^\n;&|]{0,300}`; // a stretch within a single command (length-capped so the regex cannot go quadratic, O(n²))
 const SEGL = String.raw`[^\n;&|]{0,300}?`;
+const SP = String.raw`[^\S\n]`; // a space or a tab, not a newline (a newline is a start of its own)
+const CHAIN = 32; // at most this many words of options/arguments are read in a row (see "too many words to inspect")
 const KEYWORDS = String.raw`then|do|else|elif|if|while|until|!`;
-const WRAPPERS = String.raw`(?:\S*\/)?(?:sudo|doas|env|nohup|g?time|chronic|unbuffer|setsid|nice|ionice|stdbuf|caffeinate|g?timeout|flock|parallel|watch|xargs|command|builtin|exec|coproc|eval|arch|nocorrect|noglob|script)`;
-// Command position: start of text/line · after a shell separator · followed by any number of keywords/wrapper commands · after find -exec
-const CMD =
-  String.raw`(?:(?:^|[\n;&|(){\x60]|\$\()\s*(?:(?:` + KEYWORDS + String.raw`)\s+|` + WRAPPERS +
-  String.raw`(?:\s+` + TOK + String.raw`)*?\s+)*|(?:^|\s)(?:-exec(?:dir)?|-ok)\s+)`;
+const WRAPPERS = DIR + String.raw`(?:sudo|doas|env|nohup|g?time|chronic|unbuffer|setsid|nice|ionice|stdbuf|caffeinate|g?timeout|flock|parallel|watch|xargs|command|builtin|exec|coproc|eval|arch|nocorrect|noglob|script)`;
+const WORDS = String.raw`(?:\s+` + TOK + String.raw`){0,` + CHAIN + String.raw`}?\s+`; // up to CHAIN words, fewest first, then the next one
+// Command position: start of text/line · after a start character · then any number of keywords · then
+// at most one wrapper command with up to CHAIN options/arguments (a later wrapper is one of those
+// words, so it needs no reading of its own) · or after find -exec
+const START = String.raw`(?:^|[\n;&|(){\x60]|\$\()` + SP + String.raw`*(?:(?:` + KEYWORDS + String.raw`)` + SP + String.raw`+)*`;
+const CMD = String.raw`(?:` + START + String.raw`(?:` + WRAPPERS + WORDS + String.raw`)?|(?:^|\s)(?:-exec(?:dir)?|-ok)\s+)`;
 const LOOSE = String.raw`(?:^|[\s;&|(){\x60]|\$\()`; // the start of any word (used when the text is fed to a shell)
-const GIT = String.raw`(?:\S*\/)?git(?:\s+(?:-C|-c|--git-dir|--work-tree|--namespace|--exec-path|--config-env|--super-prefix)\s+\S+|\s+-\S+)*\s+`;
-const GH = String.raw`(?:\S*\/)?gh(?:\s+(?:-R|--repo|--hostname)\s+\S+|\s+-\S+)*\s+`;
-const DOCKER = String.raw`(?:\S*\/)?(?:docker|podman)(?:\s+(?:-c|--context|-H|--host|--config|-l|--log-level|--url|--connection|--identity)\s+\S+|\s+-\S+)*\s+`;
-const NPX = String.raw`(?:(?:\S*\/)?(?:npx|bunx|pnpx|(?:pnpm|yarn)\s+dlx|npm\s+(?:exec|x))(?:\s+-\S+)*\s+)?`;
-const ANY = String.raw`(?:\s+` + TOK + String.raw`)*?\s+`; // any options/arguments before the subcommand
-const RM = String.raw`(?:\S*\/)?rm\b`;
-const RFLAG = String.raw`(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)`;
+// Global options before a subcommand, at most CHAIN. An option that takes a value (-C dir) takes the
+// next word unless that word starts with "-" (then it is an option of its own): one reading per text.
+const OPTS = (valued) =>
+  String.raw`(?:\s+(?:` + valued.join("|") + String.raw`)(?=\s)(?:\s+(?!-)\S+)?|\s+-(?!(?:` +
+  valued.map((o) => o.slice(1)).join("|") + String.raw`)(?=\s))\S+){0,` + CHAIN + String.raw`}`;
+const GIT_VALUED = ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env", "--super-prefix"];
+const GH_VALUED = ["-R", "--repo", "--hostname"];
+const DOCKER_VALUED = ["-c", "--context", "-H", "--host", "--config", "-l", "--log-level", "--url", "--connection", "--identity"];
+const GIT = DIR + String.raw`git` + OPTS(GIT_VALUED) + String.raw`\s+`;
+const GH = DIR + String.raw`gh` + OPTS(GH_VALUED) + String.raw`\s+`;
+const DOCKER = DIR + String.raw`(?:docker|podman)` + OPTS(DOCKER_VALUED) + String.raw`\s+`;
+const NPX = String.raw`(?:` + DIR + String.raw`(?:npx|bunx|pnpx|(?:pnpm|yarn)\s+dlx|npm\s+(?:exec|x))(?:\s+-\S+){0,` + CHAIN + String.raw`}\s+)?`;
+const ANY = WORDS; // any options/arguments before the subcommand
+const RM = DIR + String.raw`rm\b`;
+const RFLAG = String.raw`(?:-[a-qs-zA-QS-Z]*[rR][a-zA-Z]*|--recursive)`; // (the first r/R is the one matched: one reading per flag word)
 const END = String.raw`(?=\s|$|[;&|)])`;
 const ROOT = String.raw`(?:\/+\.?\/*|~(?:\/+\.{0,2})*\/*|\$\{?HOME\}?(?:\/+\.{0,2})*\/*)\*?` + END;
 // One rule = two forms: must be at command position (normal) · may start at any word (when the text is fed to a shell)
@@ -89,8 +126,8 @@ const plain = (re) => ({ re, loose: re });
 // ── Layer 1: always wrong → exit 2, cannot be overridden ──────────────────────────
 const CRITICAL = [
   { ...mk(RM + SEG + String.raw`\s` + RFLAG + String.raw`\b` + SEGL + String.raw`\s` + ROOT), label: "rm -rf / ~ $HOME (whole machine / whole home directory)" },
-  { ...mk(String.raw`(?:\S*\/)?find\s+(?:\/+|~\/?|\$\{?HOME\}?\/?)(?=\s)` + SEG + String.raw`\s-delete\b`), label: "find / -delete" },
-  { ...mk(GIT + String.raw`push\b` + SEG + String.raw`\s(?:--force(?!-with-lease)\b|-[a-zA-Z]*f[a-zA-Z]*\b|\+\S)`), label: "force push" },
+  { ...mk(DIR + String.raw`find\s+(?:\/+|~\/?|\$\{?HOME\}?\/?)(?=\s)` + SEG + String.raw`\s-delete\b`), label: "find / -delete" },
+  { ...mk(GIT + String.raw`push\b` + SEG + String.raw`\s(?:--force(?!-with-lease)\b|-[a-eg-zA-Z]*f[a-zA-Z]*\b|\+\S)`), label: "force push" },
   { ...mk(GIT + String.raw`reset\b` + SEG + String.raw`\s--hard\b`), label: "hard reset" },
   { ...mk(GIT + String.raw`clean\b` + SEG + String.raw`\s-[a-zA-Z]*f`), label: "git clean -f" },
   { ...mk(GIT + String.raw`checkout\s+(?:--\s+)?(?:\.|\*)` + END), label: "git checkout . (discards all changes)" },
@@ -104,7 +141,7 @@ const CRITICAL = [
 // ── Layer 2: depends on context → ask a human ─────────────────────────────────────
 const ASK_RED = [
   { ...mk(GIT + String.raw`(?:(?:lfs|subtree)\s+)?push\b`), label: "git push (any form)", why: "Red line 3 — a push needs a human decision" },
-  { ...mk(String.raw`(?:\S*\/)?xargs(?:\s+` + TOK + String.raw`)*?\s+(?:\S*\/)?(?:git|gh)(?=\s*(?:$|[;&|)\n]))`), label: "xargs git (subcommand comes from input)", why: "cannot see whether it will push or merge" },
+  { ...mk(DIR + String.raw`xargs` + WORDS + String.raw`(?:\S*\/)?(?:git|gh)(?=\s*(?:$|[;&|)\n]))`), label: "xargs git (subcommand comes from input)", why: "cannot see whether it will push or merge" },
   { ...mk(GH + String.raw`pr\s+(?:create|merge|ready)\b`), label: "gh pr create/merge", why: "Red line 3 — a PR or merge needs a human decision" },
   { ...mk(GH + String.raw`release\s+(?:create|upload|edit|delete)\b`), label: "gh release", why: "Red line 3 — publishing a release needs a human decision" },
   { ...mk(GH + String.raw`repo\s+(?:create|delete|edit|rename|archive|sync)\b`), label: "gh repo (modifies a repo)", why: "modifying a repo on GitHub = leaves the machine" },
@@ -117,27 +154,38 @@ const ASK_RED = [
   { ...mk(GH + String.raw`(?:workflow\s+run|run\s+rerun)\b`), label: "gh workflow run", why: "triggers a workflow on GitHub (may deploy)" },
   {
     // bare vercel = deploy · except subcommands that do not ship anything
-    ...mk(NPX + String.raw`(?:\S*\/)?vercel(?:@\S+)?(?!\s+(?:login|logout|whoami|ls|list|logs|inspect|dev|build|pull|help|link|env|domains|dns|projects|teams|switch|--help|-h|--version|-v)\b)` + END),
+    ...mk(NPX + DIR + String.raw`vercel(?:@\S+)?(?!\s+(?:login|logout|whoami|ls|list|logs|inspect|dev|build|pull|help|link|env|domains|dns|projects|teams|switch|--help|-h|--version|-v)\b)` + END),
     label: "vercel (deploy)",
     why: "Red line 3 — a deploy needs a human decision",
   },
-  { ...mk(NPX + String.raw`(?:\S*\/)?netlify(?:@\S+)?` + ANY + String.raw`deploy\b`), label: "netlify deploy", why: "Red line 3 — a deploy needs a human decision" },
-  { ...mk(NPX + String.raw`(?:\S*\/)?wrangler(?:@\S+)?` + ANY + String.raw`(?:deploy|publish|pages\s+(?:deploy|publish)|versions\s+deploy)\b`), label: "wrangler deploy", why: "Red line 3 — a deploy needs a human decision" },
-  { ...mk(String.raw`(?:\S*\/)?(?:fly(?:ctl)?|firebase)` + ANY + String.raw`deploy\b`), label: "deploy (fly/firebase)", why: "Red line 3 — a deploy needs a human decision" },
-  { ...mk(String.raw`(?:\S*\/)?gcloud` + ANY + String.raw`(?:app|run|functions)\s+deploy\b`), label: "gcloud deploy", why: "Red line 3 — a deploy needs a human decision" },
-  { ...mk(NPX + String.raw`(?:\S*\/)?(?:npm|pnpm|yarn|bun|uv|cargo|poetry|hatch|flit)(?:@\S+)?` + ANY + String.raw`publish` + END), label: "publish package", why: "releases something publicly" },
-  { ...mk(String.raw`(?:\S*\/)?(?:twine\s+upload|gem\s+push)\b`), label: "publish package", why: "releases something publicly" },
+  { ...mk(NPX + DIR + String.raw`netlify(?:@\S+)?` + ANY + String.raw`deploy\b`), label: "netlify deploy", why: "Red line 3 — a deploy needs a human decision" },
+  { ...mk(NPX + DIR + String.raw`wrangler(?:@\S+)?` + ANY + String.raw`(?:deploy|publish|pages\s+(?:deploy|publish)|versions\s+deploy)\b`), label: "wrangler deploy", why: "Red line 3 — a deploy needs a human decision" },
+  { ...mk(DIR + String.raw`(?:fly(?:ctl)?|firebase)` + ANY + String.raw`deploy\b`), label: "deploy (fly/firebase)", why: "Red line 3 — a deploy needs a human decision" },
+  { ...mk(DIR + String.raw`gcloud` + ANY + String.raw`(?:app|run|functions)\s+deploy\b`), label: "gcloud deploy", why: "Red line 3 — a deploy needs a human decision" },
+  { ...mk(NPX + DIR + String.raw`(?:npm|pnpm|yarn|bun|uv|cargo|poetry|hatch|flit)(?:@\S+)?` + ANY + String.raw`publish` + END), label: "publish package", why: "releases something publicly" },
+  { ...mk(DIR + String.raw`(?:twine\s+upload|gem\s+push)\b`), label: "publish package", why: "releases something publicly" },
   { ...mk(DOCKER + String.raw`(?:(?:compose|image)\s+(?:-\S+\s+)*)?push\b`), label: "docker/podman push", why: "pushes an image to a registry" },
   { ...mk(DOCKER + String.raw`(?:buildx\s+)?build\b` + SEG + String.raw`\s--push\b`), label: "docker build --push", why: "pushes an image to a registry" },
   { ...mk(RM + SEG + String.raw`\s` + RFLAG + END), label: "rm -r (deletes a whole folder)", why: "Red line 4 — deleting a whole folder is hard to undo" },
   { ...mk(GIT + String.raw`restore\b` + SEG + String.raw`\s(?:\.|-W|--worktree|:\/)` + END), label: "git restore .", why: "discards uncommitted work" },
-  { ...mk(GIT + String.raw`branch\b` + SEG + String.raw`\s(?:-[a-zA-Z]*D[a-zA-Z]*|--delete\s+--force|--force\s+--delete)` + END), label: "git branch -D", why: "deletes a branch without checking that it was merged" },
+  { ...mk(GIT + String.raw`branch\b` + SEG + String.raw`\s(?:-[a-zA-CE-Z]*D[a-zA-Z]*|--delete\s+--force|--force\s+--delete)` + END), label: "git branch -D", why: "deletes a branch without checking that it was merged" },
   { ...mk(GIT + String.raw`stash\s+clear\b`), label: "git stash clear", why: "throws away every stash" },
 ];
 // Minor rules — checked only outside strings (they used to misfire because a commit message talked about them)
 const ASK_NOISY = [
   { re: new RegExp(CMD + GIT + String.raw`commit\b` + SEG + String.raw`\s--amend\b`), label: "amend commit", why: "overwrites the previous commit" },
   { re: /(?:^|\s)--no-verify(?=\s|$|[;&|)])/, label: "skips pre-commit hooks", why: "bypasses secret/lint checks" },
+];
+// Reading limit (v5.2): the rules above read at most CHAIN options or arguments in a row. Where a run is
+// longer, a rule could have matched further on, so the command is asked about instead of passed.
+const LONG = String.raw`(?:\s+` + TOK + String.raw`){` + (CHAIN + 1) + String.raw`}\s+\S`; // more than CHAIN words, then one more
+const TOO_LONG = { label: `more than ${CHAIN} options or arguments in a row`, why: "too many words to inspect quickly; a human should review it" };
+const LIMITS = [
+  { ...plain(new RegExp(START + WRAPPERS + LONG)), ...TOO_LONG }, // sudo, env, xargs, timeout, … and their words
+  { ...mk(NPX + DIR + String.raw`(?:netlify|wrangler|fly(?:ctl)?|firebase|gcloud|npm|pnpm|yarn|bun|uv|cargo|poetry|hatch|flit)(?:@\S+)?` + LONG), ...TOO_LONG },
+  { ...mk(DIR + String.raw`xargs` + LONG), ...TOO_LONG },
+  { ...mk(DIR + String.raw`(?:git|gh|docker|podman)(?:\s+-\S+(?:\s+(?!-)\S+)?){` + (CHAIN + 1) + String.raw`}`), ...TOO_LONG }, // global options
+  { ...mk(DIR + String.raw`(?:npx|bunx|pnpx|(?:pnpm|yarn)\s+dlx|npm\s+(?:exec|x))(?:\s+-\S+){` + (CHAIN + 1) + String.raw`}`), ...TOO_LONG },
 ];
 
 // ── Layer 3: warn, then proceed ───────────────────────────────────────────────────
@@ -149,16 +197,20 @@ const WARN = [
 ];
 
 // Is any text being fed to a shell to run? (checks both the command that still has its quotes and the inert view)
+// B starts at almost any character, so a directory prefix here holds only the characters B does not start at.
+// A shell name followed by more than CHAIN words counts as fed: reading further would be slow, and "fed" only adds checks.
 const B = String.raw`(?:^|[^\w./-])`;
+const BSHELL = B + String.raw`(?:[\w./-]*\/)?` + SHELL_NAME;
 const SHELL_FED = new RegExp(
   [
-    B + SHELL + String.raw`(?:\s+` + TOK + String.raw`)*?\s+-[a-zA-Z]*c(?=[\s'"$]|$)`, // bash --norc -c · bash -euo pipefail -c
+    BSHELL + String.raw`(?:\s+` + TOK + String.raw`){0,` + CHAIN + String.raw`}?\s+-[a-zA-Z]*c(?=[\s'"$]|$)`, // bash --norc -c · bash -euo pipefail -c
+    BSHELL + String.raw`(?:\s+` + TOK + String.raw`){` + (CHAIN + 1) + String.raw`}`,
     B + String.raw`(?:eval|trap)\b`,
-    String.raw`\|\s*(?:sudo\s+)?` + SHELL + END,
-    B + SHELL + String.raw`(?:\s+` + TOK + String.raw`)*?\s*<<<`,
-    B + String.raw`(?:` + SHELL + String.raw`|source|\.)\s*<\(`,
+    String.raw`\|\s*(?:sudo\s+)?(?:[^\s|]*\/)?` + SHELL_NAME + END, // (the prefix stops at the next |, where this form can start again)
+    BSHELL + String.raw`(?:\s+` + TOK + String.raw`){0,` + CHAIN + String.raw`}?\s*<<<`,
+    B + String.raw`(?:(?:[\w./-]*\/)?` + SHELL_NAME + String.raw`|source|\.)\s*<\(`,
     B + String.raw`(?:source|\.)\s+\/dev\/stdin`,
-    B + String.raw`(?:\S*\/)?ssh\b`,
+    B + String.raw`(?:[\w./-]*\/)?ssh\b`,
     B + String.raw`su\b` + SEG + String.raw`\s-c\b`,
     B + String.raw`script\b` + SEG + String.raw`\s-c\b`,
     B + String.raw`env\b` + SEG + String.raw`\s-[a-zA-Z]*S`,
@@ -166,16 +218,17 @@ const SHELL_FED = new RegExp(
   ].join("|")
 );
 // A heredoc fed to a shell (checked on the line holding the << operator with quotes removed · source/eval must be a command, not a file name)
+const HDIR = String.raw`(?:[^\s|;&(]*\/)?`; // a directory prefix that stops where this pattern can start again
 const HEREDOC_FED = new RegExp(
-  String.raw`(?:^|[\s|;&(])` + SHELL + String.raw`(?=\s|$|[;&|)<])|(?:^|[\s|;&(])(?:\S*\/)?ssh(?=\s)|(?:^|[\s|;&(])(?:source|eval|\.)(?=\s)`
+  String.raw`(?:^|[\s|;&(])` + HDIR + SHELL_NAME + String.raw`(?=\s|$|[;&|)<])|(?:^|[\s|;&(])` + HDIR + String.raw`ssh(?=\s)|(?:^|[\s|;&(])(?:source|eval|\.)(?=\s)`
 );
 
 // ── Safety net: the legacy rule set (taken verbatim from the version before 7 Oct · only the names changed) ──
 const LEGACY_CRITICAL = [
   // Wipes the whole machine or home (note: must be a bare / or ~ only, not a /sub/path)
-  { pattern: /rm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+\/(\s|$|;|&|\*)/, label: "rm -rf / (whole machine)" },
-  { pattern: /rm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+~\/?(\s|$|;|&|\*)/, label: "rm -rf ~ (whole home directory)" },
-  { pattern: /rm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+\$\{?HOME\}?\/?(\s|$|;|&|\*)/, label: "rm -rf $HOME" },
+  { pattern: /rm\s+-[a-qs-zA-Z]*r[a-zA-Z]*f?\s+\/(\s|$|;|&|\*)/, label: "rm -rf / (whole machine)" },
+  { pattern: /rm\s+-[a-qs-zA-Z]*r[a-zA-Z]*f?\s+~\/?(\s|$|;|&|\*)/, label: "rm -rf ~ (whole home directory)" },
+  { pattern: /rm\s+-[a-qs-zA-Z]*r[a-zA-Z]*f?\s+\$\{?HOME\}?\/?(\s|$|;|&|\*)/, label: "rm -rf $HOME" },
   // Red line 3 — pushes that overwrite other people's history
   { pattern: /git\s+push\s+--force(?!-with-lease)/, label: "force push" },
   { pattern: /git\s+push\s+-f\b/, label: "force push" },
@@ -195,22 +248,22 @@ const LEGACY_CRITICAL = [
 // ── Layer 2: depends on context → ask a human (decided 22 Aug: "ask instead of block") ──
 // These used to be exit 2 across the board, so the agent quietly worked around them 32 times without the operator knowing
 const LEGACY_ASK = [
-  { pattern: /rm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+[^\s]/, label: "rm -rf", why: "deletes a whole folder without asking again" },
+  { pattern: /rm\s+-[a-qs-zA-Z]*r[a-zA-Z]*f?\s+[^\s]/, label: "rm -rf", why: "deletes a whole folder without asking again" },
   { pattern: /git\s+commit\s+--amend/, label: "amend commit", why: "overwrites the previous commit" },
   { pattern: /--no-verify/, label: "skips pre-commit hooks", why: "bypasses secret/lint checks" },
   // ── 7 Oct 2026 (infrastructure audit; the operator said "handle all of them"): close the red line 3 holes ──
   // The agent settings only had a deny rule for "Bash(git push:*)", which matches only a command that starts exactly like that → `git -C . push` ·
   // `/usr/bin/git push` · `gh pr merge` · every deploy command could all slip through (tested: 15/15 got past the guard)
-  { pattern: /(^|[\s;&|(])(\S*\/)?git\b[^\n;&|]*\spush\b/, label: "git push (any form)", why: "Red line 3 — a push needs a human decision" },
+  { pattern: /(^|[\s;&|(])([^\s;&|(]*\/)?git\b(?:(?![\s(](?:[^\s;&|(]*\/)?git\b)[^\n;&|])*\spush\b/, label: "git push (any form)", why: "Red line 3 — a push needs a human decision" },
   { pattern: /\bgh\s+pr\s+(create|merge|ready)\b/, label: "gh pr create/merge", why: "Red line 3 — a PR or merge needs a human decision" },
   { pattern: /\bgh\s+release\s+(create|upload|edit|delete)\b/, label: "gh release", why: "Red line 3 — publishing a release needs a human decision" },
   { pattern: /\bgh\s+repo\s+(create|delete|edit|rename|archive)\b/, label: "gh repo (modifies a repo)", why: "modifying a repo on GitHub = leaves the machine" },
-  { pattern: /\bgh\s+api\b[^\n]*(-X|--method)\s*['"]?(POST|PUT|PATCH|DELETE)\b/i, label: "gh api write", why: "writes data to GitHub directly" },
-  { pattern: /\b(vercel|netlify)\b[^\n]*(\s--prod\b|\sdeploy\b)/, label: "deploy (vercel/netlify)", why: "Red line 3 — a deploy needs a human decision" },
+  { pattern: /\bgh\s+api\b(?:(?!\bgh\s+api\b)[^\n])*(-X|--method)\s*['"]?(POST|PUT|PATCH|DELETE)\b/i, label: "gh api write", why: "writes data to GitHub directly" },
+  { pattern: /\b(vercel|netlify)\b(?:(?!\b(?:vercel|netlify)\b)[^\n])*(\s--prod\b|\sdeploy\b)/, label: "deploy (vercel/netlify)", why: "Red line 3 — a deploy needs a human decision" },
   { pattern: /\b(wrangler\s+(deploy|publish|pages\s+deploy)|fly(ctl)?\s+deploy|firebase\s+deploy)\b/, label: "deploy", why: "Red line 3 — a deploy needs a human decision" },
   { pattern: /\b(npm|pnpm|yarn)\s+publish\b|\bdocker\s+push\b|\btwine\s+upload\b/, label: "publish/push package", why: "releases something publicly" },
   // Red line 4 — throws work away in a way that is hard to recover (forms that still slipped through)
-  { pattern: /rm\s+-[a-zA-Z]*R[a-zA-Z]*\s+[^\s]/, label: "rm -R", why: "deletes a whole folder (the -R form)" },
+  { pattern: /rm\s+-[a-zA-QS-Z]*R[a-zA-Z]*\s+[^\s]/, label: "rm -R", why: "deletes a whole folder (the -R form)" },
   { pattern: /\bgit\s+restore\s+(\.|-W\b|--worktree\b)/, label: "git restore .", why: "discards uncommitted work" },
   { pattern: /\bgit\s+branch\s+-D\s+\S+/, label: "git branch -D", why: "deletes a branch without checking that it was merged" },
 ];
@@ -223,6 +276,52 @@ const LEGACY_WARN = [
   { pattern: /taskkill\s+\/f/i, label: "taskkill /f" },
 ];
 
+/**
+ * str.replace(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?^[\t ]*\2[\t ]*$/gm, f) with the same result,
+ * in about one pass. The regex searched for each heredoc's end line from scratch, which took minutes for a
+ * long command with many "<<word" and no end line. Here the end lines are looked up in a table. As in the
+ * regex: a line ends at \n, \r, U+2028 or U+2029 (what ^ and $ mean with the m flag); an end line is the
+ * word with spaces or tabs around it; an unquoted word may also end at a line that holds only its start
+ * (the regex backtracks to a shorter word), and the longest word that has an end line wins.
+ */
+function replaceClosedHeredocs(str, f) {
+  const ends = new Map(); // word -> [start, end] of each line that holds only that word, in order
+  const line = /[\t ]*([A-Za-z_][A-Za-z0-9_]*)[\t ]*(?=[\n\r\u2028\u2029]|$)/y;
+  const lt = /[\n\r\u2028\u2029]/g;
+  for (let start = 0; ; ) {
+    lt.lastIndex = start;
+    const br = lt.exec(str);
+    const end = br ? br.index : str.length;
+    line.lastIndex = start;
+    const w = line.exec(str);
+    if (w) (ends.get(w[1]) || ends.set(w[1], []).get(w[1])).push([start, end]);
+    if (!br) break;
+    start = end + 1;
+  }
+  const lengths = [...new Set([...ends.keys()].map((k) => k.length))].sort((a, b) => b - a);
+  const firstAfter = (list, pos) => { // the first line in list that starts after pos (binary search)
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid][0] > pos) hi = mid; else lo = mid + 1; }
+    return list[lo];
+  };
+  const head = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g;
+  let out = "";
+  let last = 0;
+  for (let m; (m = head.exec(str)); ) {
+    const after = m.index + m[0].length;
+    let hit;
+    for (const n of m[1] ? [m[2].length] : lengths) {
+      const list = n <= m[2].length && ends.get(m[2].slice(0, n));
+      if (list && (hit = firstAfter(list, after))) break;
+    }
+    if (!hit) { head.lastIndex = m.index + 1; continue; }
+    out += str.slice(last, m.index) + f(str.slice(m.index, hit[1]), m.index, str); // the arguments of a replace() callback
+    head.lastIndex = last = hit[1];
+  }
+  return out + str.slice(last);
+}
+
 // The old-style text stripper (used only by the safety net)
 function legacyStrip(raw) {
   let s = raw;
@@ -231,17 +330,16 @@ function legacyStrip(raw) {
   //    WARNING: except a heredoc fed to a shell (bash/sh/zsh/eval/source) — its body
   //    really runs, so it must not be removed, or it becomes a hole for evading the guard
   const FED_TO_SHELL = /(^|[|;&]|\s)(ba|z|k|da)?sh\b[^\n<]*$|(^|\s)(eval|source|exec)\b[^\n<]*$/;
-  const stripHeredocs = (str, re) =>
-    str.replace(re, (match, ...rest) => {
-      const offset = rest[rest.length - 2];
-      const head = str.slice(0, offset).split("\n").pop();
-      return FED_TO_SHELL.test(head) ? match : " <heredoc> ";
-    });
+  // the text of the line up to the heredoc, as str.slice(0, offset).split("\n").pop() but without copying the whole prefix
+  const keep = (str) => (match, ...rest) => {
+    const offset = rest[rest.length - 2];
+    return FED_TO_SHELL.test(str.slice(str.lastIndexOf("\n", offset - 1) + 1, offset)) ? match : " <heredoc> ";
+  };
 
-  //    (closed form)
-  s = stripHeredocs(s, /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?^[\t ]*\2[\t ]*$/gm);
+  //    (closed form: same result as /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[\s\S]*?^[\t ]*\2[\t ]*$/gm, in linear time)
+  s = replaceClosedHeredocs(s, keep(s));
   //    (unclosed form — happens when a log cuts the command at 200 characters, or the command is long)
-  s = stripHeredocs(s, /<<-?\s*(['"]?)[A-Za-z_][A-Za-z0-9_]*\1[\s\S]*$/m);
+  s = s.replace(/<<-?\s*(['"]?)[A-Za-z_][A-Za-z0-9_]*\1[\s\S]*$/m, keep(s));
 
   // 2) comments in scripts
   s = s.replace(/(^|\s)#[^\n]*/g, " ");
@@ -265,21 +363,22 @@ function legacyDecide(text) {
   return { action: "pass" };
 }
 
-/** Does this text end inside an unclosed quote? */
-function quoteOpen(s) {
-  let q = null;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (c === "\\" && q !== "'") { i++; continue; }
-    if (q) { if (c === q) q = null; }
-    else if (c === "'" || c === '"') q = c;
-  }
-  return q !== null;
-}
-
 /** Step 1: remove the bodies of heredocs that are "data" (not fed to a shell) — the command line itself is always kept. */
 function stripDataHeredocs(s) {
   const lines = s.split("\n");
+  // Where each possible end line is, found once (searching from every << again was quadratic):
+  // the line without trailing spaces/tabs → line numbers, and the same without leading tabs for <<-
+  const trimEnd = (l) => { let e = l.length; while (e > 0 && (l[e - 1] === " " || l[e - 1] === "\t")) e--; return l.slice(0, e); };
+  const ends = new Map();
+  const endsDash = new Map();
+  const add = (map, key, k) => (map.get(key) || map.set(key, []).get(key)).push(k);
+  lines.forEach((l, k) => { const t = trimEnd(l); add(ends, t, k); add(endsDash, t.replace(/^\t*/, ""), k); });
+  const nextEnd = (list, from) => { // the first line number >= from in list (binary search), or -1
+    let lo = 0;
+    let hi = list ? list.length : 0;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid] >= from) hi = mid; else lo = mid + 1; }
+    return list && lo < list.length ? list[lo] : -1;
+  };
   const out = [];
   let i = 0;
   while (i < lines.length) {
@@ -289,19 +388,26 @@ function stripDataHeredocs(s) {
     const ops = [];
     const re = /<<(-?)\s*\\?(['"]?)([^\s'"<>|;&()]+)\2/g;
     let m;
+    // Is the << inside a string? The quote state of line[0, at) is carried forward from one << to the next:
+    // a backslash outside single quotes skips the next character, a quote opens or closes a string.
+    let at = 0;
+    let q = null;
     while ((m = re.exec(line))) {
       if (line[m.index + 2] === "<" || (m.index > 0 && line[m.index - 1] === "<")) continue; // <<< here-string
-      if (quoteOpen(line.slice(0, m.index))) continue; // inside a string
+      for (; at < m.index; at++) {
+        const c = line[at];
+        if (c === "\\" && q !== "'") at++;
+        else if (q) { if (c === q) q = null; }
+        else if (c === "'" || c === '"') q = c;
+      }
+      if (q !== null) continue; // inside a string
       ops.push({ dash: m[1] === "-", word: m[3] });
     }
     if (!ops.length) continue;
     const fed = HEREDOC_FED.test(line.replace(/['"\\]/g, ""));
     for (const op of ops) {
-      const word = op.word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const term = new RegExp("^" + (op.dash ? "\\t*" : "") + word + "[\\t ]*$");
-      let j = i;
-      while (j < lines.length && !term.test(lines[j])) j++;
-      if (j >= lines.length) break; // unclosed → keep everything that remains (safe by default)
+      const j = nextEnd((op.dash ? endsDash : ends).get(op.word), i);
+      if (j < 0) break; // unclosed → keep everything that remains (safe by default)
       if (fed) for (let k = i; k <= j; k++) out.push(lines[k]);
       i = j + 1;
     }
@@ -666,7 +772,7 @@ function scanUploads(text, depth, found) {
     // What the commands so far in this pipeline read or name, kept as a running summary so that a
     // long pipeline is read in one pass: the first secret, whether a local file was read, and the
     // text of the last echo/printf (for "echo 'curl …' | bash").
-    const up = { secret: null, file: false, echo: null };
+    const up = { secret: null, file: false, echo: null, echoRead: false };
     pipeline.forEach((cmd, k) => {
       // $(…) and `…` anywhere really run: read them as commands of their own
       for (const w of [...cmd.words, ...cmd.redirs.map((r) => r.word)]) for (const body of w.subs) scanUploads(body, depth + 1, found);
@@ -677,7 +783,9 @@ function scanUploads(text, depth, found) {
       // text piped or given as a here-string to a shell is run by it: echo 'curl …' | bash · bash <<< 'curl …'
       if (SHELLS.has(name) && inner === null) {
         for (const r of cmd.redirs) if (r.op === "<<<") scanUploads(r.word.text, depth + 1, found);
-        if (up.echo !== null) scanUploads(up.echo, depth + 1, found);
+        // (read once per echo: reading the same text again finds nothing new, and doing it for every shell in
+        // "echo … | bash | bash | …" was quadratic)
+        if (up.echo !== null && !up.echoRead) { scanUploads(up.echo, depth + 1, found); up.echoRead = true; }
       }
       if (at >= 0 && SENDERS.has(name)) {
         // $(cat f) inside an argument of a sending command (a URL query, a header): f is sent
@@ -707,7 +815,7 @@ function scanUploads(text, depth, found) {
       // add this command to the running summary for the commands after it
       for (const f of readFiles(cmd)) { if (isSecretPath(f, true)) up.secret = up.secret || f; else if (!DEVICE_PATH.test(f)) up.file = true; }
       for (const w of cmd.words) up.secret = up.secret || mentioned(w) || null;
-      if (name === "echo" || name === "printf") up.echo = cmd.words.slice(at + 1).map((w) => w.text.replace(/\\n/g, "\n")).join(" ");
+      if (name === "echo" || name === "printf") { up.echo = cmd.words.slice(at + 1).map((w) => w.text.replace(/\\n/g, "\n")).join(" "); up.echoRead = false; }
     });
   }
   return found;
@@ -741,6 +849,10 @@ function analyze(raw) {
     if (red) best = { action: "ask", label: red.label, why: red.why };
   }
   if (best.action === "pass" && up) best = up;
+  if (best.action === "pass") {
+    const lim = LIMITS.find(hit); // v5.2: a run longer than the rules read → ask
+    if (lim) best = { action: "ask", label: lim.label, why: lim.why };
+  }
   if (best.action === "pass") {
     const w = WARN.find((r) => r.pattern.test(inert));
     if (w) best = { action: "warn", label: w.label };

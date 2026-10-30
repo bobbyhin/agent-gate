@@ -101,7 +101,14 @@ agent-gate is not a full shell parser. It reads a command the way a shell does, 
 6. **Safety net.** The rule set from before the rewrite runs again on the text with data heredocs
    removed, and the stronger decision wins. Nothing the old rules caught can slip through.
 7. **Failure and size.** If the guard itself breaks, the old rules decide, and anything they do
-   not block goes to a human. A command longer than 100,000 characters also goes to a human.
+   not block goes to a human. A command longer than 100,000 characters also goes to a human, and so
+   does a run of more than 32 options or arguments after a wrapper command (`sudo`, `env`, `xargs`,
+   …), after a deploy or publish tool, or before a `git`, `gh` or `docker` subcommand: the rules
+   read no further than that (v5.2).
+
+Every step takes time roughly in proportion to the length of the command. Before v5.2, some
+commands under the 100,000-character limit took minutes (`|bash` repeated 19,000 times took 152 s;
+30 `sudo` words in a row, exponential time). See [Slow inputs](docs/red-team.md#slow-inputs-v52).
 
 What that means in practice (each of these is checked against the code):
 
@@ -173,6 +180,10 @@ place.
   batch file only asks. Other upload tools (cloud storage CLIs, `httpie`, `python -c`) are not
   read at all. A secret in an environment variable (`curl -d "$TOKEN" ...`) and inline data pass.
   The destination is not checked either: an upload to `localhost` asks like any other.
+- The reading limit (v5.2). After a wrapper command, a deploy or publish tool, or before a `git`,
+  `gh` or `docker` subcommand, more than 32 options or arguments in a row are asked about without
+  being read. So `sudo apt-get install` with 40 packages asks, and a `git` command with 40 global
+  options before `reset --hard` asks instead of being blocked.
 
 Treating quoted text as data is deliberate. It is what keeps a commit message that talks about
 `git push` from being flagged, and it is also the source of several items above.
@@ -187,7 +198,8 @@ This is the history of the analyzer's earlier versions, from the author's notes:
 | v3 | Codex as the attacker, 55 cases | 43 of 55 got through |
 | v4 | red team 2, 38 cases | 20 of 38 got through; in 16 cases it did worse than the hook it was meant to replace |
 | v5 | all of the above plus the earlier suites, 239 cases | 239 of 239 get the expected decision |
-| v5.1 (this code) | a live check on 31 Oct 2026 (5 uploads of an SSH key), then suite G, 73 cases | v5 passed 5 of 5; v5.1 blocks 5 of 5, 73 of 73 get the expected decision, and the 239 cases get the same answers as under v5 |
+| v5.1 | a live check on 31 Oct 2026 (5 uploads of an SSH key), then suite G, 73 cases | v5 passed 5 of 5; v5.1 blocks 5 of 5, 73 of 73 get the expected decision, and the 239 cases get the same answers as under v5 |
+| v5.2 (this code) | a timing review on 31 Oct 2026: crafted commands under the 100,000-character limit | v5.1 took 152 to 304 s on three of them and exponential time on others; v5.2 answers each in under 0.6 s, with the same answers on the 239 + 73 cases and on 20,594 generated commands |
 
 Before v5, an oracle ran the real hook against 22 bypasses and all 22 passed silently, including
 `bash -c "...git push"`, `git commit -m "Fix #123" && git -C . push` (the `#` inside the string
@@ -977,9 +989,12 @@ npm test
 `npm test` compiles the TypeScript and then runs `node --test` (Node 20 or newer) over three suites.
 
 The shell guard suite needs no dependencies; `node --test test/command-guard.test.js` runs it on
-its own. It runs 320 tests: the 239 cases in `test/cases.json` and a check that the file is well
+its own. It runs 346 tests: the 239 cases in `test/cases.json` and a check that the file is well
 formed; the 73 upload cases of suite G in `test/cases-exfil.json`, a check that that file is well
-formed, and a hook test for a blocked upload; and 5 tests that run the hook as a child process.
+formed, and a hook test for a blocked upload; 5 tests that run the hook as a child process; 15 timing
+tests on crafted long commands (each must finish within 1 or 3 seconds, where v5.1 took from 2.8
+seconds to hours); 10 tests of the 32-word reading limit; and a differential test: the answers for
+20,594 generated commands (`test/generated-commands.js`) must hash to the value recorded from v5.1.
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
@@ -1011,7 +1026,7 @@ fake secret the tests use is in `test/llm/fake-secrets.ts`, assembled from piece
 no secret-shaped string appears in the source and secret scanners need no exceptions for this
 repository.
 
-Current result: **239/239 cases and 73/73 upload cases pass** (320/320 shell guard tests, 199/199
+Current result: **239/239 cases and 73/73 upload cases pass** (346/346 shell guard tests, 199/199
 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1053,7 +1068,8 @@ deploy/terraform/                             Cloud Run, Artifact Registry, Secr
 deploy/terraform/tests/                       plan-only Terraform tests with a mocked provider
 test/cases.json                               239 cases: id, category, expect, cmd
 test/cases-exfil.json                         suite G: 73 uploads of local files, same fields
-test/command-guard.test.js                    table tests over both case files, plus hook process tests
+test/command-guard.test.js                    table tests over both case files, hook process tests, timing tests
+test/generated-commands.js                    20,594 generated commands for the differential test against v5.1
 test/gateway/*.test.ts                        gateway tests: policy, config, approvals, CLI, end to end
 test/gateway/fake-downstream.ts               the fake MCP server for the end-to-end test
 test/llm/*.test.ts                            LLM gateway tests: routing, budget, leak guard, upstream, end to end, deploy configs
