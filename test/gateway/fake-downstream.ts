@@ -48,6 +48,15 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  "deploy",
+  { description: "Pretends to deploy a service.", inputSchema: { service: z.string() } },
+  async ({ service }) => {
+    received("deploy", { service });
+    return { content: [{ type: "text", text: `pretended to deploy ${service}` }] };
+  },
+);
+
 server.connect(new StdioServerTransport()).catch((err: unknown) => {
   process.stderr.write(`fake-downstream: ${String(err)}\n`);
   process.exit(1);

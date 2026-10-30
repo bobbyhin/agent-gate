@@ -57,6 +57,8 @@ export interface AskRequest {
   argsHash: string;
   rule: string;
   why: string;
+  /** How long a new request lives: the rule's ttlMinutes. Absent: the store's TTL (approvalTtlHours). */
+  ttlMs?: number;
 }
 
 export type AskOutcome =
@@ -185,7 +187,7 @@ export class ApprovalStore {
         why: request.why,
         status: "pending",
         createdAt: new Date(now).toISOString(),
-        expiresAt: new Date(now + this.ttlMs).toISOString(),
+        expiresAt: new Date(now + (request.ttlMs ?? this.ttlMs)).toISOString(),
       };
       approvals.push(created);
       return { kind: "pending", approval: created, created: true };

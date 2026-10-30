@@ -39,6 +39,18 @@ describe("ApprovalStore", () => {
   });
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
+  it("a rule's ttlMinutes sets the request's life; an approval left unused past it lets nothing through", () => {
+    const short = { ...request({ path: "prod" }, "deploy"), rule: "red-line-3-ship", ttlMs: 30 * 60 * 1000 };
+    const first = store.resolveAsk(short);
+    assert.equal(first.approval.expiresAt, new Date(now + 30 * 60 * 1000).toISOString());
+    store.approve(first.approval.id);
+    now += 31 * 60 * 1000; // approved, then the plan sat for 31 minutes
+    const later = store.resolveAsk(short);
+    assert.equal(later.kind, "pending", "a stale approval must not run the call");
+    assert.notEqual(later.approval.id, first.approval.id);
+    assert.equal(store.resolveAsk(request({ path: "x" })).approval.expiresAt, new Date(now + TTL).toISOString(), "without ttlMs, the store's TTL");
+  });
+
   it("queues a call once, approves it, lets it through exactly once, then asks again", () => {
     const first = store.resolveAsk(request({ path: "a.txt" }));
     assert.equal(first.kind, "pending");

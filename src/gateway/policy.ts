@@ -11,7 +11,8 @@
 //   toolWords  words in the tool's name                  ["delete", "create pull request"]
 //   args       argument values, by argument name         { "path": "*.env" }
 // A rule then either has a fixed "decision" and "why", or is a shell rule ("type": "shell") that
-// runs the slice-1 shell analyzer on one string argument and maps its answer.
+// runs the slice-1 shell analyzer on one string argument and maps its answer. A rule that can ask may
+// set "ttlMinutes": how long its approval requests live, instead of the config's approvalTtlHours.
 
 import { analyze, legacyDecide, type GuardAction, type GuardDecision } from "#command-guard";
 import { array, fail, object, onlyKeys, text } from "./validate.js";
@@ -33,6 +34,8 @@ export interface Verdict {
   rule: string;
   /** Why, in words that the agent and the human approver can act on. */
   why: string;
+  /** For an ask: how long the approval request lives (the rule's ttlMinutes). Absent: the config's approvalTtlHours. */
+  ttlMs?: number;
 }
 
 type Test = (value: string) => boolean;
@@ -142,8 +145,8 @@ function shellVerdict(rule: string, argument: string, call: ToolCall): Verdict {
 
 // ── parsing ─────────────────────────────────────────────────────────────────────────────────
 
-const MATCH_KEYS = ["id", "server", "tool", "toolWords", "args", "decision", "why"] as const;
-const SHELL_KEYS = ["id", "type", "server", "tool", "toolWords", "args", "argument"] as const;
+const MATCH_KEYS = ["id", "server", "tool", "toolWords", "args", "decision", "why", "ttlMinutes"] as const;
+const SHELL_KEYS = ["id", "type", "server", "tool", "toolWords", "args", "argument", "ttlMinutes"] as const;
 
 /** Checks policy JSON and compiles it. Throws ConfigError naming the bad field. */
 export function parsePolicy(json: unknown): Policy {
@@ -174,14 +177,23 @@ function compileRule(raw: unknown, at: string, ids: Set<string>): CompiledRule {
     args: rule.args === undefined ? [] : argumentMatchers(rule.args, `${at}.args`),
   };
 
+  const ttlMs = rule.ttlMinutes === undefined ? undefined : minutes(rule.ttlMinutes, `${at}.ttlMinutes`);
+  // The lifetime belongs to approval requests, so it is attached only to an ask.
+  const withTtl = (verdict: Verdict): Verdict => (ttlMs !== undefined && verdict.decision === "ask" ? { ...verdict, ttlMs } : verdict);
   if (shell) {
     // A shell rule without a tool filter would send every other tool's call to a human.
     if (!match.tool && !match.toolWords) fail(`${at} is a shell rule, so it needs "tool" or "toolWords"`);
     const argument = rule.argument === undefined ? "command" : text(rule.argument, `${at}.argument`);
-    return { ...match, verdict: (call) => shellVerdict(id, argument, call) };
+    return { ...match, verdict: (call) => withTtl(shellVerdict(id, argument, call)) };
   }
   const fixed: Verdict = { decision: decision(rule.decision, `${at}.decision`), rule: id, why: text(rule.why, `${at}.why`) };
-  return { ...match, verdict: () => ({ ...fixed }) };
+  if (ttlMs !== undefined && fixed.decision !== "ask") fail(`${at}.ttlMinutes only applies to a rule whose decision is ask`);
+  return { ...match, verdict: () => withTtl({ ...fixed }) };
+}
+
+function minutes(value: unknown, at: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) fail(`${at} must be a positive number of minutes`);
+  return Math.round(value * 60 * 1000);
 }
 
 function decision(value: unknown, at: string): Decision {

@@ -27,7 +27,8 @@
         "provision", "create instance", "create cluster", "create corpus", "create rag corpus", "create bucket", "enable api", "enable service", "scale up", "create key"
       ],
       "decision": "ask",
-      "why": "Red line 1: this tool looks like it spends or moves money, or creates a cloud resource that is billed."
+      "why": "Red line 1: this tool looks like it spends or moves money, or creates a cloud resource that is billed.",
+      "ttlMinutes": 15
     },
     {
       "id": "red-line-2-public",
@@ -39,7 +40,8 @@
       "id": "red-line-3-ship",
       "toolWords": ["push", "merge", "deploy", "create pull request", "create pr", "create release"],
       "decision": "ask",
-      "why": "Red line 3: this tool looks like a push, merge, pull request, release or deploy."
+      "why": "Red line 3: this tool looks like a push, merge, pull request, release or deploy.",
+      "ttlMinutes": 30
     },
     {
       "id": "red-line-4-delete",

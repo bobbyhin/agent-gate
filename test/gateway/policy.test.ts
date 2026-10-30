@@ -269,8 +269,29 @@ describe("parsePolicy rejects mistakes with the field named", () => {
     ["shell rule for every tool", { default: "allow", rules: [{ id: "s", type: "shell" }] }, /needs "tool" or "toolWords"/],
     ["unknown rule type", { default: "allow", rules: [{ ...rule, type: "match" }] }, /type must be "shell" or left out/],
     ["empty tool word", { default: "allow", rules: [{ ...rule, tool: undefined, toolWords: ["--"] }] }, /toolWords\[0\] has no letters or digits/],
+    ["ttlMinutes that is not positive", { default: "allow", rules: [{ ...rule, ttlMinutes: 0 }] }, /ttlMinutes must be a positive number of minutes/],
+    ["ttlMinutes as text", { default: "allow", rules: [{ ...rule, ttlMinutes: "30" }] }, /ttlMinutes must be a positive number of minutes/],
+    ["ttlMinutes on a rule that never asks", { default: "allow", rules: [{ ...rule, decision: "block", ttlMinutes: 30 }] }, /ttlMinutes only applies to a rule whose decision is ask/],
   ];
   for (const [name, json, message] of table) {
     it(name, () => assert.throws(() => parsePolicy(json), (err: unknown) => err instanceof ConfigError && message.test(err.message)));
   }
+});
+
+describe("ttlMinutes: a rule can give its approval requests a shorter life", () => {
+  it("the example gives money 15 minutes and shipping 30; the other asks use approvalTtlHours", () => {
+    assert.equal(check(example, "create_payment").ttlMs, 15 * 60 * 1000);
+    assert.equal(check(example, "merge_pull_request").ttlMs, 30 * 60 * 1000);
+    for (const tool of ["delete_file", "send_email", "add_memory"]) assert.equal(check(example, tool).ttlMs, undefined, tool);
+  });
+
+  it("is attached to an ask only, also from a shell rule", () => {
+    const policy = parsePolicy({
+      default: "allow",
+      rules: [{ id: "sh", type: "shell", tool: "bash", ttlMinutes: 5 }],
+    });
+    assert.deepEqual([check(policy, "bash", { command: "git push" }).decision, check(policy, "bash", { command: "git push" }).ttlMs], ["ask", 5 * 60 * 1000]);
+    assert.equal(check(policy, "bash", { command: "ls" }).ttlMs, undefined); // allow: nothing to expire
+    assert.equal(check(policy, "bash", { command: "git push --force" }).ttlMs, undefined); // block: never queued
+  });
 });

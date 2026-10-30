@@ -105,7 +105,7 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
         record(false);
         return errorResult(blockedText(verdict));
       case "ask": {
-        const outcome = approvals.resolveAsk({ ...call, argsHash, rule: verdict.rule, why: verdict.why });
+        const outcome = approvals.resolveAsk({ ...call, argsHash, rule: verdict.rule, why: verdict.why, ...(verdict.ttlMs !== undefined ? { ttlMs: verdict.ttlMs } : {}) });
         if (outcome.kind === "approved") {
           record(true, outcome.approval.id);
           return undefined;

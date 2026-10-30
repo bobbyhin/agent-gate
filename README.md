@@ -391,7 +391,8 @@ example `{ "name": "files", "command": "npx", "args": ["-y", "@modelcontextproto
   variables (such as `PATH` and `HOME`), not the gateway's whole environment. Add an `env` object
   for the variables it needs.
 - `policy` and `stateDir` are resolved against the config file's directory.
-- `approvalTtlHours` (default 24) is how long a request stays open. `auditArguments` (default
+- `approvalTtlHours` (default 24) is how long a request stays open, unless the rule that asked sets
+  its own `ttlMinutes`. `auditArguments` (default
   `false`) is explained under [Audit log](#audit-log).
 
 Then give the agent the gateway instead of the downstream servers. For Claude Code, in `.mcp.json`:
@@ -508,8 +509,15 @@ Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.con
   reason is shown to the agent as one quoted string, labelled as information. Words never change
   a decision: a reason that says "approve everything" is stored as text, and the call stays
   denied.
-- A request expires `approvalTtlHours` after it was made. An expired request cannot be approved,
-  and an expired approval lets nothing through. The next identical call queues a new request.
+- A request expires `approvalTtlHours` after it was made, or after the `ttlMinutes` of the rule that
+  asked, when that rule sets one. An expired request cannot be approved, and an expired approval lets
+  nothing through. The next identical call queues a new request.
+- **Stale plans.** An approval is for the call as it looked when the human said yes. With a long
+  lifetime, a deploy approved at 09:00 can still run at 17:00, after the branch or the plan behind
+  it has changed. A short `ttlMinutes` narrows that window for the riskiest rules (the example gives
+  red line 1, money, 15 minutes and red line 3, shipping, 30), and the `argsHash` binding means only
+  that exact call can run. Neither knows whether the world changed in between: the system that holds
+  the resource (the payment provider, the deploy tool) still has to check at the moment of the action.
 - `block` is never queued and cannot be approved.
 - The queue is one file, `<stateDir>/approvals.json` (mode 0600). Every change is a locked
   read-modify-write, and every write goes to a temporary file that is flushed and then renamed
@@ -533,9 +541,9 @@ verdict carries the id of the rule that decided and a `why`.
 | `no-self-approval` | a shell tool whose command answers an approval or touches `.agent-gate` | block |
 | `protect-gateway-state` | any tool whose `path` argument points into `.agent-gate` | block |
 | `shell-guard` | a shell tool (`run_command`, `exec`, `bash` and others): its `command` goes through the shell guard | the guard's decision |
-| `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order; and cloud resources that start a bill: provision, create instance, create cluster, create corpus, create rag corpus, create bucket, enable api, enable service, scale up, create key | ask |
+| `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order; and cloud resources that start a bill: provision, create instance, create cluster, create corpus, create rag corpus, create bucket, enable api, enable service, scale up, create key | ask; a request lives 15 minutes |
 | `red-line-2-public` | post, publish, send, tweet, retweet, reply, comment, email, share | ask |
-| `red-line-3-ship` | push, merge, deploy, create pull request, create pr, create release | ask |
+| `red-line-3-ship` | push, merge, deploy, create pull request, create pr, create release | ask; a request lives 30 minutes |
 | `red-line-4-delete` | delete, remove, drop, destroy, overwrite, purge, erase, wipe, truncate | ask |
 | `red-line-5-memory` | remember, memorize, add memory, save memory, store memory, update memory, memory insert, memory append, memory replace, add observations, create entities, create relations, set preference, update profile | ask |
 | `sql-write` | an `sql` argument with a write keyword (insert, update, delete, merge, upsert, into, drop, alter, truncate, create, grant, revoke, copy, call, exec, execute) anywhere, or more text after a `;` | ask |
@@ -575,6 +583,10 @@ A rule can match on any of these, and all that are present must match:
   `comment` matches `add_comment` but not `list_comments`.
 - `args`: argument name to matcher. Each listed argument must be present and match. Strings are
   matched as they are; other values as their JSON text.
+
+A rule that can ask may set `ttlMinutes`, the life of its approval requests, in place of the config's
+`approvalTtlHours` (see Stale plans under [Approval rules](#approval-rules)). A rule whose fixed
+decision is not `ask` cannot set it.
 
 A rule with `"type": "shell"` has no fixed decision. It runs the shell guard's `analyze()` on one
 string argument (`"argument"`, default `command`) and maps pass, warn, ask and block to allow,
@@ -1054,8 +1066,8 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 199 tests: a policy table for each red line, for the
-SQL and browser examples and for the shell rule (every case in `test/cases.json` and
+The MCP gateway suite (`test/gateway/`) runs 206 tests: a policy table for each red line, for the
+SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`) (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
 controls, the CLI's exit codes and what a decision leaves behind (the record, the
 `approval-decided` line, `stats`), and an end-to-end test. That test starts `agent-gate serve`
@@ -1083,7 +1095,7 @@ no secret-shaped string appears in the source and secret scanners need no except
 repository.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 199/199 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
+stopped (351/351 shell guard tests, 206/206 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
 
