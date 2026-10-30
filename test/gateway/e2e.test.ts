@@ -28,6 +28,7 @@ describe("gateway end to end", () => {
 
   before(async () => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-e2e-"));
+    fs.mkdirSync(path.join(tmp, "work"));
     stateDir = path.join(tmp, "state");
     receivedLog = path.join(tmp, "received.jsonl");
     configFile = path.join(tmp, "gateway.config.json");
@@ -37,6 +38,8 @@ describe("gateway end to end", () => {
         servers: [{ name: "demo", command: process.execPath, args: [FAKE, "--log", receivedLog] }],
         policy: path.join(ROOT, "policy.example.json"),
         stateDir: "state",
+        // Calls whose "path" is an absolute path under <tmp>/work are bound to the file's content.
+        fileBinding: { roots: ["work"], arguments: ["path"] },
       }),
     );
     const transport = new StdioClientTransport({ command: process.execPath, args: [BIN, "serve", "--config", configFile], stderr: "pipe" });
@@ -313,5 +316,28 @@ describe("gateway end to end", () => {
       assert.equal(fs.statSync(file).mode & 0o777, 0o600);
       assert.equal(fs.statSync(stateDir).mode & 0o777, 0o700);
     }
+  });
+
+  // After the audit test: its list of decision events stays as it was.
+  it("an approval bound to a file's content does not cover the file once it changed (fileBinding)", async () => {
+    const file = path.join(tmp, "work", "report.txt");
+    fs.writeFileSync(file, "quarterly numbers v1");
+    const before = received().length;
+    const first = approvalIdIn(await call("demo__delete_file", { path: file }));
+    const record = queue().find((a) => a.id === first);
+    assert.equal(record?.files?.length, 1, "the file is bound to the request");
+    assert.equal(cli("approvals", "approve", first).code, 0);
+
+    fs.writeFileSync(file, "quarterly numbers v2"); // changed after the human said yes
+    const changed = await call("demo__delete_file", { path: file });
+    const second = approvalIdIn(changed);
+    assert.notEqual(second, first);
+    assert.equal(text(changed).split("\n")[0], `agent-gate: a file this call names changed after it was approved (approval ${first}), so it was not run and needs a new decision.`);
+    assert.equal(received().length, before, "nothing reached the server");
+    assert.equal(queue().find((a) => a.id === first)?.status, "stale");
+
+    assert.equal(cli("approvals", "approve", second).code, 0);
+    assert.equal(text(await call("demo__delete_file", { path: file })), `pretended to delete ${file}`);
+    assert.equal(received().length, before + 1);
   });
 });

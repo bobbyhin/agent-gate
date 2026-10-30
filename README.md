@@ -394,6 +394,9 @@ example `{ "name": "files", "command": "npx", "args": ["-y", "@modelcontextproto
 - `approvalTtlHours` (default 24) is how long a request stays open, unless the rule that asked sets
   its own `ttlMinutes`. `auditArguments` (default
   `false`) is explained under [Audit log](#audit-log).
+- `fileBinding` (optional), for example `{ "roots": ["/srv/agent-work"], "arguments": ["path", "source"] }`,
+  binds approvals to the content of the files that those arguments name. See
+  [Approval rules](#approval-rules). Roots are resolved against the config file's directory and must exist.
 
 Then give the agent the gateway instead of the downstream servers. For Claude Code, in `.mcp.json`:
 
@@ -519,6 +522,18 @@ Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.con
   that exact call can run. Neither knows whether the world changed in between: the system that holds
   the resource (the payment provider, the deploy tool) still has to check at the moment of the action.
 - `block` is never queued and cannot be approved.
+- **Bound to file content** (with `fileBinding` in the config). An argument that names a file is
+  only its text: approving "upload `/srv/agent-work/report.pdf`" did not say which report. When a call
+  needs a human, the gateway hashes (SHA-256) each file that a listed argument names and keeps the
+  hashes with the request; `approvals list` shows them. When the approved call comes back, it hashes
+  the files again. If one changed or was deleted, the call is not run, the approval is marked `stale`,
+  and a new request is queued for the new content. Only an absolute path that leads, after every
+  symlink is resolved, to a file inside one of the roots (or to a file not created yet, in a folder
+  inside one) is bound. A relative path is not, because it depends on the downstream server's working
+  directory, which the gateway cannot see; nor is a path that leads outside the roots, by `..` or by
+  a symlink. This narrows the gap between the human's yes and the action to the moment between the
+  second hash and the downstream server opening the file. It cannot close it: the server reads the
+  file itself.
 - The queue is one file, `<stateDir>/approvals.json` (mode 0600). Every change is a locked
   read-modify-write, and every write goes to a temporary file that is flushed and then renamed
   over the old one. A damaged file is an error, never an empty queue, because an empty queue would
@@ -650,7 +665,8 @@ requests still in `approvals.json`; one that expired more than a week ago is no 
 - It does not use MCP tool annotations such as `destructiveHint`. They come from the same server
   whose names it already has to trust.
 - Argument matching is text matching. It does not resolve paths, symlinks or the working
-  directory.
+  directory. Approvals can be bound to a file's content (`fileBinding`), but a rule's decision is
+  still made from the text.
 - An approval is only as safe as the place it is stored. Anyone who can run the CLI or write
   `<stateDir>` can approve, including an agent that has its own shell or file tools outside the
   gateway. The example policy stops this through the gateway (`no-self-approval`,
@@ -1066,8 +1082,9 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 206 tests: a policy table for each red line, for the
-SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`) (every case in `test/cases.json` and
+The MCP gateway suite (`test/gateway/`) runs 218 tests: a policy table for each red line, for the
+SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
+files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
 controls, the CLI's exit codes and what a decision leaves behind (the record, the
 `approval-decided` line, `stats`), and an end-to-end test. That test starts `agent-gate serve`
@@ -1095,7 +1112,7 @@ no secret-shaped string appears in the source and secret scanners need no except
 repository.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 206/206 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
+stopped (351/351 shell guard tests, 218/218 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
 
@@ -1108,6 +1125,7 @@ bin/claude-pretooluse-hook.js                 the Claude Code PreToolUse hook
 src/gateway/server.ts                         the MCP gateway: lists <server>__<tool>, decides, forwards
 src/gateway/policy.ts                         the policy engine (pure): evaluate(policy, call) -> verdict
 src/gateway/approvals.ts                      the approval queue in <stateDir>/approvals.json
+src/gateway/files.ts                          binds approvals to the content of the files a call names
 src/gateway/audit.ts                          the audit log, <stateDir>/audit.jsonl
 src/gateway/config.ts                         loads and checks the gateway config
 src/gateway/validate.ts                       field-by-field checks for the configs and the policies

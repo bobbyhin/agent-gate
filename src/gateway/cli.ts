@@ -181,6 +181,7 @@ function list(store: ApprovalStore, all: boolean, json: boolean, io: Io): number
         `${a.id}  ${state}  ${a.server}${SEPARATOR}${a.tool}`,
         `  why:     ${a.why} (rule ${a.rule})`,
         `  args:    ${preview(canonicalJson(a.args))}`,
+        ...(a.files ?? []).map((f) => `  file:    ${f.path} ${f.sha256 ?? "(did not exist)"}`),
         `  created: ${a.createdAt}  expires: ${a.expiresAt}`,
         ...(a.decidedAt ? [`  decided: ${a.decidedAt}${a.decidedBy ? ` by ${a.decidedBy}` : ""}`] : []),
         ...(a.decisionNote ? [`  note:    ${a.decisionNote}`] : []),

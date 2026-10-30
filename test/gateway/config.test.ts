@@ -2,6 +2,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { DEFAULT_APPROVAL_TTL_HOURS, loadConfig, parseConfig } from "../../src/gateway/config.js";
 import { VERSION } from "../../src/gateway/server.js";
@@ -54,6 +55,27 @@ describe("gateway config", () => {
   for (const [name, json, message] of table) {
     it(`rejects: ${name}`, () => assert.throws(() => parseConfig(json, "/srv"), (err: unknown) => err instanceof ConfigError && message.test(err.message)));
   }
+
+  it("fileBinding: roots are resolved against the config's directory and through symlinks", () => {
+    const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-config-")));
+    try {
+      fs.mkdirSync(path.join(tmp, "work"));
+      fs.symlinkSync(path.join(tmp, "work"), path.join(tmp, "work-link"));
+      const config = parseConfig({ ...valid, fileBinding: { roots: ["work-link"], arguments: ["path"] } }, tmp);
+      assert.deepEqual(config.fileBinding, { roots: [path.join(tmp, "work")], arguments: ["path"] });
+      assert.equal(parseConfig(valid, tmp).fileBinding, undefined);
+      for (const [binding, message] of [
+        [{ roots: ["missing"], arguments: ["path"] }, /config\.fileBinding\.roots\[0\] does not exist: missing/],
+        [{ roots: [], arguments: ["path"] }, /config\.fileBinding\.roots must list at least one entry/],
+        [{ roots: ["work"], arguments: [] }, /config\.fileBinding\.arguments must list at least one entry/],
+        [{ roots: ["work"], arguments: ["path"], follow: true }, /config\.fileBinding has an unknown field "follow"/],
+      ] as const) {
+        assert.throws(() => parseConfig({ ...valid, fileBinding: binding }, tmp), (err: unknown) => err instanceof ConfigError && message.test(err.message));
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 
   it("reports the server version that package.json declares", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));

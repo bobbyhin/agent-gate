@@ -51,6 +51,48 @@ describe("ApprovalStore", () => {
     assert.equal(store.resolveAsk(request({ path: "x" })).approval.expiresAt, new Date(now + TTL).toISOString(), "without ttlMs, the store's TTL");
   });
 
+  describe("bound to file content (fileBinding)", () => {
+    const at = (sha256: string | null) => [{ argument: "path", path: "/work/report.txt", sha256 }];
+    const call = (sha256: string | null) => ({ ...request({ path: "/work/report.txt" }, "upload_file"), files: at(sha256) });
+
+    it("the same file: the approval is used once, as before", () => {
+      const first = store.resolveAsk(call("sha256:aaa"));
+      assert.deepEqual(first.approval.files, at("sha256:aaa"));
+      store.approve(first.approval.id);
+      const used = store.resolveAsk(call("sha256:aaa"));
+      assert.deepEqual([used.kind, used.approval.id, used.approval.status], ["approved", first.approval.id, "used"]);
+    });
+
+    it("the file changed after approval: not run, the approval goes stale, a new request holds the new hash", () => {
+      const first = store.resolveAsk(call("sha256:aaa"));
+      store.approve(first.approval.id);
+      const changed = store.resolveAsk(call("sha256:bbb"));
+      assert.equal(changed.kind, "pending");
+      assert.equal(changed.kind === "pending" && changed.replaced?.id, first.approval.id);
+      assert.notEqual(changed.approval.id, first.approval.id);
+      assert.deepEqual(changed.approval.files, at("sha256:bbb"));
+      assert.equal(store.get(first.approval.id).status, "stale");
+      assert.throws(() => store.approve(first.approval.id), /is stale; only a pending request can be approved/);
+      store.approve(changed.approval.id);
+      assert.equal(store.resolveAsk(call("sha256:bbb")).kind, "approved");
+    });
+
+    it("the file is gone after approval: not run either", () => {
+      const first = store.resolveAsk(call("sha256:aaa"));
+      store.approve(first.approval.id);
+      const gone = store.resolveAsk(call(null));
+      assert.equal(gone.kind, "pending");
+      assert.equal(gone.kind === "pending" && gone.replaced?.id, first.approval.id);
+      assert.equal(store.get(first.approval.id).status, "stale");
+    });
+
+    it("a denial still wins over a changed file", () => {
+      const first = store.resolveAsk(call("sha256:aaa"));
+      store.deny(first.approval.id);
+      assert.equal(store.resolveAsk(call("sha256:bbb")).kind, "denied");
+    });
+  });
+
   it("queues a call once, approves it, lets it through exactly once, then asks again", () => {
     const first = store.resolveAsk(request({ path: "a.txt" }));
     assert.equal(first.kind, "pending");

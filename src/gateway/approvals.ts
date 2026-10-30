@@ -4,6 +4,9 @@
 // tells the agent the approval id. A human approves or denies it with the CLI. An approval is
 // bound to one exact call (server, tool and a hash of the arguments): it lets that call through
 // once, and is then marked "used". Denied and expired approvals never let anything through.
+// With "fileBinding" in the config, it is also bound to the content of the files the call names
+// (src/gateway/files.ts): if one changed before the call came back, the approval is marked "stale"
+// and a new request is queued.
 //
 // Everything lives in one JSON file, <stateDir>/approvals.json. The gateway and the CLI are
 // separate processes, so every change is a locked read-modify-write, and every write goes to a
@@ -12,9 +15,11 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import * as path from "node:path";
+import { sameFiles, type BoundFile } from "./files.js";
 import { readIfExists, withLock, writeAtomic } from "./state-file.js";
 
-export type ApprovalStatus = "pending" | "approved" | "denied" | "used";
+/** "stale": approved, but a file the call names changed before the call came back. It allows nothing. */
+export type ApprovalStatus = "pending" | "approved" | "denied" | "used" | "stale";
 
 export interface Approval {
   id: string;
@@ -27,6 +32,8 @@ export interface Approval {
    * audit log, this file is short-lived: records are dropped a week after they expire.
    */
   args: Record<string, unknown>;
+  /** The files the arguments name and their content hashes when the request was made (fileBinding). */
+  files?: BoundFile[];
   rule: string;
   why: string;
   status: ApprovalStatus;
@@ -59,13 +66,18 @@ export interface AskRequest {
   why: string;
   /** How long a new request lives: the rule's ttlMinutes. Absent: the store's TTL (approvalTtlHours). */
   ttlMs?: number;
+  /** The files the arguments name, hashed now (fileBinding). Absent: none are bound. */
+  files?: BoundFile[];
 }
 
 export type AskOutcome =
   /** An approval for this exact call existed and has now been used up: run the call. */
   | { kind: "approved"; approval: Approval }
-  /** Waiting for a human. `created` is false when the agent repeated a call that is already queued. */
-  | { kind: "pending"; approval: Approval; created: boolean }
+  /**
+   * Waiting for a human. `created` is false when the agent repeated a call that is already queued.
+   * `replaced` is an approval of this call that went stale because a file it names changed.
+   */
+  | { kind: "pending"; approval: Approval; created: boolean; replaced?: Approval }
   /** A human said no to this exact call. */
   | { kind: "denied"; approval: Approval };
 
@@ -170,19 +182,26 @@ export class ApprovalStore {
       const denied = sameCall.find((a) => a.status === "denied");
       if (denied) return { kind: "denied", approval: denied };
       const approved = sameCall.find((a) => a.status === "approved");
-      if (approved) {
+      let replaced: Approval | undefined;
+      if (approved && sameFiles(approved.files, request.files)) {
         approved.status = "used";
         approved.usedAt = new Date(now).toISOString();
         return { kind: "approved", approval: approved };
       }
+      if (approved) {
+        // A file changed or went away since the human saw the request: this yes was for other content.
+        approved.status = "stale";
+        replaced = approved;
+      }
       const pending = sameCall.find((a) => a.status === "pending");
-      if (pending) return { kind: "pending", approval: pending, created: false };
+      if (pending) return { kind: "pending", approval: pending, created: false, ...(replaced ? { replaced } : {}) };
       const created: Approval = {
         id: newId(approvals),
         server: request.server,
         tool: request.tool,
         argsHash: request.argsHash,
         args: request.args,
+        ...(request.files ? { files: request.files } : {}),
         rule: request.rule,
         why: request.why,
         status: "pending",
@@ -190,7 +209,7 @@ export class ApprovalStore {
         expiresAt: new Date(now + (request.ttlMs ?? this.ttlMs)).toISOString(),
       };
       approvals.push(created);
-      return { kind: "pending", approval: created, created: true };
+      return { kind: "pending", approval: created, created: true, ...(replaced ? { replaced } : {}) };
     });
   }
 

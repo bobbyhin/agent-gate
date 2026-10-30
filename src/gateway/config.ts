@@ -6,14 +6,17 @@
 //     "stateDir": ".agent-gate"
 //   }
 //
-// Optional fields: "approvalTtlHours" (default 24), "auditArguments" (default false), and per
-// server "env" (extra environment variables; a downstream server otherwise gets only the SDK's
-// short list of safe variables such as PATH and HOME, not the gateway's whole environment).
-// Relative "policy" and "stateDir" paths are resolved against the config file's directory.
+// Optional fields: "approvalTtlHours" (default 24), "auditArguments" (default false),
+// "fileBinding" ({ "roots": [...], "arguments": [...] }: bind approvals to the content of the files
+// those arguments name, see src/gateway/files.ts), and per server "env" (extra environment
+// variables; a downstream server otherwise gets only the SDK's short list of safe variables such as
+// PATH and HOME, not the gateway's whole environment).
+// Relative "policy", "stateDir" and fileBinding roots are resolved against the config file's directory.
 // "command" and "args" are passed to the downstream process unchanged.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { FileBindingConfig } from "./files.js";
 import { parsePolicy, type Policy } from "./policy.js";
 import { array, ConfigError, fail, object, onlyKeys, text } from "./validate.js";
 
@@ -30,6 +33,7 @@ export interface GatewayConfig {
   stateDir: string;
   approvalTtlMs: number;
   auditArguments: boolean;
+  fileBinding?: FileBindingConfig;
 }
 
 export const DEFAULT_APPROVAL_TTL_HOURS = 24;
@@ -49,7 +53,7 @@ export function loadPolicy(file: string): Policy {
 
 export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
   const config = object(json, "config");
-  onlyKeys(config, ["servers", "policy", "stateDir", "approvalTtlHours", "auditArguments"], "config");
+  onlyKeys(config, ["servers", "policy", "stateDir", "approvalTtlHours", "auditArguments", "fileBinding"], "config");
 
   const servers = array(config.servers, "config.servers").map((raw, i) => server(raw, `config.servers[${i}]`));
   if (servers.length === 0) fail("config.servers must list at least one server");
@@ -70,7 +74,31 @@ export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
     stateDir: path.resolve(baseDir, text(config.stateDir, "config.stateDir")),
     approvalTtlMs: Math.round(hours * 60 * 60 * 1000),
     auditArguments,
+    ...(config.fileBinding === undefined ? {} : { fileBinding: fileBinding(config.fileBinding, baseDir) }),
   };
+}
+
+function fileBinding(raw: unknown, baseDir: string): FileBindingConfig {
+  const at = "config.fileBinding";
+  const spec = object(raw, at);
+  onlyKeys(spec, ["roots", "arguments"], at);
+  const list = (value: unknown, field: string): string[] => {
+    const items = array(value, `${at}.${field}`).map((item, i) => text(item, `${at}.${field}[${i}]`));
+    if (items.length === 0) fail(`${at}.${field} must list at least one entry`);
+    return items;
+  };
+  // Roots are compared with real paths, so resolve their own symlinks once, here.
+  const roots = list(spec.roots, "roots").map((root, i) => {
+    try {
+      const real = fs.realpathSync(path.resolve(baseDir, root));
+      if (!fs.statSync(real).isDirectory()) fail(`${at}.roots[${i}] is not a folder: ${root}`);
+      return real;
+    } catch (err) {
+      if (err instanceof ConfigError) throw err;
+      return fail(`${at}.roots[${i}] does not exist: ${root}`);
+    }
+  });
+  return { roots, arguments: list(spec.arguments, "arguments") };
 }
 
 function server(raw: unknown, at: string): ServerConfig {

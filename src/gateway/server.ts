@@ -31,6 +31,7 @@ import {
 import { ApprovalStore, hashArguments, type Approval } from "./approvals.js";
 import { AuditLog } from "./audit.js";
 import type { GatewayConfig } from "./config.js";
+import { bindFiles } from "./files.js";
 import { evaluate, type Policy, type ToolCall, type Verdict } from "./policy.js";
 
 export const VERSION = "0.1.0";
@@ -105,13 +106,21 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
         record(false);
         return errorResult(blockedText(verdict));
       case "ask": {
-        const outcome = approvals.resolveAsk({ ...call, argsHash, rule: verdict.rule, why: verdict.why, ...(verdict.ttlMs !== undefined ? { ttlMs: verdict.ttlMs } : {}) });
+        const files = config.fileBinding ? bindFiles(call.args, config.fileBinding) : undefined;
+        const outcome = approvals.resolveAsk({
+          ...call,
+          argsHash,
+          rule: verdict.rule,
+          why: verdict.why,
+          ...(verdict.ttlMs !== undefined ? { ttlMs: verdict.ttlMs } : {}),
+          ...(files ? { files } : {}),
+        });
         if (outcome.kind === "approved") {
           record(true, outcome.approval.id);
           return undefined;
         }
         record(false, outcome.approval.id);
-        return errorResult(outcome.kind === "denied" ? deniedText(outcome.approval) : pendingText(outcome.approval, outcome.created));
+        return errorResult(outcome.kind === "denied" ? deniedText(outcome.approval) : pendingText(outcome.approval, outcome.created, outcome.replaced));
       }
     }
   }
@@ -199,11 +208,13 @@ function errorResult(message: string): CallToolResult {
 
 const DO_NOT_WORK_AROUND = "Do not try to get the same result another way.";
 
-function pendingText(approval: Approval, created: boolean): string {
+function pendingText(approval: Approval, created: boolean, replaced?: Approval): string {
   return [
-    created
-      ? "agent-gate: this call needs a human decision, so it was not run."
-      : "agent-gate: this call is still waiting for a human decision, so it was not run.",
+    replaced
+      ? `agent-gate: a file this call names changed after it was approved (approval ${replaced.id}), so it was not run and needs a new decision.`
+      : created
+        ? "agent-gate: this call needs a human decision, so it was not run."
+        : "agent-gate: this call is still waiting for a human decision, so it was not run.",
     `Reason: ${approval.why} (rule ${approval.rule})`,
     `Approval id: ${approval.id} (expires ${approval.expiresAt})`,
     `A human can approve it with: agent-gate approvals approve ${approval.id}`,
