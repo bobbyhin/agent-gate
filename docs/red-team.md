@@ -14,6 +14,9 @@ A second file, `test/cases-exfil.json`, holds suite G: 73 uploads of local files
 See [Suite G: uploads of local files](#suite-g-uploads-of-local-files). v5.2 made the analyzer fast on
 long crafted commands without changing its answers; see [Slow inputs](#slow-inputs-v52).
 
+A third file, `test/cases-heldout.json`, holds 163 commands that the analyzer was never tuned on: a
+held-out set from a later red team, scored by `npm run redteam`. See [test/HELDOUT.md](../test/HELDOUT.md).
+
 ## Expected decisions
 
 | Expected decision | Cases |

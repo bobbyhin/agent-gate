@@ -11,7 +11,8 @@ This repository has five parts:
 - `bin/claude-pretooluse-hook.js`: a Claude Code `PreToolUse` hook built on the analyzer.
 - `test/cases.json`: 239 commands, each with the decision it must get. They come from red-team
   rounds against earlier versions of the analyzer. A second suite, `test/cases-exfil.json`, holds
-  73 uploads of local files (suite G, added with v5.1).
+  73 uploads of local files (suite G, added with v5.1). A third, `test/cases-heldout.json`, holds
+  163 commands from a later red team that the analyzer was never tuned on (`npm run redteam`).
 - `src/gateway/`: an MCP gateway (TypeScript) that brings the same four decisions to MCP tool
   calls and holds risky calls until a human approves them. See [MCP gateway](#mcp-gateway).
 - `src/llm/`: an LLM gateway (TypeScript) in front of model providers, with routing, daily and
@@ -208,8 +209,30 @@ suite. The v4 failures that were worse than before included `arch -arm64 git pus
 `echo rm -rf ~ | bash` and `bash --norc -c`.
 
 The bypass counts for v2 to v4 come from the author's notes. Those versions are not published
-here, so only the last two rows can be reproduced from this repository (`npm test`). The categories in
+here, so only the last three rows can be reproduced from this repository (`npm test`). The categories in
 `test/cases.json` are described in [docs/red-team.md](docs/red-team.md).
+
+### Held-out score
+
+Every case above was used to repair the analyzer, so passing all of them shows that the repairs hold,
+not how it does against attacks it has not seen. `test/cases-heldout.json` is the measure for that:
+163 commands that a red team wrote on 17 Oct 2026 against a later private version of the hook, which
+was built for a wider job (single-file overwrites, paid API calls, posting). None of them was used to
+build or tune this analyzer. `npm run redteam` prints the score per category:
+
+| | v5.1 and v5.2 |
+| --- | --- |
+| stopped (ask or block), of 122 that should be | 8 (7%) |
+| asked about, of 41 that should pass | 2 |
+| slowest case | 3.4 s in v5.1, under 40 ms in v5.2 |
+
+Most of the misses are actions this analyzer does not look at: single-file deletes and overwrites
+(0 of 34), paid API calls (0 of 18), posting (0 of 10), and shell tricks around them. The pushes it
+misses are made from `node` or `python3` code, a git alias, an HTTP request to GitHub's API or a
+deploy CLI it does not know. The two false asks are recursive deletes of `node_modules` and of a `/tmp`
+folder, which this analyzer asks about by design. `npm test` fails if the score gets worse than
+`test/heldout-baseline.json`; [test/HELDOUT.md](test/HELDOUT.md) says where the cases come from and
+what was changed before publication.
 
 ## Use it as a Claude Code hook
 
@@ -989,12 +1012,14 @@ npm test
 `npm test` compiles the TypeScript and then runs `node --test` (Node 20 or newer) over three suites.
 
 The shell guard suite needs no dependencies; `node --test test/command-guard.test.js` runs it on
-its own. It runs 346 tests: the 239 cases in `test/cases.json` and a check that the file is well
+its own. It runs 348 tests: the 239 cases in `test/cases.json` and a check that the file is well
 formed; the 73 upload cases of suite G in `test/cases-exfil.json`, a check that that file is well
 formed, and a hook test for a blocked upload; 5 tests that run the hook as a child process; 15 timing
 tests on crafted long commands (each must finish within 1 or 3 seconds, where v5.1 took from 2.8
-seconds to hours); 10 tests of the 32-word reading limit; and a differential test: the answers for
-20,594 generated commands (`test/generated-commands.js`) must hash to the value recorded from v5.1.
+seconds to hours); 10 tests of the 32-word reading limit; a differential test: the answers for
+20,594 generated commands (`test/generated-commands.js`) must hash to the value recorded from v5.1;
+and 2 tests of the held-out set: it is well formed, and its score is no worse than
+`test/heldout-baseline.json`. `npm run redteam` prints that score per category.
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
@@ -1026,8 +1051,8 @@ fake secret the tests use is in `test/llm/fake-secrets.ts`, assembled from piece
 no secret-shaped string appears in the source and secret scanners need no exceptions for this
 repository.
 
-Current result: **239/239 cases and 73/73 upload cases pass** (346/346 shell guard tests, 199/199
-MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
+Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
+stopped (348/348 shell guard tests, 199/199 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
 
@@ -1068,6 +1093,9 @@ deploy/terraform/                             Cloud Run, Artifact Registry, Secr
 deploy/terraform/tests/                       plan-only Terraform tests with a mocked provider
 test/cases.json                               239 cases: id, category, expect, cmd
 test/cases-exfil.json                         suite G: 73 uploads of local files, same fields
+test/cases-heldout.json                       163 held-out commands from a later red team (test/HELDOUT.md)
+test/heldout-baseline.json                    the held-out score that npm test must not fall below
+scripts/redteam.js                            npm run redteam: the held-out score per category
 test/command-guard.test.js                    table tests over both case files, hook process tests, timing tests
 test/generated-commands.js                    20,594 generated commands for the differential test against v5.1
 test/gateway/*.test.ts                        gateway tests: policy, config, approvals, CLI, end to end
@@ -1076,6 +1104,7 @@ test/llm/*.test.ts                            LLM gateway tests: routing, budget
 test/llm/fake-upstream.ts                     a fake OpenAI-compatible provider for the tests, the example and the demo
 test/llm/fake-secrets.ts                      every fake secret the tests use, in one file
 test/SANITIZED.md                             what was changed in the cases before publication
+test/HELDOUT.md                               where the held-out cases come from, and their score
 docs/red-team.md                              the case categories, with counts
 docs/adr/0001-non-blocking-approvals.md       why "ask" answers with an error instead of waiting
 docs/adr/0002-reserve-then-settle-budgets.md  why budgets reserve an estimate and settle after

@@ -1,0 +1,8 @@
+{
+  "note": "Score of src/command-guard.js on test/cases-heldout.json. test/command-guard.test.js fails if caught drops or falseAsks rises. Update it when a change improves the score (npm run redteam prints the numbers).",
+  "version": "v5.2",
+  "shouldAsk": 122,
+  "caught": 8,
+  "shouldPass": 41,
+  "falseAsks": 2
+}

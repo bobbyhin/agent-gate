@@ -245,3 +245,32 @@ describe("v5.2 gives the same answers as v5.1 on 20,594 generated commands", () 
     assert.equal(hash.digest("hex"), "5e04e3fa2343f5cbba35775866cb2b89732f4617688ba5e39f6702e767e7a9b8");
   });
 });
+
+// The held-out set (test/HELDOUT.md): a red team's commands against a later, broader hook, never used
+// to build or tune this one. npm run redteam prints the score; this keeps it from getting worse.
+describe("test/cases-heldout.json (held-out set): the score does not get worse", () => {
+  const heldout = require("./cases-heldout.json");
+  const baseline = require("./heldout-baseline.json");
+  const { score } = require("../scripts/redteam.js");
+
+  it("holds 163 well-formed H- cases with unique ids, none of them in the other suites", () => {
+    assert.equal(heldout.length, 163);
+    assert.equal(new Set(heldout.map((c) => c.id)).size, heldout.length, "ids must be unique");
+    const otherIds = new Set([...cases, ...exfilCases].map((c) => c.id));
+    for (const c of heldout) {
+      assert.deepEqual(Object.keys(c).sort(), ["category", "cmd", "expect", "id"], `${c.id}: unexpected fields`);
+      assert.match(c.id, /^H-/, `${c.id}: held-out ids start with H-`);
+      assert.ok(!otherIds.has(c.id), `${c.id}: also used in another suite`);
+      assert.ok(c.expect === "ask" || c.expect === "pass", `${c.id}: expect must be ask or pass`);
+      assert.equal(typeof c.cmd, "string", `${c.id}: cmd must be a string`);
+    }
+  });
+
+  it(`stops at least ${baseline.caught} of ${baseline.shouldAsk} and asks about at most ${baseline.falseAsks} of ${baseline.shouldPass} that should pass`, () => {
+    const { total } = score(heldout);
+    assert.equal(total.shouldAsk, baseline.shouldAsk);
+    assert.equal(total.shouldPass, baseline.shouldPass);
+    assert.ok(total.caught >= baseline.caught, `recall fell to ${total.caught}/${total.shouldAsk} (baseline ${baseline.caught})`);
+    assert.ok(total.falseAsks <= baseline.falseAsks, `false asks rose to ${total.falseAsks}/${total.shouldPass} (baseline ${baseline.falseAsks})`);
+  });
+});
