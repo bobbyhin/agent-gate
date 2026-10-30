@@ -512,6 +512,9 @@ run.
   another OS user.
 - Only tools are proxied. Resources, prompts, and requests from a downstream server back to the
   client (sampling, elicitation) are not.
+- It does not read tool results, so it cannot spot instructions an attacker planted in them (a
+  prompt injection). What it decides is the agent's next call: if the agent obeys and tries to
+  upload a secret through a shell tool, the shell rule blocks it, as the end-to-end test shows.
 - Downstream servers are started once. If one fails to start, the gateway does not start; if one
   dies later, its calls fail until the gateway is restarted.
 - Downstream calls use the SDK's default 60-second request timeout, and progress notifications
@@ -903,13 +906,14 @@ formed, and a hook test for a blocked upload; and 5 tests that run the hook as a
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 119 tests: a policy table for each red line and for
+The MCP gateway suite (`test/gateway/`) runs 120 tests: a policy table for each red line and for
 the shell rule (every case in `test/cases.json` and `test/cases-exfil.json` is also run through
-the gateway's shell rule),
-config and policy validation, the approval store with a clock the test controls, the CLI's exit
-codes, and an end-to-end test. That test starts `agent-gate serve` against a fake downstream
-server, talks to it with a real MCP client, answers approvals with the real CLI, and checks what
-reached the downstream server and what was written to the audit log.
+the gateway's shell rule), config and policy validation, the approval store with a clock the test
+controls, the CLI's exit codes, and an end-to-end test. That test starts `agent-gate serve`
+against a fake downstream server, talks to it with a real MCP client, answers approvals with the
+real CLI, and checks what reached the downstream server and what was written to the audit log.
+One step plays a prompt injection: a tool result tells the agent to upload its SSH key, the agent
+obeys, and the gateway blocks the call before it reaches the server.
 
 The LLM gateway suite (`test/llm/`) runs 161 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
@@ -927,7 +931,7 @@ fake secret the tests use is in `test/llm/fake-secrets.ts`, assembled from piece
 no secret-shaped string appears in the source and secret scanners need no exceptions for this
 repository.
 
-Current result: **239/239 cases and 73/73 upload cases pass** (320/320 shell guard tests, 119/119
+Current result: **239/239 cases and 73/73 upload cases pass** (320/320 shell guard tests, 120/120
 MCP gateway tests, 161/161 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22, and a second job checks the deploy files (see [Deploy](#deploy)).
 
