@@ -33,9 +33,12 @@ function expectVerdict(tool: string, decision: Decision, rule: string, args: Rec
 describe("policy.example.json: the red lines", () => {
   const table: Array<[rule: string, why: RegExp, tools: string[]]> = [
     ["red-line-1-money", /^Red line 1/, ["pay_invoice", "createCharge", "purchase-item", "transfer_funds", "checkout", "issueRefund", "create_payment_intent", "place_order", "BuyCredits"]],
+    // cloud resources that start a bill
+    ["red-line-1-money", /^Red line 1/, ["create_rag_corpus", "enable_api", "enableService", "provision_cluster", "create_instance", "createBucket", "create_cluster", "scale_up_nodes", "create_key"]],
     ["red-line-2-public", /^Red line 2/, ["post_message", "publishPost", "send_email", "tweet", "add_comment", "email_report", "reply_to_thread", "share_file"]],
     ["red-line-3-ship", /^Red line 3/, ["push_files", "merge_pull_request", "create_pull_request", "deploy_site", "createRelease", "create_pr"]],
     ["red-line-4-delete", /^Red line 4/, ["delete_file", "removeItem", "drop_table", "destroy-instance", "overwrite_file", "PurgeCache", "truncate_table", "files.delete"]],
+    ["red-line-5-memory", /^Red line 5/, ["remember_fact", "create_entities", "add_observations", "create_relations", "archival_memory_insert", "core_memory_append", "save_memory", "set_preference", "updateProfile"]],
   ];
   for (const [rule, why, tools] of table) {
     for (const tool of tools) {
@@ -50,6 +53,73 @@ describe("policy.example.json: the red lines", () => {
   for (const tool of ["read_file", "postgres_query", "list_comments", "get_posts", "display_text", "list_payments", "get_pull_request", "deleted_items_report", "dropdown_options", "search_issues"]) {
     it(`${tool} -> allow (default)`, () => expectVerdict(tool, "allow", "default"));
   }
+  // Reading cloud resources and memory, and saving an ordinary file, stay allowed.
+  for (const tool of ["list_corpora", "get_corpus", "describe_instance", "list_buckets", "read_graph", "search_nodes", "open_nodes", "get_preferences", "save_file", "type_definition"]) {
+    it(`${tool} -> allow (default)`, () => expectVerdict(tool, "allow", "default"));
+  }
+});
+
+describe("policy.example.json: SQL in an sql argument", () => {
+  const table: Array<[sql: string, decision: Decision]> = [
+    ["SELECT * FROM users WHERE id = 1", "allow"],
+    ["select count(*) from orders;", "allow"],
+    ["WITH recent AS (SELECT * FROM orders WHERE created_at > now() - interval '1 day') SELECT count(*) FROM recent", "allow"],
+    ["EXPLAIN SELECT updated_at, is_deleted, created_by FROM accounts", "allow"],
+    ["SHOW TABLES", "allow"],
+    ["DROP TABLE users", "ask"],
+    ["delete from sessions", "ask"],
+    ["  UPDATE users SET admin = true WHERE id = 7", "ask"],
+    ["INSERT INTO audit VALUES (1, 'x')", "ask"],
+    ["WITH gone AS (DELETE FROM carts RETURNING *) SELECT count(*) FROM gone", "ask"],
+    ["/* weekly report */ DROP TABLE reports", "ask"],
+    ["-- read only\nTRUNCATE logs", "ask"],
+    ["SELECT 1; DROP TABLE users", "ask"],
+    ["SELECT * INTO users_backup FROM users", "ask"],
+    ["GRANT ALL ON DATABASE app TO PUBLIC", "ask"],
+    ["ALTER TABLE t ADD COLUMN c int", "ask"],
+    ["CALL purge_old_rows()", "ask"],
+  ];
+  for (const [sql, decision] of table) {
+    it(`${JSON.stringify(sql.slice(0, 60))} -> ${decision}`, () => expectVerdict("execute_sql", decision, decision === "ask" ? "sql-write" : "default", { sql }));
+  }
+
+  it("a regex is not a SQL parser: a write word inside a string literal asks too", () => {
+    expectVerdict("execute_sql", "ask", "sql-write", { sql: "SELECT * FROM events WHERE action = 'delete'" });
+  });
+
+  it("only an argument named sql is read; a tool that names it differently needs its own rule", () => {
+    expectVerdict("run_query", "allow", "default", { query: "DROP TABLE users" });
+  });
+});
+
+describe("policy.example.json: browser tools", () => {
+  const table: Array<[tool: string, decision: Decision, rule: string]> = [
+    ["browser_click", "ask", "browser-input"],
+    ["browser_type", "ask", "browser-input"],
+    ["browser_press_key", "ask", "browser-input"],
+    ["browser_fill_form", "ask", "browser-input"],
+    ["browser_select_option", "ask", "browser-input"],
+    ["browser_file_upload", "ask", "browser-input"],
+    ["browser_evaluate", "ask", "browser-input"],
+    ["browser_handle_dialog", "ask", "browser-input"],
+    ["puppeteer_fill", "ask", "browser-input"],
+    ["playwright_click", "ask", "browser-input"],
+    ["browser_take_screenshot", "allow", "browser-read"],
+    ["browser_snapshot", "allow", "browser-read"],
+    ["browser_navigate", "allow", "browser-read"],
+    ["puppeteer_screenshot", "allow", "browser-read"],
+    ["browser_tabs", "allow", "browser-read"],
+    // not a browser tool: the browser words alone do not apply
+    ["select_rows", "allow", "default"],
+  ];
+  for (const [tool, decision, rule] of table) {
+    it(`${tool} -> ${decision} (${rule})`, () => expectVerdict(tool, decision, rule, { element: "Submit button", ref: "e12" }));
+  }
+
+  it("the tool name decides, not the target: a click on anything asks, whatever the arguments say", () => {
+    expectVerdict("browser_click", "ask", "browser-input", { element: "harmless link", ref: "e1" });
+    expectVerdict("browser_click", "ask", "browser-input", {});
+  });
 });
 
 describe("policy.example.json: the shell rule runs the slice-1 analyzer", () => {

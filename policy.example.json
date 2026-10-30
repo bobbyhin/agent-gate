@@ -22,9 +22,12 @@
     },
     {
       "id": "red-line-1-money",
-      "toolWords": ["pay", "charge", "purchase", "buy", "transfer", "checkout", "refund", "create payment", "place order", "create order"],
+      "toolWords": [
+        "pay", "charge", "purchase", "buy", "transfer", "checkout", "refund", "create payment", "place order", "create order",
+        "provision", "create instance", "create cluster", "create corpus", "create rag corpus", "create bucket", "enable api", "enable service", "scale up", "create key"
+      ],
       "decision": "ask",
-      "why": "Red line 1: this tool looks like it spends or moves money."
+      "why": "Red line 1: this tool looks like it spends or moves money, or creates a cloud resource that is billed."
     },
     {
       "id": "red-line-2-public",
@@ -43,6 +46,35 @@
       "toolWords": ["delete", "remove", "drop", "destroy", "overwrite", "purge", "erase", "wipe", "truncate"],
       "decision": "ask",
       "why": "Red line 4: this tool looks like it deletes or overwrites data."
+    },
+    {
+      "id": "red-line-5-memory",
+      "toolWords": [
+        "remember", "memorize", "add memory", "save memory", "store memory", "update memory", "memory insert", "memory append",
+        "memory replace", "add observations", "create entities", "create relations", "set preference", "update profile"
+      ],
+      "decision": "ask",
+      "why": "Red line 5: this tool looks like it writes to long-term memory, which later sessions will read and trust."
+    },
+    {
+      "id": "sql-write",
+      "args": { "sql": { "regex": "\\b(?:insert|update|delete|merge|upsert|into|drop|alter|truncate|create|grant|revoke|copy|call|exec|execute)\\b|;\\s*\\S", "flags": "i" } },
+      "decision": "ask",
+      "why": "This SQL may change data or run more than one statement: it has a write keyword, or more text after a semicolon."
+    },
+    {
+      "id": "browser-input",
+      "tool": ["browser_*", "puppeteer_*", "playwright_*"],
+      "toolWords": ["click", "type", "press", "fill", "submit", "select", "drag", "upload", "evaluate", "run code", "dialog"],
+      "decision": "ask",
+      "why": "This browser action clicks, types or submits. The gateway sees only the tool's name, not what it acts on."
+    },
+    {
+      "id": "browser-read",
+      "tool": ["browser_*", "puppeteer_*", "playwright_*"],
+      "toolWords": ["screenshot", "snapshot", "read page", "navigate", "console messages", "network requests", "tabs"],
+      "decision": "allow",
+      "why": "This browser tool only looks at the page."
     }
   ]
 }

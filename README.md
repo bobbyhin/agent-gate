@@ -68,7 +68,8 @@ are hard to undo or they leave the machine:
 4. permanently deleting or overwriting something the agent did not create
 
 Everything else should flow without interruption. Rules that enforce a red line say so in their
-`why` text ("Red line 3", "Red line 4").
+`why` text ("Red line 3", "Red line 4"). The MCP gateway's example policy adds a fifth for agents
+with long-term memory: writing to that memory (see [Policy](#policy)).
 
 The guard only sees shell commands. It enforces lines 3 and 4: pushes, PRs, releases, deploys,
 package publishing, recursive deletes, and throwing away uncommitted work. It does nothing for
@@ -460,18 +461,40 @@ call decides; when none matches, the default decides. The engine (`src/gateway/p
 pure function with no I/O, so the same policy and call always get the same verdict, and every
 verdict carries the id of the rule that decided and a `why`.
 
-`policy.example.json` maps the red lines:
+`policy.example.json` maps the red lines, with examples for SQL and browser tools:
 
 | Rule | Matches | Decision |
 | --- | --- | --- |
 | `no-self-approval` | a shell tool whose command answers an approval or touches `.agent-gate` | block |
 | `protect-gateway-state` | any tool whose `path` argument points into `.agent-gate` | block |
 | `shell-guard` | a shell tool (`run_command`, `exec`, `bash` and others): its `command` goes through the shell guard | the guard's decision |
-| `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order | ask |
+| `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order; and cloud resources that start a bill: provision, create instance, create cluster, create corpus, create rag corpus, create bucket, enable api, enable service, scale up, create key | ask |
 | `red-line-2-public` | post, publish, send, tweet, retweet, reply, comment, email, share | ask |
 | `red-line-3-ship` | push, merge, deploy, create pull request, create pr, create release | ask |
 | `red-line-4-delete` | delete, remove, drop, destroy, overwrite, purge, erase, wipe, truncate | ask |
+| `red-line-5-memory` | remember, memorize, add memory, save memory, store memory, update memory, memory insert, memory append, memory replace, add observations, create entities, create relations, set preference, update profile | ask |
+| `sql-write` | an `sql` argument with a write keyword (insert, update, delete, merge, upsert, into, drop, alter, truncate, create, grant, revoke, copy, call, exec, execute) anywhere, or more text after a `;` | ask |
+| `browser-input` | `browser_*`, `puppeteer_*` and `playwright_*` tools with click, type, press, fill, submit, select, drag, upload, evaluate, run code, dialog | ask |
+| `browser-read` | the same tools with screenshot, snapshot, read page, navigate, console messages, network requests, tabs | allow |
 | default | everything else | allow |
+
+Notes on the newer rules:
+
+- **Red line 5, long-term memory.** A memory write outlives the session: what an injected
+  instruction gets saved today, a later session reads as its own knowledge. That makes it
+  different from writing a file in the workspace, so the example asks. The audit line of each
+  call keeps the hash of its arguments, so a bad memory can be traced to the call that wrote it.
+  An agent that writes memory constantly may prefer `"decision": "warn"`, which lets the write
+  through and logs it. The phrases are specific on purpose: `save_file` stays allowed.
+- **SQL.** `sql-write` looks for a write keyword anywhere in the text, not only at the start, so a
+  `DELETE` inside a `WITH` clause or after a comment is caught, and text after a `;` (a second
+  statement) asks too. A regex is not a SQL parser: a write word inside a string literal
+  (`WHERE action = 'delete'`) also asks. The rule reads an argument named `sql`; a tool that names
+  it `query` or `statement` needs a copy of the rule with that name.
+- **Browser tools.** The decision comes from the tool's name only: a click at coordinates, or on
+  an element reference, looks the same whether it opens a menu or confirms a payment. For a finer
+  rule, the tool has to pass what it acts on (the element's text, the URL) and a rule has to match
+  it through `args`. Navigation is allowed, but a page can still act on a visit.
 
 A rule can match on any of these, and all that are present must match:
 
@@ -960,9 +983,9 @@ formed, and a hook test for a blocked upload; and 5 tests that run the hook as a
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 135 tests: a policy table for each red line and for
-the shell rule (every case in `test/cases.json` and `test/cases-exfil.json` is also run through
-the gateway's shell rule), config and policy validation, the approval store with a clock the test
+The MCP gateway suite (`test/gateway/`) runs 199 tests: a policy table for each red line, for the
+SQL and browser examples and for the shell rule (every case in `test/cases.json` and
+`test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
 controls, the CLI's exit codes and what a decision leaves behind (the record, the
 `approval-decided` line, `stats`), and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
@@ -988,7 +1011,7 @@ fake secret the tests use is in `test/llm/fake-secrets.ts`, assembled from piece
 no secret-shaped string appears in the source and secret scanners need no exceptions for this
 repository.
 
-Current result: **239/239 cases and 73/73 upload cases pass** (320/320 shell guard tests, 135/135
+Current result: **239/239 cases and 73/73 upload cases pass** (320/320 shell guard tests, 199/199
 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
