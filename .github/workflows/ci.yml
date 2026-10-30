@@ -24,7 +24,9 @@ jobs:
 
   # The deploy files, checked with no cloud account and no credentials: nothing is applied,
   # pushed or deployed. See deploy/README.md.
+  # It waits for the tests on both Node versions: no image is built from code that fails them.
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     env:
       KUBECONFORM_VERSION: "0.8.0"

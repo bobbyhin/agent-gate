@@ -250,7 +250,8 @@ Terraform checks and tests, kustomize with kubeconform, `docker build`, a check 
 as uid 65532 and can write `/var/lib/agent-gate` but not `/app`, and the compose demo (`/healthz`,
 a chat call with the demo key, `agent-gate usage`). The job was written with these files and had
 not run yet when they were committed, because the repository had not been pushed; until it runs,
-the image has not been built anywhere.
+the image has not been built anywhere. The job has `needs: test`: it starts only after `npm test`
+has passed on Node 20 and 22, so an image is never built from code that fails its tests.
 
 Never run, anywhere: `terraform plan` or `apply` against a real project, `kubectl apply` to a real
 cluster, `docker push`, a Cloud Run deployment, or a call to a real provider.

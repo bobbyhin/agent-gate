@@ -940,7 +940,8 @@ repository.
 
 Current result: **239/239 cases and 73/73 upload cases pass** (320/320 shell guard tests, 120/120
 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
-Node 20 and 22, and a second job checks the deploy files (see [Deploy](#deploy)).
+Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
+[Deploy](#deploy)).
 
 ## Repository layout
 
