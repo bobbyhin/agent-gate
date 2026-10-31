@@ -6,7 +6,9 @@
 //     "stateDir": ".agent-gate"
 //   }
 //
-// Optional fields: "approvalTtlHours" (default 24), "auditArguments" (default false),
+// Optional fields: "approvalTtlHours" (default 24), "auditArguments" (default false), "pinTools"
+// (default true: pin tool definitions, see src/gateway/tool-pins.ts), per server "expose" (globs of
+// the tool names the agent may see and call; the others are hidden and blocked),
 // "fileBinding" ({ "roots": [...], "arguments": [...] }: bind approvals to the content of the files
 // those arguments name, see src/gateway/files.ts), and per server "env" (extra environment
 // variables; a downstream server otherwise gets only the SDK's short list of safe variables such as
@@ -25,6 +27,8 @@ export interface ServerConfig {
   command: string;
   args: string[];
   env?: Record<string, string>;
+  /** Globs of the tool names the agent may see and call. Absent: all of them. */
+  expose?: string[];
 }
 
 export interface GatewayConfig {
@@ -33,6 +37,8 @@ export interface GatewayConfig {
   stateDir: string;
   approvalTtlMs: number;
   auditArguments: boolean;
+  /** Pin tool definitions and withhold tools whose definition changed (default true). */
+  pinTools: boolean;
   fileBinding?: FileBindingConfig;
 }
 
@@ -53,7 +59,7 @@ export function loadPolicy(file: string): Policy {
 
 export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
   const config = object(json, "config");
-  onlyKeys(config, ["servers", "policy", "stateDir", "approvalTtlHours", "auditArguments", "fileBinding"], "config");
+  onlyKeys(config, ["servers", "policy", "stateDir", "approvalTtlHours", "auditArguments", "pinTools", "fileBinding"], "config");
 
   const servers = array(config.servers, "config.servers").map((raw, i) => server(raw, `config.servers[${i}]`));
   if (servers.length === 0) fail("config.servers must list at least one server");
@@ -67,6 +73,8 @@ export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
   if (typeof hours !== "number" || !Number.isFinite(hours) || hours <= 0) fail("config.approvalTtlHours must be a positive number");
   const auditArguments = config.auditArguments ?? false;
   if (typeof auditArguments !== "boolean") fail("config.auditArguments must be true or false");
+  const pinTools = config.pinTools ?? true;
+  if (typeof pinTools !== "boolean") fail("config.pinTools must be true or false");
 
   return {
     servers,
@@ -74,6 +82,7 @@ export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
     stateDir: path.resolve(baseDir, text(config.stateDir, "config.stateDir")),
     approvalTtlMs: Math.round(hours * 60 * 60 * 1000),
     auditArguments,
+    pinTools,
     ...(config.fileBinding === undefined ? {} : { fileBinding: fileBinding(config.fileBinding, baseDir) }),
   };
 }
@@ -103,7 +112,7 @@ function fileBinding(raw: unknown, baseDir: string): FileBindingConfig {
 
 function server(raw: unknown, at: string): ServerConfig {
   const s = object(raw, at);
-  onlyKeys(s, ["name", "command", "args", "env"], at);
+  onlyKeys(s, ["name", "command", "args", "env", "expose"], at);
   const name = text(s.name, `${at}.name`);
   if (!SERVER_NAME.test(name)) fail(`${at}.name must use letters, digits, "-" and single "_" between them (no "__")`);
   const args = array(s.args ?? [], `${at}.args`).map((arg, i) => {
@@ -111,6 +120,11 @@ function server(raw: unknown, at: string): ServerConfig {
     return arg;
   });
   const result: ServerConfig = { name, command: text(s.command, `${at}.command`), args };
+  if (s.expose !== undefined) {
+    const expose = array(s.expose, `${at}.expose`).map((glob, i) => text(glob, `${at}.expose[${i}]`));
+    if (expose.length === 0) fail(`${at}.expose must list at least one glob; leave it out to expose every tool`);
+    result.expose = expose;
+  }
   if (s.env !== undefined) {
     const env = object(s.env, `${at}.env`);
     for (const [key, value] of Object.entries(env)) {

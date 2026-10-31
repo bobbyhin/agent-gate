@@ -94,6 +94,18 @@ export interface CallResultEvent {
   errorCode?: number;
 }
 
+/** A change to the pinned tool definitions (src/gateway/tool-pins.ts). */
+export interface ToolEvent {
+  ts: string;
+  event: "tool-pinned" | "tool-changed" | "tool-accepted";
+  server: string;
+  tool: string;
+  /** The definition's hash: for tool-changed, the new one, with the pinned one in pinnedSha256. */
+  sha256: string;
+  pinnedSha256?: string;
+  decidedBy?: string;
+}
+
 /** sha256 of canonical JSON (object keys sorted), with its size: how the audit log names a value without storing it. */
 export function hashJson(value: unknown): { hash: string; bytes: number } {
   const text = canonicalJson(value);
@@ -124,6 +136,13 @@ export class AuditLog {
   /** Appends the line for a call that came back, or throws. Its value stays out; its hash and size go in. */
   writeResult(event: Omit<CallResultEvent, "ts" | "event">, now = new Date()): CallResultEvent {
     const line: CallResultEvent = { ts: now.toISOString(), event: "call-result", ...event };
+    fs.appendFileSync(this.file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
+    return line;
+  }
+
+  /** Appends one tool-definition event, or throws. */
+  writeTool(event: Omit<ToolEvent, "ts">, now = new Date()): ToolEvent {
+    const line: ToolEvent = { ts: now.toISOString(), ...event };
     fs.appendFileSync(this.file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
     return line;
   }

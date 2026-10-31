@@ -77,6 +77,8 @@ export interface CompiledRule {
   readonly args: ReadonlyArray<{ name: string; test: Test }>;
   /** A rule that decides. */
   readonly verdict?: (call: ToolCall) => Verdict;
+  /** A rule that decides with a fixed decision (not a shell rule): that decision. */
+  readonly fixed?: Decision;
   /** A rule that rewrites the arguments instead. */
   readonly rewrite?: { why: string; apply: (args: Record<string, unknown>) => RewriteResult };
 }
@@ -102,6 +104,26 @@ export interface Policy {
   readonly default: Decision;
   readonly rules: readonly CompiledRule[];
   readonly repeat: readonly RepeatLimit[];
+}
+
+/**
+ * True when every call to this tool is blocked, whatever its arguments: the gateway then leaves it out
+ * of tools/list (pure). A shell rule, or a rule that does not block and matches only some arguments,
+ * means some calls may get through, so the tool stays listed. Loop limits never block every call.
+ */
+export function alwaysBlocked(policy: Policy, server: string, tool: string): boolean {
+  const call: ToolCall = { server, tool, args: {} };
+  for (const rule of policy.rules) {
+    if (!matches({ ...rule, args: [] }, call)) continue;
+    if (rule.rewrite) continue; // edits arguments, never the server or tool name
+    if (rule.fixed === undefined) return false; // a shell rule: its verdict depends on the command
+    if (rule.args.length > 0) {
+      if (rule.fixed === "block") continue; // blocks the calls it matches; the others go on to the next rule
+      return false;
+    }
+    return rule.fixed === "block";
+  }
+  return policy.default === "block";
 }
 
 /** The loop limits that a call falls under (pure). */
@@ -309,7 +331,7 @@ function compileRule(raw: unknown, at: string, ids: Set<string>): CompiledRule {
     if (rule.standing && fixed.decision !== "ask") fail(`${at}.standing only applies to a rule whose decision is ask`);
     if (rule.standing) fixed.standing = true;
   }
-  return { ...match, verdict: () => withTtl({ ...fixed }) };
+  return { ...match, fixed: fixed.decision, verdict: () => withTtl({ ...fixed }) };
 }
 
 // ── rewrite rules ───────────────────────────────────────────────────────────────────────────

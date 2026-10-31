@@ -395,6 +395,9 @@ example `{ "name": "files", "command": "npx", "args": ["-y", "@modelcontextproto
 - `approvalTtlHours` (default 24) is how long a request stays open, unless the rule that asked sets
   its own `ttlMinutes`. `auditArguments` (default
   `false`) is explained under [Audit log](#audit-log).
+- `expose` (optional, per server), for example `["read_*", "search_*"]`: globs of the tool names the
+  agent may see and call; the others are hidden, and a call to one is blocked. `pinTools` (default
+  `true`) pins each tool's definition the first time it is listed. See [Tool lists](#tool-lists).
 - `fileBinding` (optional), for example `{ "roots": ["/srv/agent-work"], "arguments": ["path", "source"] }`,
   binds approvals to the content of the files that those arguments name. See
   [Approval rules](#approval-rules). Roots are resolved against the config file's directory and must exist.
@@ -521,6 +524,9 @@ agent-gate approvals grant <server>__<tool> --uses <n> --hours <h> [--arg <name>
                                                     a standing approval (deny sa-… revokes it)
 agent-gate approvals grants [--all] [--json]        standing approvals in force (--all: also used up, expired, revoked)
 agent-gate audit stats [--json]                     per tool: calls, decisions, errors, p50/p95 time (see Audit log)
+agent-gate tools list [--json]                      pinned tool definitions, and the changed ones withheld (see Tool lists)
+agent-gate tools show <server>__<tool>              the pinned and the changed definition, to compare
+agent-gate tools accept <server>__<tool>            pin the changed definition, so the tool is listed again
 ```
 
 Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.config.json`).
@@ -613,6 +619,36 @@ The limit is the line itself: an agent with a shell or file tools of its own, ou
 cross it if the state directory or the CLI is within its reach. Keep them out of reach.
 [ADR 0005](docs/adr/0005-approvals-are-action-tokens.md) has the reasoning.
 
+### Tool lists
+
+The model chooses its calls from what `tools/list` tells it, so the gateway decides what goes in the
+list, as well as which calls run. A server's tools are listed minus three kinds:
+
+- **Not exposed.** With `"expose": ["read_*", "search_*"]` on a server in the config, only the tools
+  those globs match are listed. A call to any other tool of that server is blocked (rule
+  `not-exposed`) and audited, so an agent that knows a name cannot reach it either. A short list
+  also leaves the model less to read than a server's full catalogue.
+- **Always blocked.** A tool that the policy blocks whatever its arguments (a block rule that
+  matches its name and has no `args`, with no rule before it that could let a call through) is left
+  out. A call to it is still decided by the policy, and blocked.
+- **Changed since it was pinned.** The first time the gateway lists a tool, it pins a SHA-256 of
+  everything the model reads about it (name, title, description, input and output schema,
+  annotations) in `<stateDir>/tools.json`. A server can change a tool after the agent and its human
+  have come to trust it: a new description can carry instructions for the model (tool poisoning), or
+  an innocent-looking tool can start doing something else (a rug pull). When a later listing gives a
+  different definition, the tool is left out of the list, so the model never reads the new text, and
+  a call to it is asked about (rule `tool-changed`), so it does not run unattended. A human compares
+  the two definitions with `agent-gate tools show demo__echo` and, if the change is fine, accepts it
+  with `agent-gate tools accept demo__echo`; the tool is listed again with its new definition. The
+  audit log gets a `tool-pinned`, `tool-changed` or `tool-accepted` line (with the hashes, and for an
+  acceptance the OS user), and the example policy's `no-self-approval` rule blocks an agent that
+  tries to run `tools accept` through a shell tool.
+
+Pinning is trust on first use: a definition that is hostile the first time the gateway sees it is
+pinned like any other. It catches changes, not bad first versions, and a call that names a tool the
+gateway has not listed yet makes it list that server first. A damaged `tools.json` is an error: that
+server's tools are not listed, and calls to them are not run. `"pinTools": false` turns pinning off.
+
 ### Policy
 
 A policy is JSON: a default decision and an ordered list of rules. The first rule that matches a
@@ -629,7 +665,7 @@ first match alone gives.
 
 | Rule | Matches | Decision |
 | --- | --- | --- |
-| `no-self-approval` | a shell tool whose command answers or grants an approval, or touches `.agent-gate` | block |
+| `no-self-approval` | a shell tool whose command answers or grants an approval, accepts a changed tool, or touches `.agent-gate` | block |
 | `protect-gateway-state` | any tool whose `path` argument points into `.agent-gate` | block |
 | `shell-guard` | a shell tool (`run_command`, `exec`, `bash` and others): its `command` goes through the shell guard | the guard's decision |
 | `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order; and cloud resources that start a bill: provision, create instance, create cluster, create corpus, create rag corpus, create bucket, enable api, enable service, scale up, create key | ask; a request lives 15 minutes |
@@ -859,6 +895,8 @@ data:
 
 - It trusts the downstream server's tool names, and it cannot see what a tool does inside. A tool
   called `sync` that pushes, or `get_report` that also sends an email, gets the default decision.
+  Pinning (see [Tool lists](#tool-lists)) notices when a tool's definition changes; it cannot tell
+  whether the first definition was honest.
   The filesystem reference server's `write_file` replaces a file's content, but its name has no
   red-line word, so the example policy allows it. For an unfamiliar server, consider
   `"default": "ask"` with allow rules for the tools you know only read.
@@ -1479,7 +1517,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 327 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 336 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
@@ -1487,8 +1525,9 @@ controls, standing approvals and their bounds, the escalate-only rule of a secon
 (the record, the `approval-decided` line, `stats`), the correlation ids a client may send (and what
 is dropped), `audit stats`, every rule that matched next to the one that decided (and a check that
 the decisions are first match's), rewrite rules on their own and through a running gateway, loop
-limits (their counts with a clock the test controls, and a loop through a running gateway), and an
-end-to-end test. That test starts `agent-gate serve`
+limits (their counts with a clock the test controls, and a loop through a running gateway), tool
+lists (a server that changes a tool's description mid-session, `expose`, tools the policy always
+blocks, a damaged pin file), and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log,
 including a call-result line, with the hash of what came back, for every forwarded call.
@@ -1547,7 +1586,7 @@ the decision, with no model judging and no tolerance band. And it is evaluated o
 there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 327/327 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 336/336 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
 the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1563,6 +1602,7 @@ src/gateway/policy.ts                         the policy engine (pure): evaluate
 src/gateway/approvals.ts                      the approval queue in <stateDir>/approvals.json
 src/gateway/repeats.ts                        loop limits: recent runs per call in <stateDir>/repeats.json
 src/gateway/files.ts                          binds approvals to the content of the files a call names
+src/gateway/tool-pins.ts                      pinned tool definitions in <stateDir>/tools.json
 src/gateway/advisor.ts                        the escalate-only rule for a second reviewer (ADR 0008; not wired yet)
 src/gateway/audit.ts                          the audit log, <stateDir>/audit.jsonl
 src/gateway/audit-tools.ts                    reads the audit log back: agent-gate audit ...

@@ -12,6 +12,10 @@
 //          Once a human approves, the same call (same arguments) is forwarded exactly once.
 //   block  do not forward and do not queue; return an error result
 //
+// tools/list shows a server's tools minus three kinds: those its "expose" globs leave out (a call to
+// one is blocked), those the policy blocks whatever the arguments, and those whose definition changed
+// since it was pinned (a call to one asks; src/gateway/tool-pins.ts).
+//
 // ponytail: only tools are proxied. Resources, prompts, and requests from a downstream server
 // back to the client (sampling, elicitation) are not.
 
@@ -38,8 +42,9 @@ import { AuditLog, hashJson } from "./audit.js";
 import type { GatewayConfig } from "./config.js";
 import { contextFromMeta, type CallContext } from "./context.js";
 import { bindFiles } from "./files.js";
-import { evaluate, repeatLimitsFor, type Policy, type ToolCall, type Verdict } from "./policy.js";
+import { alwaysBlocked, evaluate, globToRegExp, repeatLimitsFor, type Policy, type ToolCall, type Verdict } from "./policy.js";
 import { RepeatStore } from "./repeats.js";
+import { ToolPins } from "./tool-pins.js";
 
 export const VERSION = "0.1.0";
 export const SEPARATOR = "__";
@@ -60,6 +65,9 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
   const approvals = new ApprovalStore(config.stateDir, config.approvalTtlMs);
   const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"), config.auditArguments);
   const repeats = policy.repeat.length > 0 ? new RepeatStore(config.stateDir, Math.max(...policy.repeat.map((limit) => limit.windowMs))) : undefined;
+  const pins = config.pinTools ? new ToolPins(config.stateDir) : undefined;
+  const exposeTests = new Map(config.servers.flatMap((s) => (s.expose ? [[s.name, s.expose.map(globToRegExp)] as const] : [])));
+  const isExposed = (server: string, tool: string): boolean => exposeTests.get(server)?.some((re) => re.test(tool)) ?? true;
   // One connection per gateway process: the stdio transport serves exactly one client.
   const connId = `cn-${randomBytes(4).toString("hex")}`;
   let seq = 0;
@@ -71,9 +79,38 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
   const downstream = await connectAll(config, () => server.sendToolListChanged().catch(() => undefined));
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const lists = await Promise.all([...downstream].map(([name, client]) => listTools(name, client, log)));
+    const lists = await Promise.all([...downstream].map(([name, client]) => visibleTools(name, client)));
     return { tools: lists.flat() };
   });
+
+  /** A server's tools as the agent sees them: exposed, not always blocked, not changed since pinned; with the prefix. */
+  async function visibleTools(name: string, client: Client): Promise<Tool[]> {
+    let shown = (await listTools(name, client, log)).filter((tool) => isExposed(name, tool.name) && !alwaysBlocked(policy, name, tool.name));
+    if (pins) {
+      try {
+        const checked = pins.check(name, shown);
+        for (const p of checked.pinned) recordTool({ event: "tool-pinned", server: name, tool: p.tool, sha256: p.sha256 });
+        for (const c of checked.changed) {
+          recordTool({ event: "tool-changed", server: name, tool: c.tool, sha256: c.sha256, pinnedSha256: c.pinnedSha256 });
+          log(`${name}${SEPARATOR}${c.tool} changed since it was pinned, so it is withheld; compare with: agent-gate tools show ${name}${SEPARATOR}${c.tool}`);
+        }
+        shown = checked.visible;
+      } catch (err) {
+        // Fail closed: without the pins, none of this server's tools is shown.
+        log(`could not check the pinned tools of "${name}", so none of its tools are listed: ${errorText(err)}`);
+        return [];
+      }
+    }
+    return shown.map((tool) => ({ ...tool, name: `${name}${SEPARATOR}${tool.name}` }));
+  }
+
+  function recordTool(event: Parameters<AuditLog["writeTool"]>[0]): void {
+    try {
+      audit.writeTool(event);
+    } catch (err) {
+      log(`could not write a ${event.event} line to the audit log: ${errorText(err)}`);
+    }
+  }
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: rawArgs } = request.params;
@@ -86,6 +123,8 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
     const call: ToolCall = { server: route.server, tool: route.tool, args: rawArgs ?? {} };
     let decided: Decided;
     try {
+      // A tool the gateway has not listed yet is listed now, so that its definition is pinned (or found changed) first.
+      if (pins && isExposed(call.server, call.tool) && pins.status(call.server, call.tool) === "unknown") await visibleTools(call.server, client);
       decided = decide(call, n, context);
     } catch (err) {
       // The policy, the approval file or the audit log failed: the call is not run.
@@ -108,7 +147,19 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
   }
 
   function decide(call: ToolCall, n: number, context: CallContext): Decided {
-    let verdict = evaluate(policy, call);
+    let verdict: Verdict = isExposed(call.server, call.tool)
+      ? evaluate(policy, call)
+      : { decision: "block", rule: "not-exposed", why: `the gateway config's "expose" list for server "${call.server}" leaves this tool out` };
+    // A tool whose definition changed since it was pinned does not run unattended.
+    if (pins && (verdict.decision === "allow" || verdict.decision === "warn") && pins.status(call.server, call.tool) === "changed") {
+      verdict = {
+        decision: "ask",
+        rule: "tool-changed",
+        why: `the definition of this tool (its description or schema) changed since it was pinned, so it is withheld from the agent; compare the two with "agent-gate tools show ${call.server}${SEPARATOR}${call.tool}" before letting it run`,
+        alsoMatched: [{ rule: verdict.rule, decision: verdict.decision, why: verdict.why }, ...(verdict.alsoMatched ?? [])],
+        ...(verdict.rewrittenBy ? { args: verdict.args as Record<string, unknown>, rewrittenBy: verdict.rewrittenBy } : {}),
+      };
+    }
     // Rewrite rules may have edited the arguments: what runs, what is hashed and what a human approves is the edited call.
     const args = verdict.args ?? call.args;
     const argsHash = hashArguments(args);
@@ -271,7 +322,7 @@ async function listTools(name: string, client: Client, log: Log): Promise<Tool[]
     let cursor: string | undefined;
     for (let page = 0; page < MAX_LIST_PAGES; page++) {
       const result = await client.request({ method: "tools/list", params: cursor === undefined ? {} : { cursor } }, ListToolsResultSchema);
-      for (const tool of result.tools) tools.push({ ...tool, name: `${name}${SEPARATOR}${tool.name}` });
+      tools.push(...result.tools); // the server's own names; visibleTools() adds the prefix
       cursor = result.nextCursor;
       if (cursor === undefined) break;
     }

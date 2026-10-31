@@ -110,7 +110,7 @@ describe("gateway end to end", () => {
       viaGateway.tools,
       unproxied.tools.map((tool) => ({ ...tool, name: `demo__${tool.name}` })),
     );
-    assert.deepEqual(viaGateway.tools.map((t) => t.name).sort(), ["demo__delete_file", "demo__deploy", "demo__echo", "demo__execute_sql", "demo__fail", "demo__run_command", "demo__search_notes"]);
+    assert.deepEqual(viaGateway.tools.map((t) => t.name).sort(), ["demo__delete_file", "demo__deploy", "demo__echo", "demo__execute_sql", "demo__fail", "demo__run_command", "demo__search_notes", "demo__set_echo_description"]);
   });
 
   it("forwards an allowed call and returns the downstream result unchanged", async () => {
@@ -318,7 +318,10 @@ describe("gateway end to end", () => {
     const lines = all.filter((line) => line.event === undefined);
     const events = all.filter((line) => line.event === "approval-decided");
     const outcomes = all.filter((line) => line.event === "call-result");
-    assert.equal(lines.length + events.length + outcomes.length, all.length);
+    // The first listing pinned each downstream tool once (tool-pins.ts).
+    const pins = all.filter((line) => line.event === "tool-pinned");
+    assert.deepEqual(pins.map((p) => p.tool).sort(), ["delete_file", "deploy", "echo", "execute_sql", "fail", "run_command", "search_notes", "set_echo_description"]);
+    assert.equal(lines.length + events.length + outcomes.length + pins.length, all.length);
     assert.deepEqual(
       events.map((e) => [e.approvalId, e.decision]),
       [

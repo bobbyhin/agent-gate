@@ -17,6 +17,7 @@ import { auditStats, readAudit } from "./audit-tools.js";
 import { loadConfig, loadPolicy, type GatewayConfig } from "./config.js";
 import { bindFiles } from "./files.js";
 import { createGateway, SEPARATOR } from "./server.js";
+import { ToolPins } from "./tool-pins.js";
 import { ConfigError } from "./validate.js";
 
 const USAGE = `Usage:
@@ -36,6 +37,9 @@ const USAGE = `Usage:
   agent-gate usage --verify [--json] [--config <file>] the usage log's dollars against the ledger, per
                                                       key, today and this month (exit 1 if they differ)
   agent-gate audit stats [--json] [--config <file>]   per tool: calls, decisions, errors, p50/p95 time
+  agent-gate tools list [--json] [--config <file>]    pinned tool definitions, and the changed ones withheld
+  agent-gate tools show <server>__<tool> [--config <file>]    the pinned and the changed definition
+  agent-gate tools accept <server>__<tool> [--config <file>]  pin the changed definition: the tool is listed again
 
 "list" shows the requests that are waiting; --all also shows decided, used and expired ones.
 "approve" reads the call back to you and asks you to type the last 4 characters of its id;
@@ -63,6 +67,9 @@ const COMMANDS: Readonly<Record<string, { options: readonly string[]; required?:
   "llm serve": { options: [] },
   usage: { options: ["json", "by", "verify"] },
   "audit stats": { options: ["json"] },
+  "tools list": { options: ["json"] },
+  "tools show": { options: [], id: true },
+  "tools accept": { options: [], id: true },
 };
 
 export interface Io {
@@ -149,6 +156,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
     const store = new ApprovalStore(config.stateDir, config.approvalTtlMs);
     const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"));
     if (name === "audit stats") return auditStatsCommand(audit.file, values.json, io);
+    if (command === "tools") return toolsCommand(action as string, id, config, audit, values.json, io);
     if (action === "list") return list(store, values.all, values.json, io);
     if (action === "stats") return stats(store, audit.file, values.json, io);
     if (action === "grants") return grants(store, values.all, values.json, io);
@@ -317,6 +325,50 @@ function auditStatsCommand(file: string, json: boolean, io: Io): number {
     );
   }
   if (unreadable.length > 0) io.err(`agent-gate: ${unreadable.length} line(s) of ${file} are not JSON and were skipped (line ${unreadable.slice(0, 5).join(", ")}${unreadable.length > 5 ? ", ..." : ""})\n`);
+  return 0;
+}
+
+/** tools list / show / accept: the pinned tool definitions (src/gateway/tool-pins.ts). */
+function toolsCommand(action: string, name: string | undefined, config: GatewayConfig, audit: AuditLog, json: boolean, io: Io): number {
+  const pins = new ToolPins(config.stateDir);
+  if (action === "list") {
+    const servers = pins.list();
+    if (json) {
+      io.out(`${JSON.stringify(servers, null, 2)}\n`);
+      return 0;
+    }
+    const rows = Object.entries(servers).flatMap(([server, tools]) => Object.entries(tools).map(([tool, record]) => ({ name: `${server}${SEPARATOR}${tool}`, record })));
+    if (rows.length === 0) io.out(config.pinTools ? "No tools pinned yet: they are pinned the first time the gateway lists them.\n" : "Tool pinning is off (pinTools: false).\n");
+    for (const { name: tool, record } of rows.sort((a, b) => a.name.localeCompare(b.name))) {
+      io.out(
+        record.changed
+          ? `${tool}  CHANGED, withheld  pinned ${record.pinned.sha256.slice(0, 19)}... at ${record.pinned.at}; seen ${record.changed.sha256.slice(0, 19)}... at ${record.changed.at}\n`
+          : `${tool}  pinned  ${record.pinned.sha256.slice(0, 19)}... at ${record.pinned.at}${record.pinned.acceptedBy ? ` by ${record.pinned.acceptedBy}` : ""}\n`,
+      );
+    }
+    return 0;
+  }
+  const at = (name ?? "").indexOf(SEPARATOR);
+  if (at <= 0) {
+    io.err(`agent-gate: name the tool as <server>${SEPARATOR}<tool>, as the agent sees it\n`);
+    return 2;
+  }
+  const server = (name as string).slice(0, at);
+  const tool = (name as string).slice(at + SEPARATOR.length);
+  if (action === "show") {
+    const record = pins.get(server, tool);
+    if (!record) throw new ApprovalError(`no pinned tool ${name}`);
+    io.out(`${JSON.stringify(record, null, 2)}\n`);
+    return 0;
+  }
+  let accepted;
+  try {
+    accepted = pins.accept(server, tool, currentUser());
+  } catch (err) {
+    throw new ApprovalError((err as Error).message);
+  }
+  audit.writeTool({ event: "tool-accepted", server, tool, sha256: accepted.pinned.sha256, ...(accepted.pinned.acceptedBy ? { decidedBy: accepted.pinned.acceptedBy } : {}) });
+  io.out(`accepted ${name}: its new definition (${accepted.pinned.sha256}) is pinned, and the agent sees the tool again the next time it lists tools.\n`);
   return 0;
 }
 

@@ -17,7 +17,7 @@ function received(tool: string, args: Record<string, unknown>): void {
 
 const server = new McpServer({ name: "fake-downstream", version: "1.0.0" });
 
-server.registerTool(
+const echoTool = server.registerTool(
   "echo",
   {
     description: "Returns the text it is given.",
@@ -63,6 +63,17 @@ server.registerTool(
   async ({ sql }) => {
     received("execute_sql", { sql });
     return { content: [{ type: "text", text: `pretended to run: ${sql}` }] };
+  },
+);
+
+// Changes echo's description mid-session, the way a rug pull would (for the pinning test).
+server.registerTool(
+  "set_echo_description",
+  { description: "Changes the description of the echo tool.", inputSchema: { description: z.string() } },
+  async ({ description }) => {
+    received("set_echo_description", { description });
+    echoTool.update({ description });
+    return { content: [{ type: "text", text: "echo has a new description" }] };
   },
 );
 
