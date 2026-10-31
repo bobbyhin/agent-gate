@@ -1,7 +1,8 @@
 # Exploring the codebase: trace a decision
 
-Each guard decides in one pure function. Reproduce the decision first, then read the code and the
-tests that pin it. Run the TypeScript lines after `npm run build`.
+Each guard decides in one pure function (the MCP policy reads the disk only for path matchers that
+resolve symlinks). Reproduce the decision first, then read the code and the tests that pin it. Run
+the TypeScript lines after `npm run build`.
 
 | Guard | Reproduce one decision | Code | Pinned by |
 | --- | --- | --- | --- |

@@ -688,7 +688,8 @@ server's tools are not listed, and calls to them are not run. `"pinTools": false
 
 A policy is JSON: a default decision and an ordered list of rules. The first rule that matches a
 call decides; when none matches, the default decides. The engine (`src/gateway/policy.ts`) is a
-pure function with no I/O, so the same policy and call always get the same verdict, and every
+pure function with no I/O (except a path matcher that resolves symlinks, see Paths below), so the
+same policy and call always get the same verdict, and every
 verdict carries the id of the rule that decided and a `why`. Rules after it that match the call too
 are listed as well (`alsoMatched`): on the approval card (`also:`, with each one's decision and
 reason, so the human sees every reason and not only the first) and as ids in the audit line, where
@@ -744,8 +745,58 @@ A rule can match on any of these, and all that are present must match:
   `delete-file` all read as "delete file". Whole
   words must match: `post` matches `post_message` and `publishPost` but not `postgres_query`, and
   `comment` matches `add_comment` but not `list_comments`.
-- `args`: argument name to matcher. Each listed argument must be present and match. Strings are
-  matched as they are; other values as their JSON text.
+- `args`: argument name to matcher. Each listed argument must be present and match. A glob or a regex
+  matches a string as it is and any other value as its JSON text; a path matcher (`under`, `outside`,
+  `touches`) reads the value as a path (see Paths below).
+
+**Paths.** A glob reads a path as text, so `/srv/agent-work/*` also matches
+`/srv/agent-work/../../etc/passwd`. Three matchers read it as a path:
+
+```json
+{ "id": "workspace-writes", "tool": ["write_file", "edit_file"], "args": { "path": { "under": ["/srv/agent-work"] } },
+  "decision": "allow", "why": "File writes inside the agent's workspace." }
+```
+
+- `under`: the path stays inside one of the folders, however it is read. For allow rules.
+- `outside`: the opposite: some reading of the path may land outside them. For ask and block rules.
+- `touches`: some reading lands inside one of the folders. For protecting a folder.
+
+The gateway does not know how the downstream server will read a path, so it reads it every way it
+knows: as written and with `%XX` escapes decoded (up to three times); lexically, with `.`, `..` and
+repeated `/` removed; and, unless the matcher says `"symlinks": "ignore"`, with symlinks resolved,
+twice: the real path of the lexical form, and the written form walked as the kernel walks it, where a
+`..` after a symlink leads to the parent of the link's target. A reading it cannot place counts against
+`under`: a relative path or one that starts with `~` (the server's working folder and home are not
+known here), a NUL character, an escape that does not decode, a `..` after a folder that does not
+exist, a loop of symlinks. A list of paths is `under` when every item is. The folders must be absolute;
+with symlinks resolved, they are resolved once, when the policy is loaded. This is the one matcher
+that reads the file system, so its answer follows the disk at the moment of the call; a server that
+opens the path a moment later can find it changed.
+
+`test/gateway/filesystem-red-team.test.ts` runs the real filesystem server
+(`@modelcontextprotocol/server-filesystem` 1.0.0, a devDependency) behind the gateway, with the
+gateway's state folder inside the server's folder on purpose. It tries each path three times: with no
+rules (the server alone), with rules on the path's text (a glob for the workspace, the example's
+`.agent-gate` globs for the state), and with path matchers (`under` the workspace, `touches` the state):
+
+| Attempt | The server alone | Text rules | Path matchers |
+| --- | --- | --- | --- |
+| a file inside the workspace | runs | runs | runs |
+| `..` out of the workspace | refuses | allowed; the server refused it | asked |
+| an absolute path outside | refuses | asked | asked |
+| a symlink inside that points out | refuses | allowed; the server refused it | asked |
+| a percent-encoded `..` | fails: it reads `%2e%2e` as a name | allowed; the server failed | asked |
+| `~/` (the server's home) | refuses | asked | asked |
+| a relative path | runs: it reads it inside its folder | asked | asked |
+| the gateway's state, by its name | runs: the state is inside its folder | blocked | blocked |
+| the gateway's state, through a symlink | runs | **allowed: the server overwrote `approvals.json`** | blocked |
+
+The server's own check keeps calls inside its folder, and it does that well; it cannot know which
+files in it belong to the gateway, and the text rules missed the symlink. The path matchers ask about
+a relative path that the server would have read inside its folder: when the gateway cannot see how a
+server reads a path, it asks. The example's `protect-gateway-state` matches `.agent-gate` in the text,
+because the example cannot know where your state folder is; with its absolute path, a rule with
+`{ "touches": ["/srv/agent-gate-state"] }` also catches a symlink into it.
 
 A rule whose decision is `ask` may set `"standing": true`, so that a standing approval can answer it
 (see [Approval rules](#approval-rules)). A rule that can ask may set `ttlMinutes`, the life of its approval requests, in place of the config's
@@ -993,9 +1044,11 @@ data:
   allow rule for them before the red-line rules.
 - It does not use MCP tool annotations such as `destructiveHint`. They come from the same server
   whose names it already has to trust.
-- Argument matching is text matching. It does not resolve paths, symlinks or the working
-  directory. Approvals can be bound to a file's content (`fileBinding`), but a rule's decision is
-  still made from the text.
+- Globs and regexes match text. The path matchers (`under`, `outside`, `touches`) resolve `..`,
+  escapes and symlinks, but they cannot see a server's own way of reading a path: a relative path or
+  one that starts with `~` cannot be placed (so it is never `under`), and the disk can change between
+  the check and the moment the server opens the file. Approvals can be bound to a file's content
+  (`fileBinding`).
 - An approval is only as safe as the place it is stored. Anyone who can run the CLI or write
   `<stateDir>` can approve, including an agent that has its own shell or file tools outside the
   gateway. The example policy stops this through the gateway (`no-self-approval`,
@@ -1898,8 +1951,10 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 382 tests: a policy table for each red line, for the
-SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
+The MCP gateway suite (`test/gateway/`) runs 388 tests: a policy table for each red line, for the
+SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
+path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
+team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
 controls, standing approvals and their bounds, the escalate-only rule of a second reviewer, the CLI's exit codes, its read-back before an approval, and what a decision leaves behind
@@ -1992,7 +2047,7 @@ audit log; the end-to-end test scores its own run that way. It checks which call
 the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 388/388 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -2004,7 +2059,7 @@ src/command-guard.js                          the analyzer: analyze(command) -> 
 src/command-guard.d.ts                        its types, for the TypeScript gateway
 bin/claude-pretooluse-hook.js                 the Claude Code PreToolUse hook
 src/gateway/server.ts                         the MCP gateway: lists <server>__<tool>, decides, forwards
-src/gateway/policy.ts                         the policy engine (pure): evaluate(policy, call) -> verdict
+src/gateway/policy.ts                         the policy engine (pure but for path matchers): evaluate(policy, call) -> verdict
 src/gateway/approvals.ts                      the approval queue in <stateDir>/approvals.json
 src/gateway/repeats.ts                        loop limits: recent runs per call in <stateDir>/repeats.json
 src/gateway/files.ts                          binds approvals to the content of the files a call names

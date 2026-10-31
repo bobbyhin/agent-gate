@@ -5,7 +5,8 @@
 // in the verdict (alsoMatched) for the human and the audit log; they decide nothing. parsePolicy()
 // checks the JSON once and compiles its patterns. evaluate() is a pure function (no I/O, no clock,
 // no randomness): the same policy and the same call always get the same verdict, which is what makes
-// it table-testable.
+// it table-testable. The one exception is a path matcher that resolves symlinks (below): it reads
+// the file system, so its answer follows the disk.
 //
 // A rule with "decision": "rewrite" does not decide. It edits the call's arguments ("rewrite": set,
 // clamp, drop, redact) and evaluation goes on with the next rule, on the edited arguments: the call
@@ -22,11 +23,14 @@
 //   server     the downstream server's name             glob or regex, or a list of them
 //   tool       the tool's name on that server            glob or regex, or a list of them
 //   toolWords  words in the tool's name                  ["delete", "create pull request"]
-//   args       argument values, by argument name         { "path": "*.env" }
+//   args       argument values, by argument name         { "path": "*.env" }, or a path matcher:
+//              { "path": { "under": ["/srv/agent-work"] } } (also "outside" and "touches", below)
 // A rule then either has a fixed "decision" and "why", or is a shell rule ("type": "shell") that
 // runs the slice-1 shell analyzer on one string argument and maps its answer. A rule that can ask may
 // set "ttlMinutes": how long its approval requests live, instead of the config's approvalTtlHours.
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { analyze, legacyDecide, type GuardAction, type GuardDecision } from "#command-guard";
 import { array, fail, object, onlyKeys, text } from "./validate.js";
 
@@ -68,13 +72,15 @@ export interface Verdict {
 }
 
 type Test = (value: string) => boolean;
+/** Tests an argument's value as the call has it: a path matcher needs strings and arrays as they are. */
+type ValueTest = (value: unknown) => boolean;
 
 export interface CompiledRule {
   readonly id: string;
   readonly server?: Test;
   readonly tool?: Test;
   readonly toolWords?: readonly string[][];
-  readonly args: ReadonlyArray<{ name: string; test: Test }>;
+  readonly args: ReadonlyArray<{ name: string; test: ValueTest }>;
   /** A rule that decides. */
   readonly verdict?: (call: ToolCall) => Verdict;
   /** A rule that decides with a fixed decision (not a shell rule): that decision. */
@@ -91,7 +97,7 @@ export interface RepeatLimit {
   readonly server?: Test;
   readonly tool?: Test;
   readonly toolWords?: readonly string[][];
-  readonly args: ReadonlyArray<{ name: string; test: Test }>;
+  readonly args: ReadonlyArray<{ name: string; test: ValueTest }>;
   readonly max: number;
   readonly windowMs: number;
   readonly decision: "ask" | "block";
@@ -181,15 +187,15 @@ function matches(rule: Pick<CompiledRule, "server" | "tool" | "toolWords" | "arg
   for (const { name, test } of rule.args) {
     // Own properties only: an argument named "constructor" must not match Object.prototype.
     if (!Object.prototype.hasOwnProperty.call(call.args, name)) return false;
-    if (!test(argumentText(call.args[name]))) return false;
+    if (!test(call.args[name])) return false;
   }
   return true;
 }
 
 /**
- * Strings are matched as they are; any other argument value is matched as its JSON text.
- * ponytail: text only. Paths are not resolved, so a symlink into a protected directory, or a
- * relative path used from inside it, does not look like that directory to a rule.
+ * For globs and regexes: strings are matched as they are; any other argument value is matched as its
+ * JSON text. A glob reads text only: it does not resolve paths, so a symlink into a protected folder,
+ * or a ".." out of an allowed one, does not look like that folder to it. The path matchers below do.
  */
 function argumentText(value: unknown): string {
   return typeof value === "string" ? value : (JSON.stringify(value) ?? "");
@@ -504,8 +510,136 @@ function phrases(value: unknown, at: string): string[][] {
   });
 }
 
-function argumentMatchers(value: unknown, at: string): Array<{ name: string; test: Test }> {
+function argumentMatchers(value: unknown, at: string): Array<{ name: string; test: ValueTest }> {
   const entries = Object.entries(object(value, at));
   if (entries.length === 0) fail(`${at} must name at least one argument`);
-  return entries.map(([name, spec]) => ({ name, test: matcher(spec, `${at}.${name}`) }));
+  return entries.map(([name, spec]) => ({ name, test: valueMatcher(spec, `${at}.${name}`) }));
+}
+
+/** An argument's matcher: a glob, a regex or a path matcher, or a non-empty list of them (any one may match). */
+function valueMatcher(value: unknown, at: string): ValueTest {
+  const list = Array.isArray(value) ? value : [value];
+  if (list.length === 0) fail(`${at} must not be an empty list`);
+  const tests = list.map((one, i): ValueTest => {
+    const where = Array.isArray(value) ? `${at}[${i}]` : at;
+    if (typeof one === "object" && one !== null && !Array.isArray(one) && PATH_KINDS.some((kind) => kind in one)) {
+      return pathMatcher(one as Record<string, unknown>, where);
+    }
+    const test = singleMatcher(one, where);
+    return (candidate) => test(argumentText(candidate));
+  });
+  return (candidate) => tests.some((test) => test(candidate));
+}
+
+// ── path matchers ───────────────────────────────────────────────────────────────────────────
+//
+// { "under": [folders] }, { "outside": [folders] } or { "touches": [folders] }, each with
+// "symlinks": "resolve" (the default) or "ignore". A glob reads a path as text, so "/srv/work/*"
+// matches "/srv/work/../../etc/passwd". These read it as a path instead.
+//
+// The gateway cannot know how the downstream server will read a path, so it reads it every way it
+// knows, and each way is a "reading":
+//   - as written, and decoded when it has %XX escapes (up to three times, for double encoding);
+//     cut at a NUL character too, when it has one, because C code stops there;
+//   - lexically: "." and ".." and repeated "/" removed, as path.resolve() does it;
+//   - with symlinks resolved (unless "ignore"): the lexical form's real path, and the written form
+//     walked as the kernel walks it, where a ".." after a symlink goes to the parent of its target.
+//     The part that does not exist yet keeps its name after the real path of the part that does.
+// A reading is unknown when the gateway cannot place it: a relative path (the server's working
+// folder is not known here), a path that starts with "~" (the server's home is not known either), a
+// NUL, an escape that does not decode, a ".." after a folder that does not exist, a loop of symlinks.
+//   under     every reading is known and inside a folder: the path stays in, however it is read.
+//   outside   the opposite of under: some reading may land outside, or is unknown.
+//   touches   some known reading is inside a folder: the path may reach in.
+// A value that is not a string is not under and touches nothing. A list is under when it has items
+// and each one is, and touches when one item does. The folders must be absolute paths; with symlinks
+// resolved, they are resolved once, when the policy is loaded.
+
+const PATH_KINDS = ["under", "outside", "touches"] as const;
+type PathKind = (typeof PATH_KINDS)[number];
+const ESCAPE = /%[0-9a-f]{2}/i;
+
+function pathMatcher(spec: Record<string, unknown>, at: string): ValueTest {
+  onlyKeys(spec, [...PATH_KINDS, "symlinks"], at);
+  const kinds = PATH_KINDS.filter((kind) => spec[kind] !== undefined);
+  if (kinds.length !== 1) fail(`${at} needs exactly one of "under", "outside" and "touches"`);
+  const kind = kinds[0] as PathKind;
+  const symlinks = spec.symlinks ?? "resolve";
+  if (symlinks !== "resolve" && symlinks !== "ignore") fail(`${at}.symlinks must be "resolve" or "ignore"`);
+  const links = symlinks === "resolve";
+  const list = array(spec[kind], `${at}.${kind}`);
+  if (list.length === 0) fail(`${at}.${kind} must list at least one folder`);
+  const roots = list.map((raw, i) => {
+    const root = text(raw, `${at}.${kind}[${i}]`);
+    if (root.includes("\0") || !path.isAbsolute(root)) fail(`${at}.${kind}[${i}] must be an absolute path`);
+    // Readings are compared with real paths, so the folder's own symlinks are resolved too.
+    return links ? (realPrefix(path.resolve(root)) ?? fail(`${at}.${kind}[${i}] cannot be resolved: ${root}`)) : path.resolve(root);
+  });
+  const inside = (reading: string | undefined): boolean =>
+    reading !== undefined && roots.some((root) => reading === root || reading.startsWith(root.endsWith(path.sep) ? root : root + path.sep));
+  const one = (value: unknown): { under: boolean; touches: boolean } => {
+    if (typeof value !== "string") return { under: false, touches: false };
+    const readings = pathReadings(value, links);
+    return { under: readings.every(inside), touches: readings.some(inside) };
+  };
+  return (value) => {
+    const items = Array.isArray(value) ? value.map(one) : [one(value)];
+    const under = items.length > 0 && items.every((item) => item.under);
+    if (kind === "under") return under;
+    if (kind === "outside") return !under;
+    return items.some((item) => item.touches);
+  };
+}
+
+/** Every way the gateway knows to read a path: see above. undefined stands for a reading it cannot place. */
+export function pathReadings(value: string, links: boolean): Array<string | undefined> {
+  const written: string[] = [value];
+  const readings: Array<string | undefined> = [];
+  let current = value;
+  for (let round = 0; round < 3 && ESCAPE.test(current); round++) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(current);
+    } catch {
+      readings.push(undefined);
+      break;
+    }
+    if (decoded === current) break;
+    written.push(decoded);
+    current = decoded;
+  }
+  for (const form of written) readings.push(...place(form, links));
+  return readings;
+}
+
+function place(form: string, links: boolean): Array<string | undefined> {
+  const nul = form.indexOf("\0");
+  if (nul >= 0) return [undefined, ...place(form.slice(0, nul), links)];
+  if (!path.isAbsolute(form)) return [undefined];
+  const lexical = path.resolve(form);
+  return links ? [realPrefix(lexical), realPrefix(form)] : [lexical];
+}
+
+/**
+ * The real path of the longest part of `p` that exists, followed by the rest of `p`, walked like the
+ * kernel walks it (realpath(3), so a ".." after a symlink leads to the parent of its target).
+ * undefined when it cannot be known: a ".." in the part that does not exist, a loop, no permission.
+ */
+function realPrefix(p: string): string | undefined {
+  const parts = p.split(path.sep);
+  for (let i = parts.length; i >= 1; i--) {
+    const head = parts.slice(0, i).join(path.sep) || path.sep;
+    let real: string;
+    try {
+      real = fs.realpathSync.native(head);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      return undefined;
+    }
+    const rest = parts.slice(i).filter((part) => part !== "" && part !== ".");
+    if (rest.includes("..")) return undefined;
+    return path.join(real, ...rest);
+  }
+  return undefined;
 }
