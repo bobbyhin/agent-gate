@@ -7,13 +7,19 @@
 
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
+import * as path from "node:path";
 
 const LOCK_WAIT_MS = 5000;
 const LOCK_STALE_MS = 10_000;
+// A lock with no owner file: its holder died between creating the lock and writing its id there,
+// a gap of microseconds, so after a second nobody is coming back for it.
+const OWNERLESS_STALE_MS = 1000;
 
 /**
  * Runs `fn` while holding `lockDir` (a directory: mkdir either creates it or fails, atomically).
- * A lock older than 10 seconds is treated as left behind by a crashed process and broken.
+ * The holder writes its process id into the lock. A lock whose holder is no longer running was
+ * left behind by a crash (kill -9, power loss) and is broken at once; a lock with no id after a
+ * second (a crash between the two steps), or any lock older than 10 seconds, is broken too.
  * ponytail: a lock directory with a stale timeout. Enough for one gateway plus a human at the
  * CLI on a local disk; many concurrent writers or a network filesystem would need a database.
  */
@@ -23,10 +29,18 @@ export function withLock<T>(dir: string, lockDir: string, fn: () => T): T {
   for (;;) {
     try {
       fs.mkdirSync(lockDir);
+      try {
+        fs.writeFileSync(path.join(lockDir, "owner"), String(process.pid));
+      } catch {
+        // the age check still breaks the lock if this process dies
+      }
       break;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      if (ageMs(lockDir) > LOCK_STALE_MS) {
+      const owner = ownerOf(lockDir);
+      const age = ageMs(lockDir);
+      const abandoned = owner === undefined ? age > OWNERLESS_STALE_MS : owner !== process.pid && !isRunning(owner);
+      if (abandoned || age > LOCK_STALE_MS) {
         fs.rmSync(lockDir, { recursive: true, force: true });
         continue;
       }
@@ -41,8 +55,13 @@ export function withLock<T>(dir: string, lockDir: string, fn: () => T): T {
   }
 }
 
-/** Write to a temporary file, flush it to disk, then rename it over the target. */
+/**
+ * Write to a temporary file, flush it to disk, then rename it over the target. Called only while
+ * holding the target's lock, so a temporary file of this target whose writer is no longer running
+ * was left by a write that a crash cut short, and is removed first.
+ */
 export function writeAtomic(file: string, content: string): void {
+  removeLeftovers(file);
   const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   try {
     const fd = fs.openSync(tmp, "wx", 0o600);
@@ -66,6 +85,43 @@ export function readIfExists(file: string): string | undefined {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw err;
+  }
+}
+
+/** The process id written into a lock, if it can be read. */
+function ownerOf(lockDir: string): number | undefined {
+  try {
+    const pid = Number(fs.readFileSync(path.join(lockDir, "owner"), "utf8"));
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** True while a process with this id exists (signal 0 checks without sending anything). */
+export function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM"; // it exists, it is just not ours
+  }
+}
+
+/** Removes "<file>.<pid>.<hex>.tmp" files whose writer is no longer running. */
+function removeLeftovers(file: string): void {
+  const dir = path.dirname(file);
+  const prefix = `${path.basename(file)}.`;
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const m = /^(\d+)\.[0-9a-f]{8}\.tmp$/.exec(name.startsWith(prefix) ? name.slice(prefix.length) : "");
+    const pid = m ? Number(m[1]) : NaN;
+    if (m && pid !== process.pid && !isRunning(pid)) fs.rmSync(path.join(dir, name), { force: true });
   }
 }
 

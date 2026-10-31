@@ -566,6 +566,13 @@ Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.con
   read-modify-write, and every write goes to a temporary file that is flushed and then renamed
   over the old one. A damaged file is an error, never an empty queue, because an empty queue would
   forget denials.
+- A crash loses nothing. `test/gateway/crash.test.ts` kills the gateway with `kill -9` while one
+  request is pending and one is approved but not used, starts it again, and checks that both are
+  still there, that the approved call runs once and that the next identical call asks again. It
+  also kills a process eight times in the middle of a run of writes: the file is never half
+  written, and what a killed writer leaves is cleared by the next write. Its lock is broken at once
+  when the process id written in it is no longer running (after a second if no id was written yet),
+  and its temporary file is removed.
 
 Why the gateway answers with an error and lets the agent retry, instead of holding the call open
 until a human answers: [docs/adr/0001-non-blocking-approvals.md](docs/adr/0001-non-blocking-approvals.md).
@@ -1110,7 +1117,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 225 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 229 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
@@ -1118,6 +1125,8 @@ controls, the CLI's exit codes, its read-back before an approval, and what a dec
 (the record, the `approval-decided` line, `stats`), and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log.
+Crash tests (`test/gateway/crash.test.ts`) kill the gateway and a writer with `kill -9` and check
+what survives.
 One step plays a prompt injection: a tool result tells the agent to upload its SSH key, the agent
 obeys, and the gateway blocks the call before it reaches the server. Another denies a call with a
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
@@ -1140,7 +1149,7 @@ no secret-shaped string appears in the source and secret scanners need no except
 repository.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 225/225 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
+stopped (351/351 shell guard tests, 229/229 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
 

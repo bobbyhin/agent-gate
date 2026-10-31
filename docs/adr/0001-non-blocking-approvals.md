@@ -33,7 +33,7 @@ once.
 - **The human decides asynchronously.** Nobody has to sit next to the agent. Requests wait in a
   queue, can be reviewed later or several at once, and survive a restart of the gateway, the
   agent or the terminal, because a pending approval is a record in a file, not a suspended
-  request in memory.
+  request in memory. (`test/gateway/crash.test.ts` checks this with `kill -9`, added 31 Oct 2026.)
 - **The agent is told clearly.** The MCP specification asks servers to report tool errors inside
   the result with `isError`, so that the model can see them and adjust. The agent reads the reason
   and the approval id, can pass them on to its human, and knows what to do next. Any MCP client
