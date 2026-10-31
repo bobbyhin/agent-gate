@@ -422,6 +422,10 @@ example `{ "name": "files", "command": "npx", "args": ["-y", "@modelcontextproto
 - `fileBinding` (optional), for example `{ "roots": ["/srv/agent-work"], "arguments": ["path", "source"] }`,
   binds approvals to the content of the files that those arguments name. See
   [Approval rules](#approval-rules). Roots are resolved against the config file's directory and must exist.
+- `profiles` (optional), for example `{ "read-only": { "demo": ["echo", "search_*"] } }`: named sets of
+  tools. A connection started with `serve --profile read-only` sees and may call only the tools that
+  its globs match, on the servers it names; a server it does not name shows it nothing. See
+  [Tool lists](#tool-lists).
 
 Then give the agent the gateway instead of the downstream servers. For Claude Code, in `.mcp.json`:
 
@@ -437,7 +441,8 @@ Then give the agent the gateway instead of the downstream servers. For Claude Co
 ```
 
 Some clients add their own prefix (Claude Code shows `mcp__gate__demo__delete_file`) and limit
-the length of tool names, so keep server names short.
+the length of tool names, so keep server names short. To give an agent a narrower set of tools than
+another, add `"--profile", "read-only"` to its `args` (one `serve` process serves one client).
 
 ### An approval, step by step
 
@@ -659,12 +664,20 @@ cross it if the state directory or the CLI is within its reach. Keep them out of
 ### Tool lists
 
 The model chooses its calls from what `tools/list` tells it, so the gateway decides what goes in the
-list, as well as which calls run. A server's tools are listed minus three kinds:
+list, as well as which calls run. A server's tools are listed minus four kinds:
 
 - **Not exposed.** With `"expose": ["read_*", "search_*"]` on a server in the config, only the tools
   those globs match are listed. A call to any other tool of that server is blocked (rule
   `not-exposed`) and audited, so an agent that knows a name cannot reach it either. A short list
   also leaves the model less to read than a server's full catalogue.
+- **Not in the profile.** `expose` applies to every connection; a profile applies to one. With
+  `"profiles": { "read-only": { "demo": ["echo", "search_*"] }, "full": { "demo": ["*"] } }` in the
+  config, an agent whose gateway runs `serve --profile read-only` is shown `demo__echo` and
+  `demo__search_notes` only, while another agent's gateway, with `--profile full`, shows every tool.
+  A call outside the profile is blocked (rule `not-in-profile`) and never forwarded, and every call
+  line names the profile (`"profile": "read-only"`). A tool has to pass both: the server's `expose`
+  and the profile. A lower-tier agent then neither reads the higher tier's tools nor can call them,
+  and its list of tools costs fewer tokens. An unknown profile stops the gateway at startup.
 - **Always blocked.** A tool that the policy blocks whatever its arguments (a block rule that
   matches its name and has no `args`, with no rule before it that could let a call through) is left
   out. A call to it is still decided by the policy, and blocked.
@@ -2063,7 +2076,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 417 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 429 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
@@ -2080,8 +2093,8 @@ controls, standing approvals and their bounds, the escalate-only rule of a secon
 is dropped), `audit stats`, every rule that matched next to the one that decided (and a check that
 the decisions are first match's), rewrite rules on their own and through a running gateway, loop
 limits (their counts with a clock the test controls, and a loop through a running gateway), tool
-lists (a server that changes a tool's description mid-session, `expose`, tools the policy always
-blocks, a damaged pin file), the result guard (secrets withheld or redacted in text, resources and
+lists (a server that changes a tool's description mid-session, `expose`, profiles, tools the policy
+always blocks, a damaged pin file), the result guard (secrets withheld or redacted in text, resources and
 structured content, instruction-like text flagged, ordinary text left alone), `audit verify` (a log
 the gateway wrote passes; each of ten hand edits fails it) and `audit trajectory` (the three modes,
 precision and recall), a remote server over Streamable HTTP on 127.0.0.1 (its header from the
@@ -2166,7 +2179,7 @@ an evaluation set of whole runs, each replayed and checked step by step. It chec
 not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 417/417 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 429/429 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).

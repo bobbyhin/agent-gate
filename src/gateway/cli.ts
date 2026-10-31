@@ -22,7 +22,9 @@ import { ToolPins } from "./tool-pins.js";
 import { ConfigError } from "./validate.js";
 
 const USAGE = `Usage:
-  agent-gate serve [--config <file>]                  run the MCP gateway on stdin/stdout
+  agent-gate serve [--profile <name>] [--config <file>]
+                                                      run the MCP gateway on stdin/stdout; with a profile
+                                                      from the config, the agent sees only its tools
   agent-gate approvals list [--all] [--json] [--config <file>]
   agent-gate approvals show <id> [--config <file>]    print one request in full
   agent-gate approvals approve <id> [--note <text>] [--yes] [--config <file>]
@@ -63,7 +65,7 @@ The LLM gateway's ("llm serve", "usage") is --config, else $AGENT_GATE_LLM_CONFI
 
 /** Every command: the options it takes, the ones it needs, and whether it takes an id after the action word. */
 const COMMANDS: Readonly<Record<string, { options: readonly string[]; required?: readonly string[]; id?: true }>> = {
-  serve: { options: [] },
+  serve: { options: ["profile"] },
   "approvals list": { options: ["all", "json"] },
   "approvals show": { options: [], id: true },
   "approvals approve": { options: ["note", "yes"], id: true },
@@ -128,6 +130,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
         conn: { type: "string" },
         run: { type: "string" },
         openapi: { type: "string" },
+        profile: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -157,7 +160,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
   }
 
   try {
-    if (name === "serve") return await serve(configFile);
+    if (name === "serve") return await serve(configFile, values.profile);
     if (name === "llm serve") return await serveLlm(llmConfigFile);
     if (name === "usage") {
       if (values.by !== undefined && values.verify) {
@@ -222,9 +225,9 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
   }
 }
 
-async function serve(configFile: string): Promise<number> {
+async function serve(configFile: string, profile: string | undefined): Promise<number> {
   const config = loadConfig(configFile);
-  const gateway = await createGateway(config, loadPolicy(config.policyFile));
+  const gateway = await createGateway(config, loadPolicy(config.policyFile), undefined, profile === undefined ? {} : { profile });
   await gateway.server.connect(new StdioServerTransport());
   // The SDK's stdio transport does not notice when the client goes away, so watch stdin here.
   await new Promise<void>((resolve) => {

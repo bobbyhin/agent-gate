@@ -13,9 +13,10 @@
 //          Once a human approves, the same call (same arguments) is forwarded exactly once.
 //   block  do not forward and do not queue; return an error result
 //
-// tools/list shows a server's tools minus three kinds: those its "expose" globs leave out (a call to
-// one is blocked), those the policy blocks whatever the arguments, and those whose definition changed
-// since it was pinned (a call to one asks; src/gateway/tool-pins.ts).
+// tools/list shows a server's tools minus four kinds: those its "expose" globs leave out and those
+// the connection's profile leaves out (a call to one is blocked), those the policy blocks whatever the
+// arguments, and those whose definition changed since it was pinned (a call to one asks;
+// src/gateway/tool-pins.ts).
 //
 // ponytail: only tools are proxied. Resources, prompts, and requests from a downstream server
 // back to the client (sampling, elicitation) are not.
@@ -68,6 +69,8 @@ const stderrLog: Log = (message) => process.stderr.write(`[agent-gate] ${message
 export interface GatewayOptions {
   /** Where headersFromEnv values are read from (default: process.env). */
   env?: NodeJS.ProcessEnv;
+  /** A profile from the config's "profiles": this connection sees and may call only its tools. */
+  profile?: string;
 }
 
 export async function createGateway(config: GatewayConfig, policy: Policy, log: Log = stderrLog, options: GatewayOptions = {}): Promise<Gateway> {
@@ -81,6 +84,13 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
     : undefined;
   const exposeTests = new Map(config.servers.flatMap((s) => (s.expose ? [[s.name, s.expose.map(globToRegExp)] as const] : [])));
   const isExposed = (server: string, tool: string): boolean => exposeTests.get(server)?.some((re) => re.test(tool)) ?? true;
+  // A profile narrows what this connection sees on top of "expose"; a server it does not name shows nothing.
+  const profile = options.profile === undefined ? undefined : config.profiles?.get(options.profile);
+  if (options.profile !== undefined && !profile) {
+    throw new ConfigError(`the config has no profile "${options.profile}"${config.profiles ? ` (it has ${[...config.profiles.keys()].join(", ")})` : " (it has no \"profiles\")"}`);
+  }
+  const profileTests = new Map([...(profile ?? [])].map(([server, globs]) => [server, globs.map(globToRegExp)] as const));
+  const inProfile = (server: string, tool: string): boolean => !profile || (profileTests.get(server)?.some((re) => re.test(tool)) ?? false);
   // One connection per gateway process: the stdio transport serves exactly one client.
   const connId = `cn-${randomBytes(4).toString("hex")}`;
   let seq = 0;
@@ -107,7 +117,7 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
 
   /** A server's tools as the agent sees them: exposed, not always blocked, not changed since pinned; with the prefix. */
   async function visibleTools(name: string, client: Client): Promise<Tool[]> {
-    let shown = (await listTools(name, client, log, servers.get(name)?.timeoutMs, scrub)).filter((tool) => isExposed(name, tool.name) && !alwaysBlocked(policy, name, tool.name));
+    let shown = (await listTools(name, client, log, servers.get(name)?.timeoutMs, scrub)).filter((tool) => isExposed(name, tool.name) && inProfile(name, tool.name) && !alwaysBlocked(policy, name, tool.name));
     if (pins) {
       try {
         const checked = pins.check(name, shown);
@@ -146,7 +156,7 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
     let decided: Decided;
     try {
       // A tool the gateway has not listed yet is listed now, so that its definition is pinned (or found changed) first.
-      if (pins && isExposed(call.server, call.tool) && pins.status(call.server, call.tool) === "unknown") await visibleTools(call.server, client);
+      if (pins && isExposed(call.server, call.tool) && inProfile(call.server, call.tool) && pins.status(call.server, call.tool) === "unknown") await visibleTools(call.server, client);
       decided = decide(call, n, context);
     } catch (err) {
       // The policy, the approval file or the audit log failed: the call is not run.
@@ -169,9 +179,11 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
   }
 
   function decide(call: ToolCall, n: number, context: CallContext): Decided {
-    let verdict: Verdict = isExposed(call.server, call.tool)
-      ? evaluate(policy, call)
-      : { decision: "block", rule: "not-exposed", why: `the gateway config's "expose" list for server "${call.server}" leaves this tool out` };
+    let verdict: Verdict = !isExposed(call.server, call.tool)
+      ? { decision: "block", rule: "not-exposed", why: `the gateway config's "expose" list for server "${call.server}" leaves this tool out` }
+      : !inProfile(call.server, call.tool)
+        ? { decision: "block", rule: "not-in-profile", why: `profile "${options.profile}" leaves this tool out, so this connection may not call it` }
+        : evaluate(policy, call);
     // A tool whose definition changed since it was pinned does not run unattended.
     if (pins && (verdict.decision === "allow" || verdict.decision === "warn") && pins.status(call.server, call.tool) === "changed") {
       verdict = {
@@ -217,6 +229,7 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
           forwarded,
           ...(approvalId ? { approvalId } : {}),
           ...(servers.get(call.server)?.url ? { transport: "http" as const } : {}),
+          ...(options.profile !== undefined ? { profile: options.profile } : {}),
           ...rewritten,
           ...(verdict.alsoMatched ? { alsoMatched: verdict.alsoMatched.map((m) => m.rule) } : {}),
           ...context,

@@ -21,6 +21,9 @@
 // reached over Streamable HTTP; "headersFromEnv" names, for each header, the environment variable
 // that holds its value, so no token is ever in this file. Plain http:// is accepted only for a
 // server on this machine. "timeoutSeconds" (default 60) bounds each request to a server.
+// "profiles" ({ "<name>": { "<server>": ["glob", ...] } }) are named sets of tools: a connection that
+// runs with a profile (serve --profile <name>) sees and may call only the tools its globs match, on the
+// servers it names, on top of each server's "expose".
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -54,9 +57,14 @@ export interface GatewayConfig {
   /** Read results: withhold or redact secrets (leak-guard rules) and flag instruction-like text. */
   resultGuard?: { leakPolicyFile?: string; flagInstructions: boolean };
   fileBinding?: FileBindingConfig;
+  /** Profile name -> server name -> globs of the tool names a connection with that profile may see and call. */
+  profiles?: ReadonlyMap<string, ReadonlyMap<string, string[]>>;
 }
 
 export const DEFAULT_APPROVAL_TTL_HOURS = 24;
+
+/** A profile's or an HTTP agent's name: it goes into the audit log, so it is kept plain. */
+export const PLAIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 // Tools are published as "<server>__<tool>" and split again at the first "__", so a server name
 // must not contain "__" or start or end with "_".
@@ -73,7 +81,7 @@ export function loadPolicy(file: string): Policy {
 
 export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
   const config = object(json, "config");
-  onlyKeys(config, ["servers", "policy", "stateDir", "approvalTtlHours", "auditArguments", "pinTools", "resultGuard", "fileBinding"], "config");
+  onlyKeys(config, ["servers", "policy", "stateDir", "approvalTtlHours", "auditArguments", "pinTools", "resultGuard", "fileBinding", "profiles"], "config");
 
   const servers = array(config.servers, "config.servers").map((raw, i) => server(raw, `config.servers[${i}]`));
   if (servers.length === 0) fail("config.servers must list at least one server");
@@ -99,7 +107,28 @@ export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
     pinTools,
     ...(config.resultGuard === undefined ? {} : { resultGuard: resultGuard(config.resultGuard, baseDir) }),
     ...(config.fileBinding === undefined ? {} : { fileBinding: fileBinding(config.fileBinding, baseDir) }),
+    ...(config.profiles === undefined ? {} : { profiles: profiles(config.profiles, names) }),
   };
+}
+
+/** { "<profile>": { "<server>": ["glob", ...] } }: a server the profile does not name shows it nothing. */
+function profiles(raw: unknown, servers: ReadonlySet<string>): Map<string, Map<string, string[]>> {
+  const at = "config.profiles";
+  const result = new Map<string, Map<string, string[]>>();
+  for (const [name, value] of Object.entries(object(raw, at))) {
+    if (!PLAIN_NAME.test(name)) fail(`${at} has a profile name that is not valid: ${JSON.stringify(name)} (1 to 64 letters, digits, ".", "_" or "-")`);
+    const perServer = new Map<string, string[]>();
+    for (const [server, globs] of Object.entries(object(value, `${at}.${name}`))) {
+      if (!servers.has(server)) fail(`${at}.${name} names "${server}", which is not one of the servers`);
+      const list = array(globs, `${at}.${name}.${server}`).map((glob, i) => text(glob, `${at}.${name}.${server}[${i}]`));
+      if (list.length === 0) fail(`${at}.${name}.${server} must list at least one glob; leave the server out to show none of its tools`);
+      perServer.set(server, list);
+    }
+    if (perServer.size === 0) fail(`${at}.${name} must name at least one server`);
+    result.set(name, perServer);
+  }
+  if (result.size === 0) fail(`${at} must define at least one profile; leave it out to have none`);
+  return result;
 }
 
 function resultGuard(raw: unknown, baseDir: string): { leakPolicyFile?: string; flagInstructions: boolean } {
