@@ -93,6 +93,8 @@ export interface LlmConfig {
   retries: number;
   /** Wait before retry n: backoffMs * 2^(n-1). */
   backoffMs: number;
+  /** After a 429 on the last upstream: the longest the gateway waits (Retry-After, capped) before its one retry. 0: never. */
+  rateLimitWaitMs: number;
   maxBodyBytes: number;
   metrics?: MetricsConfig;
 }
@@ -104,6 +106,7 @@ export const DEFAULTS = {
   timeoutMs: 60_000,
   retries: 1,
   backoffMs: 250,
+  rateLimitWaitMs: 2000,
   maxBodyBytes: 1024 * 1024,
 } as const;
 
@@ -133,7 +136,7 @@ export function parseLlmConfig(json: unknown, baseDir: string): LlmConfig {
   const config = object(json, "config");
   onlyKeys(
     config,
-    ["listen", "stateDir", "policy", "upstreams", "routes", "keys", "defaultMaxTokens", "timeoutMs", "retries", "backoffMs", "maxBodyBytes", "metrics"],
+    ["listen", "stateDir", "policy", "upstreams", "routes", "keys", "defaultMaxTokens", "timeoutMs", "retries", "backoffMs", "rateLimitWaitMs", "maxBodyBytes", "metrics"],
     "config",
   );
 
@@ -176,6 +179,7 @@ export function parseLlmConfig(json: unknown, baseDir: string): LlmConfig {
     timeoutMs: optionalInteger(config.timeoutMs, "config.timeoutMs", 1, 600_000, DEFAULTS.timeoutMs),
     retries: optionalInteger(config.retries, "config.retries", 0, MAX_RETRIES, DEFAULTS.retries),
     backoffMs: optionalInteger(config.backoffMs, "config.backoffMs", 0, 60_000, DEFAULTS.backoffMs),
+    rateLimitWaitMs: optionalInteger(config.rateLimitWaitMs, "config.rateLimitWaitMs", 0, 60_000, DEFAULTS.rateLimitWaitMs),
     maxBodyBytes: optionalInteger(config.maxBodyBytes, "config.maxBodyBytes", 1024, 32 * 1024 * 1024, DEFAULTS.maxBodyBytes),
     ...(config.metrics === undefined ? {} : { metrics: parseMetrics(config.metrics, keyHashes) }),
   };

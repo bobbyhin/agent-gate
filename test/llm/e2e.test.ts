@@ -30,6 +30,7 @@ interface Reply {
 describe("LLM gateway end to end", () => {
   let healthy: FakeUpstream;
   let failing: FakeUpstream;
+  let limited: FakeUpstream;
   let tmp: string;
   let stateDir: string;
   let configFile: string;
@@ -44,6 +45,7 @@ describe("LLM gateway end to end", () => {
   before(async () => {
     healthy = await startFakeUpstream({ mode: "ok", keys: [FAKE_PROVIDER_KEYS.E2E_CHEAP_KEY, FAKE_PROVIDER_KEYS.E2E_STRONG_KEY], usage: USAGE });
     failing = await startFakeUpstream({ mode: "fail" });
+    limited = await startFakeUpstream({ mode: "limited", retryAfter: "1" });
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-llm-e2e-"));
     stateDir = path.join(tmp, "state");
     configFile = path.join(tmp, "llm-gateway.config.json");
@@ -58,12 +60,15 @@ describe("LLM gateway end to end", () => {
           { name: "strong", baseUrl: `${healthy.url}/v1`, apiKeyEnv: "E2E_STRONG_KEY", models: { large: "fake-large-1" }, pricePerMTok: { input: 5, output: 15 } },
           { name: "flaky", baseUrl: `${failing.url}/v1`, apiKeyEnv: "E2E_FLAKY_KEY", models: { large: "flaky-large-1" }, pricePerMTok: { input: 4, output: 12 } },
           { name: "misconfigured", baseUrl: `${healthy.url}/v1`, apiKeyEnv: "E2E_WRONG_KEY", models: { small: "fake-small-1" }, pricePerMTok: { input: 0.5, output: 1.5 } },
+          { name: "limited", baseUrl: `${limited.url}/v1`, apiKeyEnv: "E2E_LIMITED_KEY", models: { large: "limited-large-1" }, pricePerMTok: { input: 4, output: 12 } },
         ],
         routes: [
           { id: "classify-is-cheap", when: { task: "classify" }, use: { upstream: "cheap", model: "small" } },
           { id: "code-is-strong", when: { task: "code" }, use: { upstream: "flaky", model: "large" }, fallback: { upstream: "strong" } },
           { id: "flaky-only", when: { task: "flaky" }, use: { upstream: "flaky", model: "large" } },
           { id: "wrong-key", when: { task: "wrong-key" }, use: { upstream: "misconfigured", model: "small" } },
+          { id: "limited-then-strong", when: { task: "limited" }, use: { upstream: "limited", model: "large" }, fallback: { upstream: "strong" } },
+          { id: "limited-only", when: { task: "limited-only" }, use: { upstream: "limited", model: "large" } },
           { id: "cheap-models", use: { upstream: "cheap" } },
           { id: "strong-models", use: { upstream: "strong" } },
         ],
@@ -95,6 +100,7 @@ describe("LLM gateway end to end", () => {
     }
     await healthy?.close();
     await failing?.close();
+    await limited?.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -126,7 +132,7 @@ describe("LLM gateway end to end", () => {
     return { status: res.status, headers: res.headers, text, json };
   }
 
-  const upstreamCalls = () => healthy.requests.length + failing.requests.length;
+  const upstreamCalls = () => healthy.requests.length + failing.requests.length + limited.requests.length;
   const last = (fake: FakeUpstream) => fake.requests[fake.requests.length - 1]!;
 
   function usageLines(): Array<Record<string, any>> {
@@ -193,6 +199,30 @@ describe("LLM gateway end to end", () => {
     assert.equal(last(healthy).body.model, "fake-large-1");
     assert.deepEqual([r.headers.get("x-agent-gate-route"), r.headers.get("x-agent-gate-upstream")], ["code-is-strong", "strong"]);
     assert.equal(r.headers.get("x-agent-gate-cost-usd"), "0.00701", "priced at the upstream that answered");
+  });
+
+  it("moves on to the fallback at once when the primary answers 429", async () => {
+    const before = { limited: limited.requests.length, healthy: healthy.requests.length };
+    const r = await post({ model: "large", messages: ask("Summarize the incident") }, { task: "limited" });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual([r.headers.get("x-agent-gate-route"), r.headers.get("x-agent-gate-upstream")], ["limited-then-strong", "strong"]);
+    assert.deepEqual([limited.requests.length - before.limited, healthy.requests.length - before.healthy], [1, 1]);
+    const line = usageLines().at(-1)!;
+    assert.deepEqual([line.status, line.attempts, line.fallback, line.upstream429], [200, 2, true, 1]);
+  });
+
+  it("with no fallback, waits for the 429's Retry-After once, then answers with its own 429", async () => {
+    const before = limited.requests.length;
+    const started = Date.now();
+    const r = await post({ model: "large", messages: ask() }, { task: "limited-only" });
+    assert.equal(r.status, 429, r.text);
+    assert.deepEqual([r.json.error.code, r.json.error.type, r.headers.get("retry-after")], ["upstream_rate_limited", "rate_limit_error", "1"]);
+    assert.match(r.json.error.message, /the upstream is rate limiting this gateway \(2 attempts; the last one answered HTTP 429\)\. Nothing was charged to this key\./);
+    assert.equal(r.text.includes("Rate limit reached"), false, "the provider's body is not passed on");
+    assert.equal(limited.requests.length - before, 2, "one retry, after the wait");
+    assert.ok(Date.now() - started >= 1000, "it waited for Retry-After");
+    const line = usageLines().at(-1)!;
+    assert.deepEqual([line.error, line.upstream429, line.attempts, line.costUsd], ["upstream_rate_limited", 2, 2, 0]);
   });
 
   it("answers 502 with its own message when every attempt fails, never with the upstream's body", async () => {
@@ -313,7 +343,7 @@ describe("LLM gateway end to end", () => {
     assert.equal(lines.length, authenticated);
     assert.equal(content.includes("prompt-marker-"), false, "a prompt reached the usage log");
     assert.equal(content.includes("fake answer"), false, "a completion reached the usage log");
-    const allowed = ["ts", "id", "key", "task", "route", "upstream", "model", "status", "error", "rule", "inputTokens", "outputTokens", "costUsd", "usage", "attempts", "fallback", "redacted", "latencyMs", "traceId", "spanId", "parentSpanId", "session", "runId", "contextDropped"];
+    const allowed = ["ts", "id", "key", "task", "route", "upstream", "model", "status", "error", "rule", "inputTokens", "outputTokens", "costUsd", "usage", "attempts", "fallback", "upstream429", "settle", "redacted", "latencyMs", "traceId", "spanId", "parentSpanId", "session", "runId", "contextDropped"];
     for (const line of lines) {
       assert.deepEqual(Object.keys(line).filter((k) => !allowed.includes(k)), [], JSON.stringify(line));
       assert.match(line.traceId, /^[0-9a-f]{32}$/);
@@ -328,7 +358,7 @@ describe("LLM gateway end to end", () => {
     );
     const fallback = lines.find((l) => l.route === "code-is-strong");
     assert.deepEqual(fallback && [fallback.upstream, fallback.model, fallback.attempts, fallback.fallback, fallback.costUsd], ["strong", "fake-large-1", 3, true, 0.00701]);
-    const refused = lines.find((l) => l.status === 429);
+    const refused = lines.find((l) => l.error === "budget_exceeded");
     assert.deepEqual(refused && [refused.key, refused.error, refused.rule, refused.costUsd], ["team-b", "budget_exceeded", "daily", 0]);
     assert.deepEqual(
       lines.filter((l) => l.error === "secret_detected").map((l) => l.rule),
@@ -396,5 +426,6 @@ describe("LLM gateway end to end", () => {
     // The check means something: the upstreams did receive their keys, and quoted them back.
     assert.ok(failing.requests.some((r) => r.authorization === `Bearer ${FAKE_PROVIDER_KEYS.E2E_FLAKY_KEY}`));
     assert.ok(healthy.requests.some((r) => r.authorization === `Bearer ${FAKE_PROVIDER_KEYS.E2E_WRONG_KEY}`));
+    assert.ok(limited.requests.some((r) => r.authorization === `Bearer ${FAKE_PROVIDER_KEYS.E2E_LIMITED_KEY}`));
   });
 });

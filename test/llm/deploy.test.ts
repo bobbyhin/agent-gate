@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { hashKey, loadLeakPolicy, loadLlmConfig } from "../../src/llm/config.js";
+import { longestCallMs } from "../../src/llm/server.js";
 
 // This file runs from dist/test/llm/, three levels below the repository root.
 const ROOT = path.join(__dirname, "..", "..", "..");
@@ -24,6 +25,14 @@ interface ConfigJson {
 const read = (file: string): string => fs.readFileSync(path.join(ROOT, file), "utf8");
 
 describe("deploy configs", () => {
+  it("Cloud Run's request timeout is longer than the gateway's longest call with the deployable config", () => {
+    const timeout = /^\s*timeout\s*=\s*"(\d+)s"/m.exec(read("deploy/terraform/cloud_run.tf"))?.[1];
+    assert.ok(timeout, "a timeout in cloud_run.tf");
+    const longest = longestCallMs(loadLlmConfig(path.join(ROOT, "deploy/k8s/llm-gateway.config.json")));
+    assert.equal(longest, 242_500, "the figure that deploy/README.md and cloud_run.tf quote");
+    assert.ok(Number(timeout) * 1000 > longest, `${timeout} s is not longer than ${longest / 1000} s`);
+  });
+
   for (const file of ["deploy/compose/llm-gateway.config.json", "deploy/k8s/llm-gateway.config.json"]) {
     it(`${file} is a valid config that listens on all interfaces and uses the container's paths`, () => {
       const config = loadLlmConfig(path.join(ROOT, file));

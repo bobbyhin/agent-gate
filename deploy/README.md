@@ -153,7 +153,7 @@ What `deploy/terraform` creates:
   a minimum of 0 instances happens after every idle spell.
 - The Cloud Run service, `llm-gateway`: 0 to 1 instance (ADR 0003), second-generation environment,
   1 CPU and 512 MiB, CPU only while requests are in flight, a 300-second request timeout (the
-  gateway's longest call with the shipped config is 240.5 seconds), probes on `/healthz`, and the
+  gateway's longest call with the shipped config is 242.5 seconds), probes on `/healthz`, and the
   provider keys as environment variables from Secret Manager.
 - `roles/run.invoker` for each principal in `invoker_members`. The default is nobody.
 - Optional, off by default (`enable_budget_alert`): a billing budget that emails the billing

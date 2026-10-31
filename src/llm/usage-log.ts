@@ -40,6 +40,8 @@ export interface UsageEntry {
   usage?: "upstream" | "estimate";
   attempts?: number;
   fallback?: boolean;
+  /** 429 answers from the upstreams on the way (rate limits or quota), when there were any. */
+  upstream429?: number;
   /** Leak-guard rules that redacted text in this call. */
   redacted?: string[];
   /** How the ledger booked the cost when it was not the usual way: "orphan" (the reservation had expired) or "duplicate". */

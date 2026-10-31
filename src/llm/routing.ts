@@ -29,7 +29,7 @@ export interface Route {
   rule: string;
   primary: ResolvedTarget;
   /**
-   * Tried when the primary fails with a 5xx or a timeout. Left out when the rule has none, or
+   * Tried when the primary fails with a 5xx, a timeout or a 429. Left out when the rule has none, or
    * when the fallback upstream does not offer the alias in use (only possible when the rule takes
    * the alias from the request; a fixed alias is checked when the config is loaded).
    */

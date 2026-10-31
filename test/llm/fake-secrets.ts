@@ -49,6 +49,7 @@ export const FAKE_PROVIDER_KEYS = {
   E2E_STRONG_KEY: "fake-provider-key-strong-e2e-0002",
   E2E_FLAKY_KEY: "fake-provider-key-flaky-e2e-0003",
   E2E_WRONG_KEY: "fake-provider-key-wrong-e2e-0004",
+  E2E_LIMITED_KEY: "fake-provider-key-limited-e2e-0005",
 } as const;
 
 /** Gateway keys for the end-to-end test; the config holds only their SHA-256. */

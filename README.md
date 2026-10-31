@@ -848,7 +848,7 @@ until steps 1 to 5 have passed.
 | 3. Route | Route rules pick an upstream and a model from the alias and the `x-agent-task` header. | 404 |
 | 4. Leak guard | The message text is scanned for secrets. A block rule refuses the call; a redact rule replaces the match. | 400 |
 | 5. Reserve | The call's estimated cost is reserved against the key's daily and monthly caps. | 429 |
-| 6. Call | The upstream is called, with retries and then the fallback on a 5xx or a timeout. | 502, 504 |
+| 6. Call | The upstream is called, with retries and then the fallback on a 5xx, a timeout or a 429. | 502, 504; 429 if the upstreams keep rate limiting |
 | 7. Settle | The reservation is settled with the real cost from the answer's `usage`, or released if the call failed. | |
 | 8. Record | One line goes to the usage log, with no prompt or completion text. | |
 
@@ -942,8 +942,9 @@ read from `$GATEWAY_KEY`. This is the example config:
 - `policy` is the leak guard's rule file. It and `stateDir` are resolved against the config file's
   directory.
 - Optional, with their defaults: `listen` (`127.0.0.1`, port 8787), `defaultMaxTokens` (1024),
-  `timeoutMs` per attempt (60000), `retries` per upstream (1, at most 3), `backoffMs` (250) and
-  `maxBodyBytes` (1 MiB).
+  `timeoutMs` per attempt (60000), `retries` per upstream (1, at most 3), `backoffMs` (250),
+  `rateLimitWaitMs` (2000: the longest wait after a 429, see [Routing](#routing)), `maxBodyBytes`
+  (1 MiB) and `metrics` (off, see [Metrics](#metrics)).
 
 To make a gateway key and the hash for the config:
 
@@ -1021,9 +1022,18 @@ The routing function (`src/llm/routing.ts`) is pure, like the policy engine, and
 
 A 5xx answer, a timeout or a failed connection is retried on the same upstream up to `retries`
 times, waiting `backoffMs` before the first retry and twice as long before each next one. After
-that, the fallback gets the same treatment. A 4xx answer, including the upstream's own 429, is not
-retried: it would fail the same way again. When every attempt fails, the client gets 502, or 504
+that, the fallback gets the same treatment. When every attempt fails, the client gets 502, or 504
 if the last attempt timed out, with the gateway's own message.
+
+A 429 is a provider's rate limit or quota: the most common way a call fails, and one that another
+upstream can often still serve. So a 429 moves on to the fallback at once. On the last upstream
+there is nowhere to go: the gateway waits for the answer's `Retry-After` (`backoffMs` without one),
+plus up to a fifth more at random so that callers refused together do not all come back together,
+and tries once more, using one of that upstream's `retries`. It waits at most `rateLimitWaitMs`
+(2 seconds by default); a longer `Retry-After` is not waited for. If the upstreams still answer 429,
+the client gets the gateway's own 429 `upstream_rate_limited`, with the last upstream's
+`Retry-After`, and nothing is charged. The usage line counts the 429s on the way (`upstream429`).
+Any other 4xx is not retried: it would fail the same way again.
 
 ### Budgets
 
@@ -1281,8 +1291,8 @@ The first `requests_total` line is the streaming request: refused before routing
   upstream, as `Authorization: Bearer`, and is never logged or returned.
 - An upstream's error body is never passed on as it is, because a provider can quote the key it
   was given. A 401 or 403 becomes a 502 `upstream_auth_failed` with the gateway's own message, a
-  5xx becomes the gateway's 502 or 504, and any other 4xx is passed on with the upstream keys cut
-  out.
+  5xx becomes the gateway's 502 or 504, a 429 the gateway's 429 `upstream_rate_limited` (see
+  [Routing](#routing)), and any other 4xx is passed on with the upstream keys cut out.
 - Client headers are not forwarded (the client's `Authorization` holds the gateway key), and
   redirects from an upstream are refused. The one header the gateway adds of its own is a
   `traceparent`, built from the checked trace id and the gateway's span id.
@@ -1418,14 +1428,18 @@ obeys, and the gateway blocks the call before it reaches the server. Another den
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 208 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 218 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file, a settle that comes
 twice or after its reservation expired, calls per minute and run caps); a leak-guard table
 for every shipped rule, with 29 samples of prose and code that must pass untouched; retries and
-the fallback with a scripted `fetch`, plus a real timeout; the CLI; and an end-to-end test. That
-test starts `agent-gate llm serve` against two fake upstream HTTP servers, one healthy and one that
-always answers 500, and checks routing by alias and by `x-agent-task`, the fallback after a 500,
+the fallback with a scripted `fetch` (including 429s: to the fallback at once, one capped wait for
+`Retry-After` on the last upstream, an HTTP-date `Retry-After`), plus a real timeout; the CLI; and
+an end-to-end test. That
+test starts `agent-gate llm serve` against three fake upstream HTTP servers, one healthy, one that
+always answers 500 and one that always answers 429, and checks routing by alias and by
+`x-agent-task`, the fallback after a 500 and after a 429, one wait for `Retry-After` when there is
+no fallback,
 costs settled from the upstream's `usage`, a 429 with no upstream call once a cap is reached,
 secrets blocked before any upstream call, redaction, a usage log without prompt text, the trace
 context (the client's trace kept, a new one started, the gateway's own span sent upstream, bad values
@@ -1434,9 +1448,10 @@ response or a log. A metrics suite checks the Prometheus text, who may read `/me
 key on the gateway's port, or a loopback listener with none) and the config rules behind that. A
 stop-rule suite runs loops against a live gateway: cut at the sixth call of a minute, a run cut at its
 third call and before it passes its dollars, each cut in the usage log; the end-to-end run also
-checks that `usage --verify` finds the usage log and the ledger in agreement. Five more check the
+checks that `usage --verify` finds the usage log and the ledger in agreement. Six more check the
 gateway configs under `deploy/`: they load, they use the container's paths, the deployable one
-refuses the demo key, and the Kubernetes copy of the leak-guard policy matches the example. Every
+refuses the demo key, the Kubernetes copy of the leak-guard policy matches the example, and Cloud
+Run's request timeout is longer than the gateway's longest call. Every
 fake secret the tests use is in `test/llm/fake-secrets.ts`, assembled from pieces at run time, so
 no secret-shaped string appears in the source and secret scanners need no exceptions for this
 repository.
@@ -1459,7 +1474,7 @@ the decision, with no model judging and no tolerance band. And it is evaluated o
 there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 292/292 MCP gateway tests, 208/208 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 292/292 MCP gateway tests, 218/218 LLM gateway tests, 7/7 for
 the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).

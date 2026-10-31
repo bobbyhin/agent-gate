@@ -22,7 +22,7 @@ resource "google_cloud_run_v2_service" "gateway" {
     # Volume mounts need the second-generation execution environment.
     execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
     # Longer than the gateway's longest call with the shipped config: two upstreams, each with
-    # 2 attempts of timeoutMs 60000 plus 250 ms backoff, is 240.5 s.
+    # 2 attempts of timeoutMs 60000 plus 250 ms backoff, plus up to 2 s waiting after a 429, is 242.5 s.
     timeout                          = "300s"
     max_instance_request_concurrency = 80
 

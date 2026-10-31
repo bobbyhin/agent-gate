@@ -11,7 +11,8 @@
 //   3. route: upstream + model from alias and task         404 if no route applies
 //   4. leak guard: block or redact secrets                 400 if a block rule matches
 //   5. reserve the estimated cost against the key's caps   429 if it does not fit
-//   6. call the upstream; retries, then the fallback       502 or 504 if every attempt fails
+//   6. call the upstream; retries, then the fallback       502 or 504 if every attempt fails,
+//                                                          429 if the upstreams are rate limiting
 //   7. settle the real cost from "usage" (or release it)
 //   8. write one usage line, answer
 // Nothing is sent upstream until steps 1 to 5 have passed. Upstream API keys are read from the
@@ -57,7 +58,7 @@ export interface LlmGateway {
 }
 
 type ExtraHeaders = Record<string, string | number>;
-type Outcome = Partial<Pick<UsageEntry, "error" | "rule" | "inputTokens" | "outputTokens" | "costUsd" | "usage" | "attempts" | "fallback" | "settle">>;
+type Outcome = Partial<Pick<UsageEntry, "error" | "rule" | "inputTokens" | "outputTokens" | "costUsd" | "usage" | "attempts" | "fallback" | "upstream429" | "settle">>;
 
 /** The x-agent-task header is kept in the usage line on one line, at most this long. */
 const TASK_MAX_CHARS = 100;
@@ -168,6 +169,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         costUsd: outcome.costUsd ?? 0,
         ...(outcome.usage === undefined ? {} : { usage: outcome.usage }),
         ...(outcome.attempts === undefined ? {} : { attempts: outcome.attempts, fallback: outcome.fallback ?? false }),
+        ...(outcome.upstream429 ? { upstream429: outcome.upstream429 } : {}),
         ...(outcome.settle === undefined ? {} : { settle: outcome.settle }),
         ...(where.redacted === undefined ? {} : { redacted: where.redacted }),
         latencyMs: Math.round(performance.now() - started),
@@ -283,11 +285,26 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         timeoutMs: config.timeoutMs,
         retries: config.retries,
         backoffMs: config.backoffMs,
+        rateLimitWaitMs: config.rateLimitWaitMs,
         apiKey: (target) => apiKeys.get(target.upstream.name) as string,
         ...(options.fetch ? { fetch: options.fetch } : {}),
         log,
         traceparent,
       });
+      if (!outcome.ok && outcome.failure === "rate_limited") {
+        release();
+        // The provider's own body is not passed on (it can quote the key); its Retry-After is.
+        return finish(
+          429,
+          apiError(
+            "upstream_rate_limited",
+            `agent-gate: the upstream is rate limiting this gateway (${outcome.attempts} attempts${targets.length > 1 ? ", the fallback included" : ""}; the last one answered HTTP 429). Nothing was charged to this key.`,
+            { type: "rate_limit_error" },
+          ),
+          { error: "upstream_rate_limited", attempts: outcome.attempts, fallback: targets.length > 1, upstream429: outcome.rateLimited },
+          outcome.retryAfterSeconds === undefined ? {} : { "retry-after": outcome.retryAfterSeconds },
+        );
+      }
       if (!outcome.ok) {
         release();
         const timedOut = outcome.failure === "timeout";
@@ -297,12 +314,12 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
           apiError(timedOut ? "upstream_timeout" : "upstream_error", `agent-gate: no upstream answered (${outcome.attempts} attempts; the last one ${last}). Nothing was charged to this key.`, {
             type: "api_error",
           }),
-          { error: timedOut ? "upstream_timeout" : "upstream_error", attempts: outcome.attempts, fallback: targets.length > 1 },
+          { error: timedOut ? "upstream_timeout" : "upstream_error", attempts: outcome.attempts, fallback: targets.length > 1, upstream429: outcome.rateLimited },
         );
       }
 
       Object.assign(where, { upstream: outcome.target.upstream.name, model: outcome.target.model });
-      const via = { attempts: outcome.attempts, fallback: outcome.fallback };
+      const via = { attempts: outcome.attempts, fallback: outcome.fallback, upstream429: outcome.rateLimited };
       if (outcome.status >= 400) {
         release();
         if (outcome.status === 401 || outcome.status === 403) {
@@ -474,10 +491,13 @@ export function openLedger(config: LlmConfig, now: () => number = Date.now): Led
   return new Ledger(config.stateDir, longestCallMs(config) + 60_000, now);
 }
 
-/** The longest a call can take: every attempt on both upstreams timing out, plus the backoff. */
-export function longestCallMs(config: Pick<LlmConfig, "timeoutMs" | "retries" | "backoffMs">): number {
+/**
+ * The longest a call can take: every attempt on both upstreams timing out, plus the backoff, plus the
+ * one wait after a 429 (it takes a retry's place, so it adds no attempt). With the defaults: 242.5 s.
+ */
+export function longestCallMs(config: Pick<LlmConfig, "timeoutMs" | "retries" | "backoffMs" | "rateLimitWaitMs">): number {
   const perUpstream = (config.retries + 1) * config.timeoutMs + config.backoffMs * (2 ** config.retries - 1);
-  return 2 * perUpstream;
+  return 2 * perUpstream + config.rateLimitWaitMs;
 }
 
 function checkRequest(body: Record<string, unknown>): { code: string; param: string; message: string } | undefined {

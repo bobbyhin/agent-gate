@@ -1,22 +1,25 @@
 // A fake OpenAI-compatible provider for the LLM gateway's tests and for trying the example config.
 // It never calls a real model and costs nothing.
 //
-//   mode "ok"    answers POST /v1/chat/completions like a provider, with a "usage" block
-//   mode "fail"  answers every call with HTTP 500
+//   mode "ok"       answers POST /v1/chat/completions like a provider, with a "usage" block
+//   mode "fail"     answers every call with HTTP 500
+//   mode "limited"  answers every call with HTTP 429 and a Retry-After (a provider's rate limit)
 //
-// Both modes quote the key they were sent in their error bodies (401, 500, and the 400 for a
+// Every mode quotes the key it was sent in its error bodies (401, 429, 500, and the 400 for a
 // max_tokens above 100000), the way a careless provider might, so the tests can prove that the
 // gateway never passes the key on.
 // It records every request it receives, so a test can prove which calls reached it.
 //
-// On its own: node dist/test/llm/fake-upstream.js [--port 9101] [--mode ok|fail] [--host 127.0.0.1]
+// On its own: node dist/test/llm/fake-upstream.js [--port 9101] [--mode ok|fail|limited] [--host 127.0.0.1]
 // (the compose demo passes --host 0.0.0.0, because there the gateway runs in another container).
 
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
 
 export interface FakeUpstreamOptions {
-  mode: "ok" | "fail";
+  mode: "ok" | "fail" | "limited";
+  /** Mode "limited": the Retry-After header, in seconds (default "1"). */
+  retryAfter?: string;
   /** Accepted bearer keys; any other key gets a 401. Left out or empty: any non-empty key. */
   keys?: string[];
   /** The usage block to report. Left out: derived from the request (characters / 4 + 7, and 9). */
@@ -48,9 +51,9 @@ export async function startFakeUpstream(options: FakeUpstreamOptions): Promise<F
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
-      const reply = (status: number, body: unknown) => {
+      const reply = (status: number, body: unknown, headers: Record<string, string> = {}) => {
         const text = JSON.stringify(body);
-        res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
+        res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text), ...headers });
         res.end(text);
       };
       if (req.method !== "POST" || req.url !== "/v1/chat/completions") return reply(404, { error: { message: "not found" } });
@@ -66,6 +69,9 @@ export async function startFakeUpstream(options: FakeUpstreamOptions): Promise<F
 
       const key = authorization.replace(/^Bearer /, "");
       if (options.mode === "fail") return reply(500, { error: { message: `upstream exploded while serving key ${key}` } });
+      if (options.mode === "limited") {
+        return reply(429, { error: { message: `Rate limit reached for key ${key}`, type: "requests", code: "rate_limit_exceeded" } }, { "retry-after": options.retryAfter ?? "1" });
+      }
       if (key === "" || (options.keys?.length && !options.keys.includes(key))) {
         return reply(401, { error: { message: `Incorrect API key provided: ${key}`, type: "invalid_request_error", code: "invalid_api_key" } });
       }
@@ -107,7 +113,7 @@ if (require.main === module) {
     const at = process.argv.indexOf(name);
     return at >= 0 ? process.argv[at + 1] : undefined;
   };
-  const mode = arg("--mode") === "fail" ? "fail" : "ok";
+  const mode = arg("--mode") === "fail" ? "fail" : arg("--mode") === "limited" ? "limited" : "ok";
   const host = arg("--host") ?? "127.0.0.1";
   startFakeUpstream({ mode, host, port: Number(arg("--port") ?? 9101) }).then(
     (fake) => process.stderr.write(`fake upstream (${mode}) on ${host}, port ${new URL(fake.url).port}, path /v1\n`),
