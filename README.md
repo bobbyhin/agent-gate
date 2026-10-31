@@ -896,7 +896,8 @@ first match alone gives.
 | `protect-gateway-state` | any tool whose `path` argument points into `.agent-gate` | block |
 | `shell-guard` | a shell tool (`run_command`, `exec`, `bash` and others): its `command` goes through the shell guard | the guard's decision |
 | `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order; and cloud resources that start a bill: provision, create instance, create cluster, create corpus, create rag corpus, create bucket, enable api, enable service, scale up, create key | ask; a request lives 15 minutes |
-| `red-line-2-public` | post, publish, send, tweet, retweet, reply, comment, email, share; and what puts an event or an invitation in front of other people: create event, create calendar event, add event, add calendar event, update event, update calendar, move event, create meeting, update meeting, schedule, reschedule, invite, rsvp, respond to event, cancel event, cancel meeting, cancel appointment, cancel booking, accept invitation, accept invite, decline invitation, decline invite, create appointment, book appointment, book meeting, book room, create booking, add attendee, add attendees, new event, new meeting, create calendar entry, add calendar entry | ask |
+| `red-line-2-public` | post, publish, send, tweet, retweet, reply, comment, email, share; and what puts an event or an invitation in front of other people: create event, create calendar event, add event, add calendar event, update event, update calendar, move event, create meeting, update meeting, reschedule, respond to event, cancel event, cancel meeting, cancel appointment, cancel booking, accept invitation, accept invite, decline invitation, decline invite, create appointment, book appointment, book meeting, book room, create booking, add attendee, add attendees, new event, new meeting, create calendar entry, add calendar entry | ask |
+| `red-line-2-events` | schedule, invite, rsvp (verbs in `schedule_meeting` and `invite_friend`, nouns in `get_schedule` and `list_invite`): asked about unless the name is a lookup, which starts with get, list, read or search and does not join two actions with and, or, then | ask |
 | `red-line-3-ship` | push, merge, deploy, create pull request, create pr, create release | ask; a request lives 30 minutes |
 | `red-line-4-delete` | delete, remove, drop, destroy, overwrite, purge, erase, wipe, truncate | ask |
 | `red-line-4-overwrite` | write, edit, move, rename, replace, patch, update file, put object | ask |
@@ -914,8 +915,14 @@ Notes on the newer rules:
   event lands in other people's calendars. Red line 2 now also names what creates, changes, schedules
   or answers an event or an invitation. `test/gateway/tool-lists/instavibe.json` lists 23 such tools,
   each labelled with the decision it should get: before, 9 of the 12 that should ask ran unattended;
-  now all 12 ask, reads such as `list_events`, `get_calendar` and `get_invitations` stay allowed, and
-  two reads ask because of one word in their names, `get_post` and `get_schedule`. Those names were
+  now all 12 ask, and reads such as `list_events`, `get_calendar`, `get_invitations` and `get_schedule` stay
+  allowed. One read asks because of one word in its name, `get_post`. `get_schedule` asked too, until
+  `schedule`, `invite` and `rsvp` got a rule of their own, `red-line-2-events`: each is a verb in
+  `schedule_meeting` and `invite_friend` and a noun in `get_schedule` and `list_invite`, so that rule
+  leaves a lookup alone, a name that starts with get, list, read or search. It goes by the name only: a
+  name that joins two actions (`get_or_create_schedule`, `search_and_schedule_meeting`) is not a
+  lookup, a phrase of `red-line-2-public` in a lookup's name still asks (`get_or_create_event`), and a
+  lookup that starts with another word (`find_schedule`) asks too. Those names were
   written together with the phrases, so they show that the phrases work on names like them, not on
   names nobody planned for. A review then wrote 12 other names for the same actions, and 10 of them ran
   unattended (`accept_invitation`, `cancel_event`, `book_meeting_room`, `new_event` and more). The

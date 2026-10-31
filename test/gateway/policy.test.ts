@@ -59,6 +59,38 @@ describe("policy.example.json: the red lines", () => {
   }
 });
 
+// schedule, invite and rsvp read both ways: verbs in schedule_meeting and invite_friend, nouns in get_schedule
+// and list_invite. Red line 2 asks about them (red-line-2-events) unless the name is a lookup: it starts with
+// get, list, read or search (in snake, kebab, camel or Pascal case) and does not join two actions.
+describe("policy.example.json: red line 2, lookups of schedules and invitations", () => {
+  const lookups = [
+    "get_schedule", "list_schedule", "read_schedule", "search_schedule", "getSchedule", "GetSchedule", "get-schedule", "listSchedule",
+    "get_invite", "list_invite", "readInvite", "search_invite", "get_rsvp", "search_rsvp", "get_event_schedule", "get_calendar_invite",
+    // "or" and "and" inside a word are not a second action
+    "get_orders_schedule", "getAndroidSchedule", "list_android_invite",
+  ];
+  for (const tool of lookups) {
+    it(`${tool} -> allow (default): a lookup only reads`, () => expectVerdict(tool, "allow", "default"));
+  }
+
+  const asked: Array<[why: string, tools: string[], rule: string]> = [
+    ["creating, scheduling, inviting and answering", ["schedule", "schedule_meeting", "scheduleEvent", "schedule-call", "invite_friend", "inviteFriend", "rsvp_event", "create_schedule", "update_schedule"], "red-line-2-events"],
+    ["a name that joins two actions is not a lookup", ["get_or_create_schedule", "getOrCreateSchedule", "search_and_schedule_meeting", "get_and_invite", "readThenInvite", "list_then_rsvp"], "red-line-2-events"],
+    ["a name that only starts like a read verb is not a lookup", ["getaway_schedule", "listen_invite", "reader_rsvp", "searching_schedule"], "red-line-2-events"],
+    ["a lookup that starts with another word is asked about too: a false positive of the example", ["find_schedule", "fetch_invite"], "red-line-2-events"],
+    ["a phrase of red-line-2-public in a lookup's name still asks", ["get_or_create_event", "get_and_send_invite", "list_then_post_schedule", "search_and_publish_schedule", "get_and_reschedule"], "red-line-2-public"],
+    ["sending and changing events and invitations, as before", ["send_invite", "send_rsvp", "reschedule_event", "create_event", "update_event", "update_calendar", "accept_invitation", "cancel_event"], "red-line-2-public"],
+  ];
+  for (const [why, tools, rule] of asked) {
+    for (const tool of tools) {
+      it(`${tool} -> ask (${rule}): ${why}`, () => {
+        expectVerdict(tool, "ask", rule);
+        assert.match(check(example, tool).why, /^Red line 2/);
+      });
+    }
+  }
+});
+
 describe("policy.example.json: SQL in an sql argument", () => {
   const table: Array<[sql: string, decision: Decision]> = [
     ["SELECT * FROM users WHERE id = 1", "allow"],

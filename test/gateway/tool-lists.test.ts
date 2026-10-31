@@ -83,10 +83,11 @@ describe("tool lists through the example policy", () => {
   });
 
   it("instavibe.json: before red line 2 named events and invitations, 9 of the 12 tools that should ask ran unattended", () => {
-    // The rule's words before that change.
+    // The rule's words before that change, and without the rule that came with them for schedule, invite and rsvp.
     const raw = JSON.parse(fs.readFileSync(path.join(ROOT, "policy.example.json"), "utf8")) as { rules: Array<{ id: string; toolWords?: string[] }> };
     const rule = raw.rules.find((r) => r.id === "red-line-2-public") as { toolWords: string[] };
     rule.toolWords = ["post", "publish", "send", "tweet", "retweet", "reply", "comment", "email", "share"];
+    raw.rules = raw.rules.filter((r) => r.id !== "red-line-2-events");
     const before = parsePolicy(raw);
     const list = JSON.parse(fs.readFileSync(path.join(LISTS, "instavibe.json"), "utf8")) as ToolList;
     const shouldAsk = list.tools.filter((t) => t.label === "ask");
