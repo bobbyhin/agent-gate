@@ -65,6 +65,24 @@ describe("RepeatStore", () => {
     assert.equal(store.admit(deployLimits, "demo", "deploy", "sha256:d")?.limit.id, "long", "the deploy two minutes ago still counts");
   });
 
+  it("counts each agent and each limit on its own: one agent's calls never use up another's limit", () => {
+    const [perTool, other] = limitsOf([
+      { id: "flood", per: "tool", max: 2, windowSeconds: 60, decision: "block" },
+      { id: "flood-strict", per: "tool", max: 1, windowSeconds: 60, decision: "ask" },
+    ]) as [RepeatLimit, RepeatLimit];
+    const store = new RepeatStore(dir, 60_000, () => now);
+    assert.equal(store.admit([perTool], "demo", "echo", "sha256:1", "alpha"), undefined);
+    assert.equal(store.admit([perTool], "demo", "echo", "sha256:2", "alpha"), undefined);
+    assert.equal(store.admit([perTool], "demo", "echo", "sha256:3", "alpha")?.count, 2, "alpha has used its limit");
+    assert.equal(store.admit([perTool], "demo", "echo", "sha256:4", "beta"), undefined, "beta's first call is beta's own");
+    assert.equal(store.admit([perTool], "demo", "echo", "sha256:5"), undefined, "a call with no agent (stdio) counts apart from both");
+    assert.equal(store.admit([other], "demo", "echo", "sha256:6", "alpha"), undefined, "another limit has its own count");
+    assert.deepEqual(
+      Object.keys(JSON.parse(fs.readFileSync(store.file, "utf8")).runs).sort(),
+      ['["flood","alpha","demo__echo"]', '["flood","beta","demo__echo"]', '["flood",null,"demo__echo"]', '["flood-strict","alpha","demo__echo"]'],
+    );
+  });
+
   it("is shared through the file, counts a run a human let through, and fails closed on a damaged file", () => {
     const store = new RepeatStore(dir, 60_000, () => now);
     const other = new RepeatStore(dir, 60_000, () => now);

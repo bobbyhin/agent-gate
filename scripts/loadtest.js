@@ -240,20 +240,41 @@ async function runInProcess({ requests = 1000, concurrency = 100, direct = true,
   }
 }
 
-/** A gateway that is already running. Only the checks that need no ledger. */
+/**
+ * A gateway that is already running. Only the checks that need no ledger. The key-less request goes
+ * first, and when it does not get agent-gate's own 401, no request with the key is sent: the load would
+ * go somewhere else, or through something that is not checked, and a provider may bill every answer.
+ */
 async function runRemote({ url, key, headers, model, maxTokens, requests, concurrency }) {
   const base = url.replace(/\/+$/, "");
   const preflight = await chat(base, headers, body(0, model, maxTokens, 40));
+  const reached = preflight.status === 401 && preflight.code === "invalid_api_key";
+  const preflightCheck = {
+    ok: reached,
+    what: reached
+      ? "without the gateway key: the gateway's own 401 (the request got through whatever is in front of it)"
+      : `without the gateway key: ${preflight.status} ${preflight.code ?? ""}`.trim() + ": the request did not reach the gateway, or the gateway is not agent-gate; check --header-env. No request was sent with the key.",
+  };
+  if (!reached) {
+    return {
+      mode: "remote",
+      url: base,
+      requests: 0,
+      concurrency,
+      counts: {},
+      ok: 0,
+      refused: 0,
+      costHeadersUsd: 0,
+      latencyMs: { gatewayAll: stats([]), gatewayOk: stats([]) },
+      throughputPerSecond: { gateway: 0 },
+      checks: [preflightCheck],
+      passed: false,
+    };
+  }
   const load = await fire(requests, concurrency, (i) => chat(base, { ...headers, authorization: `Bearer ${key}` }, body(i, model, maxTokens, 40)));
   const t = tally(load.results);
-  const reached = preflight.status === 401 && preflight.code === "invalid_api_key";
   const checks = [
-    {
-      ok: reached,
-      what: reached
-        ? "without the gateway key: the gateway's own 401 (the request got through whatever is in front of it)"
-        : `without the gateway key: ${preflight.status} ${preflight.code ?? ""}`.trim() + ": the request did not reach the gateway, or the gateway is not agent-gate; check --header-env",
-    },
+    preflightCheck,
     ...t.checks,
     { ok: t.ok > 0, what: t.ok > 0 ? `${t.ok} answers let through with the key` : "no answer was let through with the key" },
   ];

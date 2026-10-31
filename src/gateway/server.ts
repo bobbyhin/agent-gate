@@ -89,7 +89,7 @@ export interface SessionSpec {
 export interface Session {
   /** Not yet connected to a transport. */
   server: Server;
-  /** "cn-" and 8 hex digits: names the connection in the audit log. */
+  /** "cn-" and 8 hex digits (16 for an HTTP session): names the connection in the audit log. */
   connId: string;
   close(): Promise<void>;
 }
@@ -193,7 +193,9 @@ export async function createCore(
     // A profile narrows what this connection sees on top of "expose"; a server it does not name shows nothing.
     const profile = spec.profile === undefined ? undefined : profileTests(config, spec.profile);
     const inProfile = (server: string, tool: string): boolean => !profile || (profile.get(server)?.some((re) => re.test(tool)) ?? false);
-    const connId = `cn-${randomBytes(4).toString("hex")}`;
+    // An HTTP gateway opens many sessions over its life, and the audit log keeps them all: 64 random bits
+    // keep two sessions from sharing an id. A stdio gateway serves one client per process.
+    const connId = `cn-${randomBytes(options.mode === "http" ? 8 : 4).toString("hex")}`;
     let seq = 0;
 
     // The low-level Server rather than McpServer (the SDK marks Server deprecated for ordinary
@@ -295,7 +297,7 @@ export async function createCore(
       const limits = repeats ? repeatLimitsFor(policy, { ...call, args }) : [];
       let limited = false;
       if (repeats && limits.length > 0 && (verdict.decision === "allow" || verdict.decision === "warn")) {
-        const hit = repeats.admit(limits, call.server, call.tool, argsHash);
+        const hit = repeats.admit(limits, call.server, call.tool, argsHash, spec.agent);
         if (hit) {
           limited = true;
           const what = hit.limit.per === "tool" ? "this tool was called" : "this same call ran";
@@ -365,7 +367,7 @@ export async function createCore(
           if (outcome.kind === "approved" || outcome.kind === "standing") {
             // the audit line names the approval, or the standing approval, that let it through
             record(true, outcome.kind === "approved" ? outcome.approval.id : outcome.grant.id);
-            if (repeats && limited) repeats.record(limits, call.server, call.tool, argsHash);
+            if (repeats && limited) repeats.record(limits, call.server, call.tool, argsHash, spec.agent);
             return run();
           }
           record(false, outcome.approval.id);

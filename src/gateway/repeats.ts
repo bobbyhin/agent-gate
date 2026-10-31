@@ -6,6 +6,9 @@
 // a limit. A damaged file is an error, so the gateway does not run the call, never an empty count.
 // Times older than the longest window of the policy are dropped at each change (not the longest window
 // of the call at hand: another tool's limit may need a longer memory).
+// Each limit counts on its own, and so does each HTTP agent (serve --http): one agent's calls never use
+// up another agent's limit. Calls that come with no agent (stdio) count together, across the gateway
+// processes on one state directory.
 
 import * as path from "node:path";
 import type { RepeatLimit } from "./policy.js";
@@ -35,33 +38,36 @@ export class RepeatStore {
     this.lockDir = path.join(dir, "repeats.lock");
   }
 
-  /** The key a limit counts under: the exact call, or the tool. */
-  static key(limit: RepeatLimit, server: string, tool: string, argsHash: string): string {
-    return limit.per === "tool" ? `${server}__${tool}` : `${server}__${tool} ${argsHash}`;
+  /**
+   * The key a limit counts under: the limit, the agent (absent over stdio), and the exact call or the
+   * tool. A JSON array, so that no id or name can run into the next part.
+   */
+  static key(limit: RepeatLimit, server: string, tool: string, argsHash: string, agent?: string): string {
+    return JSON.stringify([limit.id, agent ?? null, `${server}__${tool}`, ...(limit.per === "tool" ? [] : [argsHash])]);
   }
 
   /**
    * One locked step: if any limit is reached (the call already ran `max` times within its window),
    * returns the first one and counts nothing; otherwise counts this run under every limit's key.
    */
-  admit(limits: readonly RepeatLimit[], server: string, tool: string, argsHash: string): RepeatHit | undefined {
+  admit(limits: readonly RepeatLimit[], server: string, tool: string, argsHash: string, agent?: string): RepeatHit | undefined {
     return this.update((runs, now) => {
       for (const limit of limits) {
-        const count = (runs[RepeatStore.key(limit, server, tool, argsHash)] ?? []).filter((t) => t > now - limit.windowMs).length;
+        const count = (runs[RepeatStore.key(limit, server, tool, argsHash, agent)] ?? []).filter((t) => t > now - limit.windowMs).length;
         if (count >= limit.max) return { limit, count };
       }
-      this.count(runs, limits, server, tool, argsHash, now);
+      this.count(runs, limits, server, tool, argsHash, agent, now);
       return undefined;
     });
   }
 
   /** Counts a run that a human let through after a limit had asked. */
-  record(limits: readonly RepeatLimit[], server: string, tool: string, argsHash: string): void {
-    this.update((runs, now) => this.count(runs, limits, server, tool, argsHash, now));
+  record(limits: readonly RepeatLimit[], server: string, tool: string, argsHash: string, agent?: string): void {
+    this.update((runs, now) => this.count(runs, limits, server, tool, argsHash, agent, now));
   }
 
-  private count(runs: Record<string, number[]>, limits: readonly RepeatLimit[], server: string, tool: string, argsHash: string, now: number): void {
-    for (const key of new Set(limits.map((limit) => RepeatStore.key(limit, server, tool, argsHash)))) {
+  private count(runs: Record<string, number[]>, limits: readonly RepeatLimit[], server: string, tool: string, argsHash: string, agent: string | undefined, now: number): void {
+    for (const key of new Set(limits.map((limit) => RepeatStore.key(limit, server, tool, argsHash, agent)))) {
       runs[key] = [...(runs[key] ?? []), now].slice(-KEEP_PER_KEY);
     }
   }

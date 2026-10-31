@@ -582,21 +582,30 @@ HTTP/1.1 404 Not Found
 What holds for every agent:
 
 - **Its key is its identity.** No key or an unknown one gets 401, and nothing is opened. Each MCP
-  session gets its own `connId` and belongs to the agent that opened it: another agent's key gets 404
-  for its id, the same answer as an id that does not exist.
+  session gets its own `connId` (16 hex digits: one process opens many sessions, and the audit log
+  keeps them all) and belongs to the agent that opened it: another agent's key gets 404 for its id,
+  whatever the method (POST, GET or DELETE), the same answer as an id that does not exist.
 - **Its own rules.** Calls are decided by the agent's policy, and it sees and may call only the tools
   of its profile, on top of each server's `expose`. Every call line names the agent.
-- **Its own approvals.** An approval is bound to the agent whose call asked for it: another agent's
-  identical call is asked about anew. `approvals grant --agent <name>` makes a standing approval for
-  one agent; without `--agent`, a grant covers only calls that come with no agent (stdio). `audit
-  verify` fails a call that ran under another agent's approval or grant.
+- **Its own approvals and loop limits.** An approval is bound to the agent whose call asked for it:
+  another agent's identical call is asked about anew. `approvals grant --agent <name>` makes a standing
+  approval for one agent; without `--agent`, a grant covers only calls that come with no agent (stdio).
+  `audit verify` fails a call that ran under another agent's approval or grant. Loop limits count each
+  agent's calls on their own, so one agent cannot use up another's.
+- **Its share of the process is bounded.** An agent keeps at most `http.maxSessionsPerAgent` sessions
+  open (default 16): a new one closes that agent's least recently used, whose client then gets 404 and
+  starts another. The gateway keeps at most `http.maxSessions` (default 256): past that, a new session
+  gets 503 with `Retry-After`, and no agent's session is closed for another agent. A request body over
+  4 MiB gets 413.
 - **Only the gateway's own names.** The `Host` header, and the `Origin` header when there is one, must
-  name the listener (any loopback spelling of it) or one of `http.allowedHosts`, else 403. That stops a
+  name the listener (its address as configured, and any loopback spelling of a loopback one) or one of
+  `http.allowedHosts`, else 403. That stops a
   web page from reaching the listener through a browser (DNS rebinding). The listener binds 127.0.0.1
   unless `http.listen.host` says otherwise, and any other address needs `allowedHosts`.
 - Plain HTTP with static keys, and no OAuth flow: for anything beyond this machine, put a TLS proxy in
-  front. Sessions live in memory; a restart ends them, and one left idle for `sessionIdleMinutes`
-  (default 60) is closed. Why it is built this way, and what deploying it would take:
+  front. Sessions live in memory; a restart ends them, and one left idle for `http.sessionIdleMinutes`
+  (default 60) is closed, on a timer and whenever a session opens. If the port is taken, the gateway
+  stops its downstream servers and exits 1. Why it is built this way, and what deploying it would take:
   [ADR 0012](docs/adr/0012-an-http-endpoint-for-agents.md).
 
 ### An approval, step by step
@@ -1045,9 +1054,11 @@ the tool (`"per": "tool"`). When a call that the rules would let run unattended 
 already run `max` times in the last `windowSeconds`, it is asked about or blocked instead, with a
 `why` that says so and the rule it overruled in `alsoMatched`. A call that already needs a human is
 left alone. An approval lets one more run through, and the next one asks again until the window moves
-on. The counts are kept in `<stateDir>/repeats.json`, with the same lock and atomic write as the
-approval queue, so the check and the count are one step and gateways sharing a state directory count
-together; a damaged file stops the call. The price is one locked, flushed write of that file for each
+on. Each limit counts on its own, and so does each agent of `serve --http` (see
+[Agents over HTTP](#agents-over-http)); calls with no agent (stdio) count together. The counts are kept
+in `<stateDir>/repeats.json`, with the same lock and atomic write as the approval queue, so the check
+and the count are one step and gateways sharing a state directory count together; a damaged file
+stops the call. The price is one locked, flushed write of that file for each
 call a limit covers. The example policy ships the first limit above.
 
 **Rewrite rules.** A rule with `"decision": "rewrite"` does not decide. It edits the call's
@@ -1178,7 +1189,7 @@ context and an agent path, plus a blocked shell call; the user name is changed, 
 ```
 
 - `connId` names the gateway connection (one per `agent-gate serve` process, which serves one
-  client, or one per session with `serve --http`) and `seq` numbers its calls 1, 2, 3 in the order
+  client, or one per session with `serve --http`, with 16 hex digits) and `seq` numbers its calls 1, 2, 3 in the order
   they came in. Together they tie a call line to its result line, and they order the calls of one
   session. `agent` names the HTTP agent, known by its key, and `profile` the profile the connection
   runs with, when there is one.
@@ -1370,8 +1381,10 @@ working and says what is wrong (`src/gateway/downstream.ts`):
 
 - **A local server that exits** is started again after 1 s, then 2 s, 4 s and so on (at most 30 s
   apart). Meanwhile its tools are left out of `tools/list` (the clients are told the list changed),
-  and a call to one is refused with the reason and when the next try is, as a `block` with rule
-  `server-down` in the audit log. After `maxRestarts` failed tries in a row (default 3) it is given up
+  and a call to one is refused with the server's state and when the next try is, as a `block` with
+  rule `server-down` in the audit log. The error that took the server down is not in that message: a
+  remote server's error can carry its own text, which agent-gate does not hand the agent as its own
+  words. It is in `agent-gate status`, on one line with control characters (terminal escapes) removed. After `maxRestarts` failed tries in a row (default 3) it is given up
   until the gateway restarts. A server that dies again within 10 s of coming back counts as a failed
   try, so a crash loop ends too.
 - **An `optional` server that cannot be started** does not stop the gateway. It is tried again when
@@ -1385,7 +1398,7 @@ From a real run, with `demo` exiting in the middle of a call and `docs` an optio
 not start. The next call to `demo` gets:
 
 ```
-agent-gate could not run this call: server "demo" went away and is being restarted: try 1 of 3 in 1 s; last error: the server's process exited. (rule server-down) Try again later.
+agent-gate could not run this call: server "demo" went away and is being restarted: try 1 of 3 in 1 s. (rule server-down) Try again later.
 ```
 
 ```
@@ -2435,7 +2448,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 496 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 506 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
@@ -2462,10 +2475,13 @@ precision and recall), a remote server over Streamable HTTP on 127.0.0.1 (its he
 environment, a timeout, a 401 at startup whose quoted header value stays out of the log, a server
 that goes away), agents over HTTP (`serve --http` on 127.0.0.1: each agent's own policy and profile,
 401 without a key or with a wrong one, 403 for another `Host` or `Origin`, 404 for another agent's
-session, an approval or a standing approval that one agent cannot use for another, `audit verify` on
-the whole log), downstream servers that fail (one that exits mid-call is started again while the
-others go on, an optional one starts once it can, one that never starts and a crash loop are given up,
-a required one stops the gateway, `status` and its file), what the gateway does when one of its own
+session whatever the method, an approval or a standing approval that one agent cannot use for another,
+`audit verify` on the whole log, loop limits per agent, the session caps and the idle sweep with a
+clock the test moves, 413 for a body over the limit, a taken port), downstream servers that fail (one
+that exits mid-call is started again while the others go on, and the call it crashed on reached it
+once, an optional one starts once it can, one that never starts and a crash loop are given up, a
+required one stops the gateway, a remote server's error text kept out of what the agent is told and
+cleaned of terminal escapes in `status`, `status` and its file), what the gateway does when one of its own
 parts fails, and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log,
@@ -2550,8 +2566,8 @@ an evaluation set of whole runs, each replayed and checked step by step. It chec
 not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 496/496 MCP gateway tests, 323/323 LLM gateway tests, 7/7 for
-the change-review example, 6/6 for the status-mcp example, 5/5 for each of the two demo pages, 2/2 for the load
+stopped (351/351 shell guard tests, 506/506 MCP gateway tests, 323/323 LLM gateway tests, 7/7 for
+the change-review example, 6/6 for the status-mcp example, 5/5 for each of the two demo pages, 3/3 for the load
 test), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -2629,7 +2645,7 @@ test/llm/fake-secrets.ts                      every fake secret the tests use, i
 test/llm/fake-pii.ts                          made-up personal numbers, built at run time with their check digits
 test/llm/threat-matrix.json                   32 risky prompts and what the leak guard does with each, gaps included
 scripts/loadtest.js                           npm run loadtest: the LLM gateway under concurrent load; the budget must hold
-test/loadtest.test.js                         a small load in npm test: never overspent, booked exactly, no 5xx
+test/loadtest.test.js                         a small load in npm test: never overspent, booked exactly, no 5xx; --url stops before the load when it does not reach the gateway
 scripts/bench.js                              npm run bench: what each gateway adds to one call, and what a state write costs
 test/no-network-preload.js                    makes network modules throw, for the no-network test
 test/change-review.test.js                    tests of the change-review example

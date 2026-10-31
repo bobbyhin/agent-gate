@@ -4,9 +4,11 @@
 // and one agent's approval never lets another agent's identical call run.
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -16,10 +18,13 @@ import { ApprovalStore, hashArguments } from "../../src/gateway/approvals.js";
 import { readAudit, verifyAudit } from "../../src/gateway/audit-tools.js";
 import { main, type Io } from "../../src/gateway/cli.js";
 import { loadConfig, parseConfig } from "../../src/gateway/config.js";
-import { startHttpGateway, type HttpGateway } from "../../src/gateway/http-server.js";
+import { hostNames, startHttpGateway, type HttpGateway } from "../../src/gateway/http-server.js";
+import { readStatus } from "../../src/gateway/status.js";
 import { hashKey } from "../../src/llm/config.js";
 
 const FAKE = path.join(__dirname, "fake-downstream.js");
+// This file runs from dist/test/gateway/, three levels below the repository root.
+const BIN = path.join(__dirname, "..", "..", "..", "bin", "agent-gate.js");
 const ALL_TOOLS = ["demo__delete_file", "demo__deploy", "demo__echo", "demo__execute_sql", "demo__fail", "demo__run_command", "demo__search_notes", "demo__set_echo_description"];
 // Keys are made here, at run time; the config only ever holds their hashes.
 const key = (name: string) => `agk_${name}_${randomBytes(12).toString("hex")}`;
@@ -152,6 +157,33 @@ describe("serve --http: agents over Streamable HTTP", () => {
     assert.equal(own.status, 200);
   });
 
+  it("another agent's GET and DELETE on a session get 404, and the session goes on working", async () => {
+    const { transport } = await connect(KEYS.alpha);
+    const id = transport.sessionId as string;
+    for (const method of ["GET", "DELETE"]) {
+      const res = await fetch(`${gw.url}/mcp`, { method, headers: { authorization: `Bearer ${KEYS.beta}`, "mcp-session-id": id, "mcp-protocol-version": "2025-06-18", accept: "application/json, text/event-stream" } });
+      assert.equal(res.status, 404, method);
+      assert.deepEqual(await res.json(), { jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null });
+    }
+    const own = await post({ authorization: `Bearer ${KEYS.alpha}`, "mcp-session-id": id, "mcp-protocol-version": "2025-06-18" }, { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} });
+    assert.equal(own.status, 200);
+  });
+
+  it("a body over the gateway's limit is refused with 413 before anything reads it as JSON", async () => {
+    // The gateway hands the parsed body to the SDK, which then skips its own size limit: this is the only one.
+    const port = new URL(gw.url).port;
+    const big = JSON.stringify({ ...INITIALIZE, params: { ...INITIALIZE.params, padding: "x".repeat(5 * 1024 * 1024) } });
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port, path: "/mcp", method: "POST", headers: { authorization: `Bearer ${KEYS.alpha}`, "content-type": "application/json", accept: "application/json, text/event-stream" } }, (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on("error", reject);
+      req.end(big);
+    });
+    assert.equal(status, 413);
+  });
+
   it("an approval is bound to the agent whose call asked: another agent's identical call is asked about anew", async () => {
     const alpha = (await connect(KEYS.alpha)).client;
     const beta = (await connect(KEYS.beta)).client;
@@ -184,7 +216,7 @@ describe("serve --http: agents over Streamable HTTP", () => {
 
   it("the whole log passes audit verify", () => {
     assert.deepEqual(verifyAudit(readAudit(path.join(dir, "state", "audit.jsonl")), new ApprovalStore(path.join(dir, "state"), 3_600_000).list()), []);
-    assert.ok(logs.some((l) => /^session cn-[0-9a-f]{8} opened for agent "alpha"$/.test(l)));
+    assert.ok(logs.some((l) => /^session cn-[0-9a-f]{16} opened for agent "alpha"$/.test(l)), "an HTTP session's connId has 64 random bits");
   });
 });
 
@@ -290,4 +322,151 @@ describe("serve --http on the command line, and the http config", () => {
   for (const [what, httpSpec, message] of refused) {
     it(`refuses ${what}`, () => assert.throws(() => parseConfig({ ...base, http: httpSpec }, "/srv"), message));
   }
+});
+
+describe("serve --http: what the agents share is bounded per agent", () => {
+  let dir: string;
+  let gw: HttpGateway;
+  let clock = Date.parse("2026-10-31T10:00:00.000Z");
+  const logs: string[] = [];
+  const clients: Client[] = [];
+  const ids: Record<string, string> = {};
+
+  before(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-http-bounds-"));
+    fs.writeFileSync(path.join(dir, "policy.json"), JSON.stringify({ default: "allow", rules: [], repeat: [{ id: "loop-limit", tool: "echo", per: "tool", max: 3, windowSeconds: 60, decision: "block" }] }));
+    const file = path.join(dir, "gateway.config.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        servers: [{ name: "demo", command: process.execPath, args: [FAKE] }],
+        policy: "policy.json",
+        stateDir: "state",
+        http: {
+          listen: { host: "127.0.0.1", port: 0 },
+          agents: [
+            { name: "alpha", sha256: hashKey(KEYS.alpha) },
+            { name: "beta", sha256: hashKey(KEYS.beta) },
+          ],
+          maxSessionsPerAgent: 2,
+          maxSessions: 3,
+          sessionIdleMinutes: 1,
+        },
+      }),
+    );
+    // The clock decides when a session was last used, so the test can make sessions idle.
+    gw = await startHttpGateway(loadConfig(file), (m) => logs.push(m), { now: () => clock });
+  });
+  after(async () => {
+    for (const c of clients) await c.close().catch(() => undefined);
+    await gw?.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function open(agentKey: string, name?: string): Promise<Client> {
+    const transport = new StreamableHTTPClientTransport(new URL(`${gw.url}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${agentKey}` } } });
+    const client = new Client({ name: "http-bounds-test", version: "1.0.0" });
+    await client.connect(transport);
+    clients.push(client);
+    if (name) ids[name] = transport.sessionId as string;
+    return client;
+  }
+  const call = async (client: Client, name: string, args: Record<string, unknown>) => (await client.callTool({ name, arguments: args })) as CallToolResult;
+  /** The status of a tools/list on a session, as its agent. */
+  const listOn = async (agentKey: string, id: string | undefined) =>
+    (
+      await fetch(`${gw.url}/mcp`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${agentKey}`, "mcp-session-id": id ?? "", "mcp-protocol-version": "2025-06-18", "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/list", params: {} }),
+      })
+    ).status;
+
+  it("loop limits count per agent: alpha's calls do not use up beta's limit", async () => {
+    const alpha = await open(KEYS.alpha);
+    for (let i = 0; i < 3; i++) assert.equal(text(await call(alpha, "demo__echo", { text: `a${i}` })), `a${i}`);
+    assert.match(text(await call(alpha, "demo__echo", { text: "a3" })), /\(rule loop-limit\)/);
+    const beta = await open(KEYS.beta);
+    assert.equal(text(await call(beta, "demo__echo", { text: "b0" })), "b0", "beta's first call is not counted with alpha's");
+    const lines = readAudit(path.join(dir, "state", "audit.jsonl")).lines.map((l) => l.value).filter((l) => l.tool === "echo" && l.event === undefined);
+    assert.deepEqual(
+      lines.map((l) => [l.agent, l.decision, l.rule]),
+      [
+        ["alpha", "allow", "default"],
+        ["alpha", "allow", "default"],
+        ["alpha", "allow", "default"],
+        ["alpha", "block", "loop-limit"],
+        ["beta", "allow", "default"],
+      ],
+    );
+  });
+
+  it("an agent keeps at most maxSessionsPerAgent sessions: a new one closes that agent's least recently used", async () => {
+    clock += 61_000; // the sessions above are now idle: the next initialize closes them
+    await open(KEYS.alpha, "a1");
+    clock += 1000;
+    await open(KEYS.alpha, "a2");
+    clock += 1000;
+    await open(KEYS.alpha, "a3");
+    assert.deepEqual([await listOn(KEYS.alpha, ids.a1), await listOn(KEYS.alpha, ids.a2), await listOn(KEYS.alpha, ids.a3)], [404, 200, 200]);
+    assert.ok(logs.some((l) => /closed: agent "alpha" opened more than maxSessionsPerAgent \(2\); this was its least recently used$/.test(l)));
+  });
+
+  it("the gateway keeps at most maxSessions in all: past it a new session is refused with 503, and nobody else's is closed for it", async () => {
+    await open(KEYS.beta, "b1"); // alpha 2 + beta 1 = maxSessions
+    const refused = await fetch(`${gw.url}/mcp`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${KEYS.beta}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "raw", version: "1" } } }),
+    });
+    assert.equal(refused.status, 503);
+    assert.equal(refused.headers.get("retry-after"), "60");
+    assert.match(((await refused.json()) as { error: { message: string } }).error.message, /the gateway has 3 sessions open, the most it keeps \(maxSessions\)/);
+    assert.deepEqual([await listOn(KEYS.alpha, ids.a2), await listOn(KEYS.alpha, ids.a3), await listOn(KEYS.beta, ids.b1)], [200, 200, 200]);
+  });
+
+  it("a session nobody used for sessionIdleMinutes is closed when the next one opens (and on a timer)", async () => {
+    clock += 61_000;
+    await open(KEYS.alpha, "a4");
+    assert.deepEqual([await listOn(KEYS.alpha, ids.a2), await listOn(KEYS.alpha, ids.a3), await listOn(KEYS.beta, ids.b1), await listOn(KEYS.alpha, ids.a4)], [404, 404, 404, 200]);
+    assert.ok(logs.some((l) => /^session cn-[0-9a-f]{16} of agent "beta" closed: unused for 1 min$/.test(l)));
+  });
+});
+
+describe("the Host names an HTTP listener answers to (DNS rebinding check)", () => {
+  it("always its configured address, every loopback spelling for a loopback one, and the operator's names", () => {
+    assert.deepEqual([...hostNames("127.0.0.2", 8788)], ["127.0.0.2:8788", "127.0.0.1:8788", "localhost:8788", "[::1]:8788"]);
+    assert.deepEqual([...hostNames("::1", 8788)], ["[::1]:8788", "127.0.0.1:8788", "localhost:8788"]);
+    assert.deepEqual([...hostNames("10.0.0.5", 8788, ["Gate.Example.com"])], ["10.0.0.5:8788", "gate.example.com"]);
+  });
+});
+
+describe("serve --http when its port is taken", () => {
+  it("stops its downstream servers, drops its status entry and exits 1, instead of hanging on", async () => {
+    const holder = net.createServer();
+    await new Promise<void>((resolve) => holder.listen(0, "127.0.0.1", resolve));
+    const port = (holder.address() as net.AddressInfo).port;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-http-busy-"));
+    try {
+      fs.writeFileSync(path.join(dir, "p.json"), JSON.stringify({ default: "allow", rules: [] }));
+      const config = (servers: unknown[]) => {
+        const file = path.join(dir, `gateway-${servers.length}.config.json`);
+        fs.writeFileSync(file, JSON.stringify({ servers, policy: "p.json", stateDir: "state", http: { listen: { host: "127.0.0.1", port }, agents: [{ name: "alpha", sha256: hashKey(KEYS.alpha) }] } }));
+        return file;
+      };
+      // In this process, with a server that leaves no process behind (an optional one that does not
+      // start), so that a gateway that forgot to close cannot keep this test running: its status entry,
+      // written at startup, must be gone.
+      await assert.rejects(startHttpGateway(loadConfig(config([{ name: "gone", command: process.execPath, args: ["-e", "process.exit(3)"], optional: true }])), () => undefined), /EADDRINUSE/);
+      assert.deepEqual(readStatus(path.join(dir, "state", "status.json")).filter((p) => p.pid === process.pid), [], "this process no longer claims to serve");
+      // On the command line, with a running server: the process must end by itself.
+      const run = spawnSync(process.execPath, [BIN, "serve", "--http", "--config", config([{ name: "demo", command: process.execPath, args: [FAKE] }, { name: "other", command: process.execPath, args: [FAKE] }])], { encoding: "utf8", timeout: 30_000 });
+      assert.equal(run.signal, null, "it ended on its own, not by the test's timeout");
+      assert.equal(run.status, 1);
+      assert.match(run.stderr, /EADDRINUSE/);
+    } finally {
+      await new Promise<void>((resolve) => holder.close(() => resolve()));
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

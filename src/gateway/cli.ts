@@ -366,11 +366,13 @@ function statusCommand(config: GatewayConfig, json: boolean, io: Io): number {
     io.out("No gateway is running on this state directory.\n");
     return 0;
   }
+  // The file can be written by any gateway process on this state directory: nothing in it reaches the terminal raw.
+  const cell = (value: unknown): string => cleanNote(String(value), 300) ?? "-";
   for (const p of processes) {
-    io.out(`gateway pid ${p.pid} (${p.mode}), started ${p.startedAt}, updated ${p.updatedAt}\n`);
+    io.out(`gateway pid ${p.pid} (${cell(p.mode)}), started ${cell(p.startedAt)}, updated ${cell(p.updatedAt)}\n`);
     const rows = [["  server", "state", "restarts", "failed tries", "since", "next try", "last error"]];
-    for (const [name, s] of Object.entries(p.servers)) {
-      rows.push([`  ${name}`, s.state, `${s.restarts}`, `${s.tries} of ${s.maxTries}`, s.since, s.nextTryAt ?? "-", s.lastError ?? "-"]);
+    for (const [name, s] of Object.entries(p.servers ?? {})) {
+      rows.push([`  ${cell(name)}`, cell(s.state), cell(s.restarts), `${cell(s.tries)} of ${cell(s.maxTries)}`, cell(s.since), cell(s.nextTryAt ?? "-"), cell(s.lastError ?? "-")]);
     }
     printTable(rows, io);
   }

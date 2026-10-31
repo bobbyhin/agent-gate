@@ -256,8 +256,9 @@ so they never appear on the command line. Before the load, one request without t
 get the gateway's own 401 (`invalid_api_key`): that shows the request got through what stands in
 front of the gateway (Cloud Run's IAM check here, a load balancer elsewhere) and reached it. A 401 or
 403 from anything else means a header did not make it through; on Cloud Run the ID token goes in
-`X-Serverless-Authorization` so that `Authorization` can carry the gateway key. Then come the
-requests. The run fails on a 5xx, a dropped connection, or a refusal that is not one of the
+`X-Serverless-Authorization` so that `Authorization` can carry the gateway key. The script sends
+that request first, and when it does not get the gateway's own 401 it stops there and fails, with no
+request sent with the key, so nothing is billed. Then come the requests. The run fails on a 5xx, a dropped connection, or a refusal that is not one of the
 gateway's named stop rules, and prints the latency and the sum of the `x-agent-gate-cost-usd`
 headers. It cannot see the ledger, which is in the bucket; to check it against the usage log, copy
 both down and run `agent-gate usage --verify` on the copies:

@@ -13,6 +13,10 @@
 // Before anything else, the Host header must be one of the listen address's own names, or one of
 // "http.allowedHosts" (DNS rebinding: a web page that makes a browser send requests to 127.0.0.1),
 // and so must an Origin header when there is one. Then the key, then the session.
+// Sessions are bounded: an agent may hold "maxSessionsPerAgent" open sessions (default 16; a new one
+// closes that agent's least recently used), and the gateway "maxSessions" in all (default 256; past
+// that a new session is refused with 503), so no key holder can grow the shared process without end.
+// A session nobody used for "sessionIdleMinutes" is closed, on a timer and whenever a session opens.
 // ponytail: plain HTTP and static keys. Bind it to 127.0.0.1 (the default) or put a TLS proxy in front
 // (docs/adr/0012-an-http-endpoint-for-agents.md); there is no OAuth flow. Sessions live in memory: a
 // restart ends them, and clients start new ones.
@@ -23,7 +27,7 @@ import type { AddressInfo } from "node:net";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { hashKey } from "../llm/config.js";
-import { isLocalHost, loadPolicy, type GatewayConfig, type HttpAgent } from "./config.js";
+import { isLocalHost, loadPolicy, type GatewayConfig, type HttpAgent, type HttpConfig } from "./config.js";
 import type { Policy } from "./policy.js";
 import { createCore, stderrLog, type GatewayOptions, type Log, type Session } from "./server.js";
 import { ConfigError } from "./validate.js";
@@ -45,8 +49,8 @@ interface Open {
 }
 
 export async function startHttpGateway(config: GatewayConfig, log: Log = stderrLog, options: Pick<GatewayOptions, "env" | "restartBackoffMs"> & { now?: () => number } = {}): Promise<HttpGateway> {
-  const spec = config.http;
-  if (!spec) throw new ConfigError('this config has no "http" section; "serve --http" needs one: { "listen": { "host", "port" }, "agents": [...] }');
+  if (!config.http) throw new ConfigError('this config has no "http" section; "serve --http" needs one: { "listen": { "host", "port" }, "agents": [...] }');
+  const spec: HttpConfig = config.http;
   const now = options.now ?? Date.now;
   // Each agent's policy, read once; agents that name the same file share it.
   const policies = new Map<string, Policy>();
@@ -58,6 +62,35 @@ export async function startHttpGateway(config: GatewayConfig, log: Log = stderrL
   const agents = new Map(spec.agents.map((a) => [a.sha256, { ...a, policy: policyOf(a.policyFile ?? config.policyFile) }] as const));
   const core = await createCore(config, [...policies.values()], log, { ...options, mode: "http" });
   const open = new Map<string, Open>();
+
+  /** Closes a session the gateway gives up on: idle too long, or the oldest of an agent at its cap. */
+  function closeSession(id: string, why: string): void {
+    const o = open.get(id);
+    if (!o) return;
+    open.delete(id);
+    log(`session ${o.session.connId} of agent "${o.agent}" closed: ${why}`);
+    void o.transport.close();
+  }
+
+  /** Closes the sessions nobody used for sessionIdleMs. */
+  function sweep(): void {
+    const before = now() - spec.sessionIdleMs;
+    for (const [id, o] of [...open]) if (o.lastSeen < before) closeSession(id, `unused for ${spec.sessionIdleMs / 60_000} min`);
+  }
+
+  /**
+   * Room for one more session of this agent: at its own cap, its least recently used session is closed
+   * (its client gets 404 and starts a new one); at the gateway's cap, nothing is closed for it, because
+   * one agent must not end another's sessions. False: refuse.
+   */
+  function makeRoom(agent: string): boolean {
+    sweep();
+    const own = [...open].filter(([, o]) => o.agent === agent).sort(([, a], [, b]) => a.lastSeen - b.lastSeen);
+    if (own.length >= spec.maxSessionsPerAgent) {
+      for (const [id] of own.slice(0, own.length - spec.maxSessionsPerAgent + 1)) closeSession(id, `agent "${agent}" opened more than maxSessionsPerAgent (${spec.maxSessionsPerAgent}); this was its least recently used`);
+    }
+    return open.size < spec.maxSessions;
+  }
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     if ((req.url ?? "/").split("?")[0] !== "/mcp") return reply(res, 404, -32000, "agent-gate serves MCP at /mcp");
@@ -92,6 +125,10 @@ export async function startHttpGateway(config: GatewayConfig, log: Log = stderrL
     }
     // No session yet: only an initialize request may start one.
     if (req.method !== "POST" || !isInitializeRequest(body)) return reply(res, 400, -32000, "Bad Request: send an initialize request first, then the mcp-session-id header it returns");
+    if (!makeRoom(agent.name)) {
+      log(`503 initialize from agent "${agent.name}": ${open.size} sessions open, maxSessions is ${spec.maxSessions}`);
+      return reply(res, 503, -32000, `agent-gate: the gateway has ${spec.maxSessions} sessions open, the most it keeps (maxSessions); try again later`, { "retry-after": "60" });
+    }
     const session = core.openSession({ policy: agent.policy, ...(agent.profile !== undefined ? { profile: agent.profile } : {}), agent: agent.name });
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
@@ -125,22 +162,23 @@ export async function startHttpGateway(config: GatewayConfig, log: Log = stderrL
       else res.destroy();
     });
   });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(spec.port, spec.host, () => {
-      server.off("error", reject);
-      resolve();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(spec.port, spec.host, () => {
+        server.off("error", reject);
+        resolve();
+      });
     });
-  });
+  } catch (err) {
+    // A port in use, or an address this machine does not have: stop the downstream servers and drop
+    // this process's status entry, so nothing keeps the process alive or claims it is serving.
+    await core.close();
+    throw err;
+  }
   const address = server.address() as AddressInfo;
   const url = `http://${address.family === "IPv6" ? `[${address.address}]` : address.address}:${address.port}`;
-  // The names a client may use for this listener: every loopback spelling for a loopback address, else
-  // the address as configured; plus the operator's own (a proxy's public name).
-  const port = address.port;
-  const allowedHosts = new Set([
-    ...(isLocalHost(spec.host) ? [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`] : [`${spec.host.includes(":") ? `[${spec.host}]` : spec.host}:${port}`.toLowerCase()]),
-    ...spec.allowedHosts,
-  ]);
+  const allowedHosts = hostNames(spec.host, address.port, spec.allowedHosts);
   const allowedOrigin = (origin: string): boolean => {
     try {
       return allowedHosts.has(new URL(origin).host.toLowerCase());
@@ -150,17 +188,14 @@ export async function startHttpGateway(config: GatewayConfig, log: Log = stderrL
   };
 
   // Sessions a client left without closing them are closed after a while.
-  const sweep = setInterval(() => {
-    const before = now() - spec.sessionIdleMs;
-    for (const [id, o] of open) if (o.lastSeen < before) void o.transport.close().then(() => open.delete(id));
-  }, Math.min(60_000, spec.sessionIdleMs));
-  sweep.unref();
+  const sweeper = setInterval(sweep, Math.min(60_000, spec.sessionIdleMs));
+  sweeper.unref();
 
   log(`listening on ${url}/mcp for ${agents.size} agent(s), as ${[...allowedHosts].join(", ")}`);
   return {
     url,
     async close() {
-      clearInterval(sweep);
+      clearInterval(sweeper);
       await Promise.allSettled([...open.values()].map((o) => o.transport.close()));
       open.clear();
       await new Promise<void>((resolve) => {
@@ -172,6 +207,20 @@ export async function startHttpGateway(config: GatewayConfig, log: Log = stderrL
   };
 }
 
+/**
+ * The Host header values this listener answers to: the address as configured (bracketed for IPv6),
+ * every loopback spelling when that address is a loopback one, and the operator's own (a proxy's
+ * public name). Lowercase.
+ */
+export function hostNames(host: string, port: number, extra: readonly string[] = []): Set<string> {
+  const configured = host.replace(/^\[|\]$/g, "");
+  return new Set([
+    `${configured.includes(":") ? `[${configured}]` : configured}:${port}`.toLowerCase(),
+    ...(isLocalHost(host) ? [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`] : []),
+    ...extra.map((h) => h.toLowerCase()),
+  ]);
+}
+
 /** A JSON-RPC error answer, in the shape the SDK's transport uses for its own refusals. */
 function reply(res: http.ServerResponse, status: number, code: number, message: string, headers: Record<string, string> = {}): void {
   const text = JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id: null });
@@ -181,16 +230,24 @@ function reply(res: http.ServerResponse, status: number, code: number, message: 
 
 class BodyTooLarge extends Error {}
 
+/**
+ * The body, at most MAX_BODY_BYTES of it. A larger one is read to its end without being kept, so the
+ * client is still listening when the 413 comes (an answer sent while it is still sending can be lost
+ * to a connection reset); past twice the limit the connection is cut instead.
+ */
 function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     req.on("data", (chunk: Buffer) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) reject(new BodyTooLarge());
-      else chunks.push(chunk);
+      if (size <= MAX_BODY_BYTES) chunks.push(chunk);
+      else if (size > 2 * MAX_BODY_BYTES) {
+        reject(new BodyTooLarge());
+        req.destroy();
+      }
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => (size > MAX_BODY_BYTES ? reject(new BodyTooLarge()) : resolve(Buffer.concat(chunks).toString("utf8"))));
     req.on("error", reject);
   });
 }

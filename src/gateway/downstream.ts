@@ -8,8 +8,11 @@
 // after "maxRestarts" failed tries in a row (default 3) it is "failed" until the gateway restarts. A
 // server that goes away again within 10 s of coming back counts as a failed try, so a crash loop
 // ends in "failed" too.
-// While a server is not up, its tools are not listed and a call to one gets an error that says why
-// and when the next try is. Each change goes to <stateDir>/status.json, for "agent-gate status".
+// While a server is not up, its tools are not listed and a call to one gets an error that says what
+// state it is in and when the next try is. Each change goes to <stateDir>/status.json, for "agent-gate
+// status", with the last error: a remote server's error can carry its own text, so it is cut to one
+// line of at most 300 characters with control characters removed (no terminal escapes reach the
+// CLI), and it is never put into what the agent is told.
 // ponytail: a remote server (url) has no process to watch: each request reaches it anew, so it is
 // "up" once connected, and a call to it while it is unreachable fails on its own.
 
@@ -17,6 +20,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ListToolsResultSchema, ToolListChangedNotificationSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import { cleanNote } from "./approvals.js";
 import { DEFAULT_MAX_RESTARTS, type GatewayConfig, type ServerConfig } from "./config.js";
 import type { ServerStatus, StatusFile } from "./status.js";
 
@@ -117,20 +121,23 @@ export class Downstreams {
     return link.client;
   }
 
-  /** Why a server is not up, in words for the agent and the log. */
+  /**
+   * Why a server is not up, in words for the agent and the log: its state and the next try. The last
+   * error is left out: it can hold the server's own text, which agent-gate does not pass off as its
+   * own words to the agent ("agent-gate status" shows it).
+   */
   whyDown(name: string): string {
     const link = this.links.get(name);
     if (!link) return `there is no server "${name}"`;
     const s = link.status;
-    const last = s.lastError ? `; last error: ${s.lastError}` : "";
     const next = s.nextTryAt ? Math.max(0, Math.ceil((Date.parse(s.nextTryAt) - this.now()) / 1000)) : 0;
     switch (s.state) {
       case "restarting":
-        return `server "${name}" went away and is being restarted: try ${s.tries + 1} of ${s.maxTries} in ${next} s${last}`;
+        return `server "${name}" went away and is being restarted: try ${s.tries + 1} of ${s.maxTries} in ${next} s`;
       case "down":
-        return `optional server "${name}" is not running: it is tried again when needed, ${next > 0 ? `in ${next} s` : "now"} (try ${s.tries + 1} of ${s.maxTries})${last}`;
+        return `optional server "${name}" is not running: it is tried again when needed, ${next > 0 ? `in ${next} s` : "now"} (try ${s.tries + 1} of ${s.maxTries})`;
       case "failed":
-        return `server "${name}" is down: ${s.maxTries} tries in a row to start it failed${last}; restart the gateway to try again`;
+        return `server "${name}" is down: ${s.maxTries} tries in a row to start it failed; restart the gateway to try again`;
       case "starting":
         return `server "${name}" is starting`;
       default:
@@ -157,7 +164,8 @@ export class Downstreams {
       await client.connect(transportFor(s, this.headers.get(s.name) ?? {}), s.timeoutMs === undefined ? {} : { timeout: s.timeoutMs });
     } catch (err) {
       await client.close().catch(() => undefined);
-      link.status.lastError = this.scrub(errorText(err)).slice(0, 300);
+      // Header values out first, then one line without control characters (terminal escapes), cut short.
+      link.status.lastError = cleanNote(this.scrub(errorText(err)), 300) ?? "unknown error";
       return false;
     }
     if (this.closing) {

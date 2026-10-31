@@ -25,7 +25,8 @@ guarantees (an audit line before every call, approvals bound to one exact call a
   gateway does with its keys. No key or an unknown one gets 401 and opens nothing.
 - **Each agent has its own policy file and profile.** The policy decides its calls; the profile
   (config `profiles`, built for `serve --profile`) decides which tools it sees and may call.
-- **One SDK `Server` per MCP session**, with its own `connId` and call numbers in the audit log,
+- **One SDK `Server` per MCP session**, with its own `connId` (64 random bits: one process opens
+  many sessions and the audit log keeps them all, so 32 bits would collide) and call numbers in the audit log,
   in front of downstream servers that are connected once and shared (`createCore` in
   `src/gateway/server.ts`; the stdio gateway is the same core with one session).
 - **A session belongs to the agent that opened it.** A request with another agent's session id gets
@@ -36,17 +37,25 @@ guarantees (an audit line before every call, approvals bound to one exact call a
   with `approvals grant --agent`, or, naming none, only calls with no agent (the stdio gateway).
   `audit verify` fails a call that ran under another agent's approval or grant.
 - **Every call line names the agent** (`"agent": "builder"`) and, when there is one, the profile.
+- **What agents share is bounded per agent.** Loop limits (`repeat`) count each agent's calls on their
+  own. An agent keeps at most `maxSessionsPerAgent` sessions (default 16; a new one closes its least
+  recently used) and the process at most `maxSessions` (default 256; past that a new session gets 503,
+  because closing another agent's session to make room would let one agent end another's work). A
+  request body is at most 4 MiB (413): the gateway hands the parsed body to the SDK's transport, which
+  then skips its own limit, so this one is the only one.
 - **Loopback by default, and a Host check.** The listener binds 127.0.0.1 unless the config says
-  otherwise. Every request's `Host` header must be one of the listener's own names (all loopback
-  spellings for a loopback address) or of `http.allowedHosts`, which a non-loopback address must list;
+  otherwise. Every request's `Host` header must be one of the listener's own names (its address as
+  configured, and all loopback spellings for a loopback address) or of `http.allowedHosts`, which a
+  non-loopback address must list;
   an `Origin` header, when present, must name one of them too. That stops DNS rebinding, a web page
   that gets a browser to send requests to a port on 127.0.0.1. It is done before the SDK's transport
   sees the request (the SDK's own options for it are deprecated in favour of such a check).
 - **One JSON answer per request** (`enableJsonResponse`): the gateway relays no progress
   notifications or server-to-client requests, so there is nothing to stream.
 - **Sessions live in memory**, and one a client left open is closed after `sessionIdleMinutes`
-  (default 60). The state directory is shared, so ADR 0003 still holds: one gateway process per state
-  directory.
+  (default 60), on a timer and whenever a session opens. The state directory is shared, so ADR 0003
+  still holds: one gateway process per state directory. If the listener cannot start (the port is
+  taken), the downstream servers are stopped and the process exits, rather than run on serving nothing.
 
 ## Why
 
@@ -70,8 +79,10 @@ guarantees (an audit line before every call, approvals bound to one exact call a
   the open question of a remote deployment (below).
 - `test/gateway/http-endpoint.test.ts` runs everything on 127.0.0.1 with keys made at run time: two
   agents under different policies and profiles, 401 without or with a wrong key, 403 for another Host
-  or Origin, 404 for another agent's session, an approval that one agent cannot use for another, and
-  `audit verify` passing on the whole log. The idle-session sweep has no test of its own.
+  or Origin, 404 for another agent's session (POST, GET and DELETE), an approval that one agent cannot
+  use for another, and `audit verify` passing on the whole log; then, with a clock the test moves, loop
+  limits per agent, the session caps (least recently used closed, 503 past the total) and the idle
+  sweep; a body over the limit (413); and a taken port (the process exits 1).
 
 ## What deploying it would take (not done)
 

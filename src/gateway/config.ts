@@ -31,7 +31,8 @@
 // for "serve --http": the gateway listens for agents on Streamable HTTP (src/gateway/http-server.ts).
 // An agent is known by the SHA-256 of its key, never the key, and may have a policy file and a profile
 // of its own. The host defaults to 127.0.0.1; any other host needs "allowedHosts", the Host header
-// values clients use to reach it.
+// values clients use to reach it. "sessionIdleMinutes" (60), "maxSessionsPerAgent" (16) and
+// "maxSessions" (256) bound the sessions the process keeps.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -96,9 +97,13 @@ export interface HttpConfig {
   allowedHosts: string[];
   /** A session nobody used for this long is closed. */
   sessionIdleMs: number;
+  /** Open sessions one agent may hold; a new one closes that agent's least recently used. */
+  maxSessionsPerAgent: number;
+  /** Open sessions in all; past that, a new session is refused (503). */
+  maxSessions: number;
 }
 
-export const HTTP_DEFAULTS = { host: "127.0.0.1", port: 8788, sessionIdleMinutes: 60 } as const;
+export const HTTP_DEFAULTS = { host: "127.0.0.1", port: 8788, sessionIdleMinutes: 60, maxSessionsPerAgent: 16, maxSessions: 256 } as const;
 
 export const DEFAULT_APPROVAL_TTL_HOURS = 24;
 
@@ -163,7 +168,7 @@ export function isLocalHost(host: string): boolean {
 function httpConfig(raw: unknown, baseDir: string, profiles: ReadonlyMap<string, unknown> | undefined): HttpConfig {
   const at = "config.http";
   const spec = object(raw, at);
-  onlyKeys(spec, ["listen", "agents", "allowedHosts", "sessionIdleMinutes"], at);
+  onlyKeys(spec, ["listen", "agents", "allowedHosts", "sessionIdleMinutes", "maxSessionsPerAgent", "maxSessions"], at);
   const listen = object(spec.listen ?? {}, `${at}.listen`);
   onlyKeys(listen, ["host", "port"], `${at}.listen`);
   const host = listen.host === undefined ? HTTP_DEFAULTS.host : text(listen.host, `${at}.listen.host`);
@@ -201,6 +206,8 @@ function httpConfig(raw: unknown, baseDir: string, profiles: ReadonlyMap<string,
     agents,
     allowedHosts,
     sessionIdleMs: (spec.sessionIdleMinutes === undefined ? HTTP_DEFAULTS.sessionIdleMinutes : integerIn(spec.sessionIdleMinutes, `${at}.sessionIdleMinutes`, 1, 24 * 60)) * 60_000,
+    maxSessionsPerAgent: spec.maxSessionsPerAgent === undefined ? HTTP_DEFAULTS.maxSessionsPerAgent : integerIn(spec.maxSessionsPerAgent, `${at}.maxSessionsPerAgent`, 1, 1000),
+    maxSessions: spec.maxSessions === undefined ? HTTP_DEFAULTS.maxSessions : integerIn(spec.maxSessions, `${at}.maxSessions`, 1, 100_000),
   };
 }
 
