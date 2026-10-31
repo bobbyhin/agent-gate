@@ -1112,6 +1112,47 @@ provider key appears in any response, in the state files or in the gateway's log
 - Cancellation. A client that disconnects does not cancel the upstream call; the call finishes and
   is booked.
 
+## Example: a change review as a workflow
+
+`examples/change-review/review.js` puts the guards together as the checks of a review: three
+independent checks on a diff, a join, and a router that decides what happens next. An escalation
+becomes a request in the same approval queue the MCP gateway uses.
+
+```mermaid
+flowchart LR
+  diff[diff] --> secrets["secrets: the leak guard on every added line"]
+  diff --> shell["shell: analyze() on added shell lines"]
+  diff --> size["size: lines and files changed"]
+  secrets --> join[join]
+  shell --> join
+  size --> join
+  join --> router{router}
+  router -->|no finding| pass[pass]
+  router -->|"a secret, or more than 400 lines: at most 2 rounds"| rework[rework: back to the author]
+  router -->|"a shell line asked about or blocked, or rework ran out"| escalate["escalate: a request in approvals.json"]
+```
+
+A real run on the sample diff, which adds a release script that deploys:
+
+```
+$ node examples/change-review/review.js --state /tmp/review-state examples/change-review/sample.diff
+round 1: escalate (a shell line crosses a red line: gcloud deploy)
+  parse       0.06 ms
+  secrets    13.68 ms
+  shell      13.20 ms
+  size        0.02 ms
+  join        0.01 ms
+  router      0.04 ms
+queued for a human: ap-513a1e36
+  agent-gate approvals approve ap-513a1e36
+```
+
+Each round of rework is the author's next version of the diff, given as the next file on the command
+line. The checks are independent nodes; in this script they share one thread, so the graph shows the
+structure, not a parallel speed-up. Shell lines are read from `*.sh` files, Dockerfile `RUN` lines,
+single-line `run:` steps of GitHub workflows and Makefile recipes. `test/change-review.test.js` covers
+each route, the rework limit and the queued request.
+
 ## Deploy
 
 The LLM gateway ships as a container image, with three ways to run it.
@@ -1203,7 +1244,8 @@ the decision, with no model judging and no tolerance band. And it is evaluated o
 there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 245/245 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
+stopped (351/351 shell guard tests, 245/245 MCP gateway tests, 173/173 LLM gateway tests, 7/7 for
+the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
 
@@ -1256,6 +1298,9 @@ test/llm/*.test.ts                            LLM gateway tests: routing, budget
 test/llm/fake-upstream.ts                     a fake OpenAI-compatible provider for the tests, the example and the demo
 test/llm/fake-secrets.ts                      every fake secret the tests use, in one file
 test/no-network-preload.js                    makes network modules throw, for the no-network test
+test/change-review.test.js                    tests of the change-review example
+examples/change-review/review.js              a change review as a workflow graph: checks, router, approval queue
+examples/change-review/sample.diff            a sample change that the review escalates
 test/SANITIZED.md                             what was changed in the cases before publication
 test/HELDOUT.md                               where the held-out cases come from, and their score
 docs/red-team.md                              the case categories, with counts
