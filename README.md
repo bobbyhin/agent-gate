@@ -712,8 +712,9 @@ agent-gate tools list [--json]                      pinned tool definitions, and
 agent-gate tools show <server>__<tool>              the pinned and the changed definition, to compare
 agent-gate tools accept <server>__<tool>            pin the changed definition, so the tool is listed again
 agent-gate status [--json]                          each running gateway's downstream servers: up, restarting, down or failed
-agent-gate policy suggest [--openapi <spec.json>] [--json]
-                                                    each tool's decision from its name, and a draft policy (see Policy)
+agent-gate policy suggest [--server <name>] [--openapi <spec.json>] [--json]
+                                                    each tool's decision from its name, and a draft policy (see Policy);
+                                                    it starts the config's servers (or only --server) to list their tools
 ```
 
 Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.config.json`).
@@ -1081,7 +1082,11 @@ the legacy rules decide and anything they do not block is asked about, as in the
 the config (or, with `--openapi <spec.json>`, the operations of an OpenAPI document, named by their
 `operationId`), and shows what the policy decides for each one from its name, which tools no rule
 names, and a draft policy: the same rules, an allow rule for the tools whose names read, and
-`"default": "ask"`. A name reads when it starts with `get`, `list`, `read`, `search`, `find`,
+`"default": "ask"`. To list the tools it starts the servers as the gateway would: a local server's
+command runs, with whatever it does when it starts, and a remote one is sent its headers. `--server
+<name>` starts only that one, which is the way to look at one unfamiliar server in a config that has
+others. With `--openapi`, nothing is started, and `--server` names the server that the document
+describes, so that the draft's rule is for it (it can be left out when the config has one server). A name reads when it starts with `get`, `list`, `read`, `search`, `find`,
 `describe`, `show`, `view` or `count` and has no word that changes something; `fetch` is not a read,
 because a URL can carry data out. From an OpenAPI document, the GET and HEAD operations are the
 reads. A real run against the filesystem server, with the example policy:
@@ -2430,7 +2435,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 495 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 496 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
@@ -2438,7 +2443,7 @@ lists with each tool labelled with the decision it should get (`test/gateway/too
 app's tools, names a review wrote to get round red line 2, the calendar tools of a real server held out from it, and the 48 tools of a real Gitea MCP server, recorded), and the
 README's table of example rules checked against `policy.example.json`; a red team of 20 ways to get a
 denied delete done another way (other tools, shell commands, the path written another way); `policy
-suggest` (reads by name, an OpenAPI document, the draft it prints, a server that cannot start, tool names that would be patterns); ten
+suggest` (reads by name, an OpenAPI document, the draft it prints, a server that cannot start, tool names that would be patterns, `--server`); ten
 trajectory fixtures replayed step by step through a running gateway; which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
@@ -2545,7 +2550,7 @@ an evaluation set of whole runs, each replayed and checked step by step. It chec
 not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 495/495 MCP gateway tests, 323/323 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 496/496 MCP gateway tests, 323/323 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for each of the two demo pages, 2/2 for the load
 test), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see

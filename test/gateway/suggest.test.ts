@@ -120,7 +120,7 @@ describe("policy suggest", () => {
 
   it("reads an OpenAPI document: operations named by operationId; GET and HEAD are reads unless the name changes something", () => {
     const spec = JSON.parse(fs.readFileSync(SAMPLE, "utf8")) as unknown;
-    const candidates = openApiCandidates(spec);
+    const candidates = openApiCandidates(spec, "notes");
     assert.deepEqual(
       candidates.map((c) => `${c.http?.method.toUpperCase()} ${c.http?.path} ${c.tool}`),
       [
@@ -138,8 +138,8 @@ describe("policy suggest", () => {
     );
     const report = suggest(policy, raw, candidates);
     assert.deepEqual(report.draft.rules.at(-1), {
-      id: "suggested-reads-api",
-      server: "api",
+      id: "suggested-reads-notes",
+      server: "notes",
       tool: ["listNotes", "getNote", "checkHealth"],
       decision: "allow",
       why: "Suggested by agent-gate policy suggest: these names read. Check each one before you keep it.",
@@ -147,7 +147,7 @@ describe("policy suggest", () => {
     // The example lets createNote and updateNote run unattended; the draft asks.
     const decided = new Map(report.suggestions.map((s) => [s.tool, [s.decision, s.draft]]));
     assert.deepEqual([decided.get("createNote"), decided.get("updateNote"), decided.get("searchNotes")], [["allow", "ask"], ["allow", "ask"], ["allow", "ask"]]);
-    for (const bad of [{ paths: {} }, { openapi: "3.0.0" }, []]) assert.throws(() => openApiCandidates(bad), ConfigError);
+    for (const bad of [{ paths: {} }, { openapi: "3.0.0" }, []]) assert.throws(() => openApiCandidates(bad, "notes"), ConfigError);
   });
 
   it("the CLI lists the downstream servers' tools, and the draft it prints is a policy", async () => {
@@ -164,8 +164,42 @@ describe("policy suggest", () => {
     const report = JSON.parse(json.out) as SuggestReport & { failures: string[] };
     assert.deepEqual([json.code, report.suggestions.length, report.failures], [0, 8, []]);
 
+    // With one server in the config, an OpenAPI document describes that server, and the draft's rule names it.
     const api = await run("policy", "suggest", "--openapi", SAMPLE, "--json", "--config", file);
-    assert.deepEqual([api.code, (JSON.parse(api.out) as SuggestReport).suggestions.map((s) => s.tool).slice(0, 2)], [0, ["listNotes", "createNote"]]);
+    const apiReport = JSON.parse(api.out) as SuggestReport;
+    assert.deepEqual([api.code, apiReport.suggestions.map((s) => s.tool).slice(0, 2)], [0, ["listNotes", "createNote"]]);
+    assert.deepEqual((apiReport.draft.rules.at(-1) as { server: string }).server, "demo");
+  });
+
+  it("--server starts only that server; with --openapi it names the server the document describes", async () => {
+    const file = config([
+      { name: "demo", command: process.execPath, args: [FAKE] },
+      { name: "broken", command: process.execPath, args: [path.join(tmp, "no-such-server.js")] },
+    ]);
+    // Only demo is started, so the broken server is never tried and nothing fails.
+    const one = await run("policy", "suggest", "--server", "demo", "--json", "--config", file);
+    const report = JSON.parse(one.out) as SuggestReport & { failures: string[] };
+    assert.deepEqual([one.code, report.suggestions.length, report.failures, one.err], [0, 8, [], ""]);
+    assert.ok(report.suggestions.every((s) => s.server === "demo"));
+
+    const unknown = await run("policy", "suggest", "--server", "nope", "--config", file);
+    assert.equal(unknown.code, 1);
+    assert.match(unknown.err, /--server "nope" is not a server in .*; it has demo, broken/);
+
+    // Two servers: which one the document describes has to be said.
+    const unnamed = await run("policy", "suggest", "--openapi", SAMPLE, "--config", file);
+    assert.equal(unnamed.code, 1);
+    assert.match(unnamed.err, /with --openapi, name the server that the document describes with --server <name>/);
+    const named = await run("policy", "suggest", "--openapi", SAMPLE, "--server", "broken", "--json", "--config", file);
+    const namedReport = JSON.parse(named.out) as SuggestReport;
+    assert.equal(named.code, 0, "an OpenAPI document starts no server, so the broken one does not matter");
+    assert.deepEqual(namedReport.draft.rules.at(-1), {
+      id: "suggested-reads-broken",
+      server: "broken",
+      tool: ["listNotes", "getNote", "checkHealth"],
+      decision: "allow",
+      why: "Suggested by agent-gate policy suggest: these names read. Check each one before you keep it.",
+    });
   });
 
   it("names a server it could not start, still lists the others, and exits 1; bad input is refused", async () => {
@@ -180,7 +214,7 @@ describe("policy suggest", () => {
 
     const yaml = path.join(tmp, "spec.yaml");
     fs.writeFileSync(yaml, "openapi: 3.0.3\npaths: {}\n");
-    const notJson = await run("policy", "suggest", "--openapi", yaml, "--config", file);
+    const notJson = await run("policy", "suggest", "--openapi", yaml, "--server", "demo", "--config", file);
     assert.equal(notJson.code, 1);
     assert.match(notJson.err, /a YAML document has to be converted to JSON first/);
     assert.equal((await run("policy", "suggest", "--all", "--config", file)).code, 2);

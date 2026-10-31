@@ -54,7 +54,9 @@ const USAGE = `Usage:
   agent-gate tools list [--json] [--config <file>]    pinned tool definitions, and the changed ones withheld
   agent-gate tools show <server>__<tool> [--config <file>]    the pinned and the changed definition
   agent-gate tools accept <server>__<tool> [--config <file>]  pin the changed definition: the tool is listed again
-  agent-gate policy suggest [--openapi <spec.json>] [--json] [--config <file>]  each tool's decision, and a draft policy
+  agent-gate policy suggest [--server <name>] [--openapi <spec.json>] [--json] [--config <file>]
+                                                      each tool's decision, and a draft policy; it starts the
+                                                      config's servers (only --server, when given) to list their tools
 
 "list" shows the requests that are waiting; --all also shows decided, used and expired ones.
 "approve" reads the call back to you and asks you to type the last 4 characters of its id;
@@ -89,7 +91,7 @@ const COMMANDS: Readonly<Record<string, { options: readonly string[]; required?:
   "tools list": { options: ["json"] },
   "tools show": { options: [], id: true },
   "tools accept": { options: [], id: true },
-  "policy suggest": { options: ["json", "openapi"] },
+  "policy suggest": { options: ["json", "openapi", "server"] },
 };
 
 export interface Io {
@@ -138,6 +140,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
         conn: { type: "string" },
         run: { type: "string" },
         openapi: { type: "string" },
+        server: { type: "string" },
         profile: { type: "string" },
         http: { type: "boolean", default: false },
         agent: { type: "string" },
@@ -186,7 +189,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
       if (values.verify) return usageVerify(llmConfigFile, values.json, io);
       return values.by === undefined ? usage(llmConfigFile, values.json, io) : usageBy(llmConfigFile, values.by, values.json, io);
     }
-    if (name === "policy suggest") return await policySuggest(configFile, values.openapi, values.json, io);
+    if (name === "policy suggest") return await policySuggest(configFile, values.openapi, values.server, values.json, io);
     const config = loadConfig(configFile);
     if (name === "status") return statusCommand(config, values.json, io);
     const store = new ApprovalStore(config.stateDir, config.approvalTtlMs);
@@ -772,22 +775,35 @@ function preview(json: string): string {
   return json.length <= PREVIEW_CHARS ? json : `${json.slice(0, PREVIEW_CHARS)}... (${json.length} characters; "approvals show <id>" prints all of it)`;
 }
 
-/** policy suggest: each tool's decision under the config's policy, the tools no rule names, and a draft policy. */
-async function policySuggest(configFile: string, openapi: string | undefined, json: boolean, io: Io): Promise<number> {
+/**
+ * policy suggest: each tool's decision under the config's policy, the tools no rule names, and a draft
+ * policy. To list tools it starts the config's servers, as the gateway would (their commands run, their
+ * headers are sent), or only the one named by --server. With --openapi it starts none: the document's
+ * operations are the tools of the server that --server names (needed unless the config has one server).
+ */
+async function policySuggest(configFile: string, openapi: string | undefined, server: string | undefined, json: boolean, io: Io): Promise<number> {
   const config = loadConfig(configFile);
   const policy = loadPolicy(config.policyFile);
   const raw = JSON.parse(fs.readFileSync(config.policyFile, "utf8")) as unknown;
+  if (server !== undefined && !config.servers.some((s) => s.name === server)) {
+    throw new ConfigError(`--server ${JSON.stringify(server)} is not a server in ${configFile}; it has ${config.servers.map((s) => s.name).join(", ")}`);
+  }
   let candidates: Candidate[];
   let failures: string[] = [];
-  if (openapi === undefined) ({ candidates, failures } = await downstreamCandidates(config));
-  else {
+  if (openapi === undefined) {
+    ({ candidates, failures } = await downstreamCandidates(server === undefined ? config : { ...config, servers: config.servers.filter((s) => s.name === server) }));
+  } else {
+    const described = server ?? (config.servers.length === 1 ? config.servers[0]?.name : undefined);
+    if (described === undefined) {
+      throw new ConfigError(`with --openapi, name the server that the document describes with --server <name>, so the draft's rule is for it (the config has ${config.servers.length} servers)`);
+    }
     let spec: unknown;
     try {
       spec = JSON.parse(fs.readFileSync(openapi, "utf8"));
     } catch (err) {
       throw new ConfigError(`cannot read ${openapi} as JSON (a YAML document has to be converted to JSON first): ${(err as Error).message}`);
     }
-    candidates = openApiCandidates(spec);
+    candidates = openApiCandidates(spec, described);
   }
   const report = suggest(policy, raw, candidates, new Map(config.servers.flatMap((s) => (s.expose ? [[s.name, s.expose] as const] : []))));
   // A server's error text is its own: printed on one line, without control characters.

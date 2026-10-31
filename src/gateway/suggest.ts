@@ -135,8 +135,11 @@ function namesTools(rule: Policy["rules"][number]): boolean {
   return rule.server !== undefined || rule.tool !== undefined || rule.toolWords !== undefined;
 }
 
-/** The operations of an OpenAPI (or Swagger 2) document in JSON, as tools named by their operationId. */
-export function openApiCandidates(spec: unknown, server = "api"): Candidate[] {
+/**
+ * The operations of an OpenAPI (or Swagger 2) document in JSON, as tools of `server` named by their
+ * operationId: the server in the gateway config that serves them, so the draft's rule names it.
+ */
+export function openApiCandidates(spec: unknown, server: string): Candidate[] {
   const doc = object(spec, "the OpenAPI document");
   if (doc.openapi === undefined && doc.swagger === undefined) fail('the OpenAPI document has no "openapi" or "swagger" field');
   const paths = object(doc.paths, "the OpenAPI document's paths");
@@ -155,8 +158,9 @@ export function openApiCandidates(spec: unknown, server = "api"): Candidate[] {
 }
 
 /**
- * Lists the tools of every downstream server in the config, as the gateway would reach them. A server
- * that cannot be reached or listed is named in `failures`.
+ * Lists the tools of every downstream server in the config, as the gateway would reach them: a local
+ * server's command is run (whatever it does when it starts, it does), a remote one is sent its headers.
+ * A server that cannot be reached or listed is named in `failures`.
  */
 export async function downstreamCandidates(config: GatewayConfig, env: NodeJS.ProcessEnv = process.env): Promise<{ candidates: Candidate[]; failures: string[] }> {
   const candidates: Candidate[] = [];
