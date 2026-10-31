@@ -18,7 +18,7 @@ function passed(result: GuardResult): Extract<GuardResult, { action: "pass" }> {
 }
 
 describe("llm-policy.example.json", () => {
-  it("has the nine shipped rules, in this order", () => {
+  it("has the thirteen shipped rules, in this order", () => {
     assert.deepEqual(
       policy.rules.map((r) => [r.id, r.action]),
       [
@@ -31,6 +31,10 @@ describe("llm-policy.example.json", () => {
         ["huggingface-token", "block"],
         ["google-api-key", "block"],
         ["api-key-assignment", "redact"],
+        ["credit-card", "redact"],
+        ["jp-my-number", "redact"],
+        ["us-ssn", "redact"],
+        ["us-itin", "redact"],
       ],
     );
   });

@@ -1334,7 +1334,7 @@ capture groups, only the first group that took part in the match is replaced, so
 `api_key = "..."` keeps its name and quotes, and JSON in tool-call arguments stays valid JSON.
 Block rules are checked first, on the original text, so a redaction cannot hide a blocked secret.
 
-`llm-policy.example.json` ships nine rules:
+`llm-policy.example.json` ships thirteen rules:
 
 | Rule | Matches | Action |
 | --- | --- | --- |
@@ -1347,6 +1347,10 @@ Block rules are checked first, on the original text, so a redaction cannot hide 
 | `huggingface-token` | a Hugging Face access token: `hf_` and exactly 34 letters or digits | block |
 | `google-api-key` | a Google API key: `AIza` and 35 more letters, digits, `-` or `_` | block |
 | `api-key-assignment` | a value given to a name such as `api_key`, `client_secret`, `access_token` or `password`: quoted with 12 or more characters, or unquoted with 16 or more, and containing a digit; only the value is replaced | redact |
+| `credit-card` | a payment card number: 13 to 19 digits starting with 2 to 6, with spaces or dashes or none, that passes the Luhn check | redact |
+| `jp-my-number` | a Japanese Individual Number (My Number): 12 digits, as 4-4-4 with spaces or dashes or none, whose last digit is the check digit of the official formula | redact |
+| `us-ssn` | a US Social Security number written 3-2-4 with dashes or spaces, in the ranges the SSA assigns (never 000, 666 or 900 to 999 first, 00 in the middle or 0000 last) | redact |
+| `us-itin` | a US Individual Taxpayer Identification Number written the same way: 9 first, and 50 to 65, 70 to 88, 90 to 92 or 94 to 99 as the fourth and fifth digits | redact |
 
 The formats that are surely secrets block, because a key that was pasted into a prompt should be
 rotated, not quietly dropped. The service-account rule comes before `private-key`, so a pasted
@@ -1357,6 +1361,30 @@ so that long `hf_...` names in code are not blocked. The heuristic rule redacts:
 should not refuse a whole request. Every rule is also tested against prose and code that must
 pass untouched, such as `const apiKey = process.env.OPENAI_API_KEY;`,
 `password = get_password_from_vault()`, a public key block and `"api_key": "<your-api-key-here>"`.
+
+The last four find personal numbers that a support or HR agent may paste into a prompt. A regex alone
+cannot tell a card number from a 16-digit order id, so each of these rules names a `validator`: the
+regex finds what is shaped like the number, and the validator says whether it can be one. Card numbers
+must pass the Luhn check; a My Number must end in the check digit that the Ministry of Internal Affairs
+and Communications defines (Ordinance No. 85 of 2014, article 5); an SSN or an ITIN must be in the
+ranges that the SSA or the IRS assigns. A number of the right shape picked at random passes the card or
+the My Number check one time in ten. A number must also stand on its own: the tail of a UUID or of
+another hyphenated id is not read as one. They redact rather than block, so that a conversation about an
+order goes on without the number in it. A validator holds wherever its rule is used: for a block rule,
+on the answer, and in the MCP gateway's result guard. `src/llm/validators.ts` cites its sources; every
+number the tests use is built at run time with its check digit computed, so none appears in the
+repository.
+
+**What it is not for.** The threat matrix (`test/llm/threat-matrix.json`) holds 30 prompts: secrets,
+personal numbers, prompt injections, jailbreaks and requests for dangerous instructions, each with what
+the leak guard does with it, and the leak guard covers 15 of them: every secret format in the policy,
+the four personal numbers, and an order number that is left alone because it fails the card check. The
+other 15 pass untouched, and each row says why: a secret that is encoded or split across two messages,
+an email address, a phone number, a name and an address, and every injection, jailbreak and harmful
+request. Those are matters of meaning that a regex cannot read; they belong to a classifier, to the
+model provider's safety layer, or, for what an agent does next, to the MCP gateway's policy.
+`test/llm/threat-matrix.test.ts` runs every row, so a gap cannot close, or open, without the matrix
+saying so.
 
 From the run above (headers shortened):
 
@@ -1378,7 +1406,8 @@ The upstream received `Is this config line right? api_key = "[REDACTED:api-key-a
 
 The guard scans message `content` (a string, or the `text` of text parts) and the `arguments` of
 assistant tool calls. It does not scan image, audio or file parts, tool definitions or other request
-fields. A rule is `{ "id", "regex", "flags", "action", "description" }`; `flags` may use `i`, `m`,
+fields. A rule is `{ "id", "regex", "flags", "action", "description", "validator" }` (the last two
+optional); `flags` may use `i`, `m`,
 `s` and `u`, as in the MCP policy, and a regex that matches empty text is refused at startup.
 
 **The answer goes through the same rules.** A model can write a secret it was never sent in the
@@ -1832,7 +1861,7 @@ obeys, and the gateway blocks the call before it reaches the server. Another den
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 260 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 300 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file, a settle that comes
 twice or after its reservation expired, calls per minute and run caps); a leak-guard table
@@ -1858,7 +1887,11 @@ again once its window moves on, each cut in the usage log; the end-to-end run al
 checks that `usage --verify` finds the usage log and the ledger in agreement. A response-guard
 suite runs every block rule on a request and on an answer, and a live gateway against providers
 whose answers carry a secret (withheld, booked) or a key assignment (redacted). A failure suite
-damages the ledger and the usage log and turns the upstream traceparent off. A streaming suite runs two
+damages the ledger and the usage log and turns the upstream traceparent off. A PII suite checks each
+validator (the Luhn and My Number check digits, the SSN and ITIN ranges) and the four rules on every way
+their numbers are written, with look-alikes that fail their check left alone, and that a validator
+holds for a block rule and in the MCP result guard; the threat matrix runs its 30 rows; and the README's
+rule table is checked against the policy. A streaming suite runs two
 live gateways, one holding streams and one relaying them, against fakes that stream: the events passed
 on as they came, the usage chunk asked for and kept from a client that did not ask, a secret split
 across two chunks (withheld when held, passed when relayed), tool-call fragments put back together, a
@@ -1893,7 +1926,7 @@ audit log; the end-to-end test scores its own run that way. It checks which call
 the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 260/260 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 300/300 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1926,6 +1959,7 @@ src/llm/stream.ts                             streamed answers: reads the events
 src/llm/budget.ts                             the cost estimate and the ledger in <stateDir>/ledger.json
 src/llm/repeats.ts                            repeatMax: the same request let through at most so often, in memory
 src/llm/leak-guard.ts                         the leak guard (pure): block or redact secrets in messages
+src/llm/validators.ts                         checks behind the PII rules: Luhn, My Number check digit, SSN and ITIN ranges
 src/llm/usage-log.ts                          the usage log, <stateDir>/usage.jsonl
 src/llm/usage-report.ts                       reads the usage log back: agent-gate usage --by
 src/llm/metrics.ts                            GET /metrics: running totals in the Prometheus text format
@@ -1958,6 +1992,8 @@ test/gateway/fake-http-downstream.ts          a fake remote MCP server over Stre
 test/llm/*.test.ts                            LLM gateway tests: routing, budget, leak guard, upstream, end to end, deploy configs
 test/llm/fake-upstream.ts                     a fake OpenAI-compatible provider for the tests, the example and the demo
 test/llm/fake-secrets.ts                      every fake secret the tests use, in one file
+test/llm/fake-pii.ts                          made-up personal numbers, built at run time with their check digits
+test/llm/threat-matrix.json                   30 risky prompts and what the leak guard does with each, gaps included
 test/no-network-preload.js                    makes network modules throw, for the no-network test
 test/change-review.test.js                    tests of the change-review example
 examples/change-review/review.js              a change review as a workflow graph: checks, router, approval queue

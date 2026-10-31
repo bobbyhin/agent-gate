@@ -8,6 +8,9 @@
 //           api_key = "..." keeps its name and quotes, and JSON in tool-call arguments stays JSON.
 // Block rules are checked first, on the original text, so a redaction can never hide a secret that
 // a block rule would have caught. guardMessages() is a pure function: no I/O, no clock.
+// A rule may name a "validator" (src/llm/validators.ts): then a match counts only when the validator
+// accepts it, for blocking and for redacting alike, so that a 16-digit order number is not taken for
+// a card number unless its checksum says it could be one.
 //
 // Scanned: message "content" (a string, or the "text" of text parts) and the "arguments" string of
 // assistant tool calls. Not scanned: images, audio and file parts, tool definitions, and any other
@@ -18,6 +21,7 @@
 // on a literal prefix, as the shipped ones are.
 
 import { array, fail, object, onlyKeys, text } from "../gateway/validate.js";
+import { VALIDATOR_NAMES, VALIDATORS, type ValidatorName } from "./validators.js";
 
 export type LeakAction = "block" | "redact";
 export const LEAK_ACTIONS: readonly LeakAction[] = ["block", "redact"];
@@ -26,8 +30,31 @@ export interface LeakRule {
   readonly id: string;
   readonly action: LeakAction;
   readonly description?: string;
-  /** Without the g flag, so test() keeps no state between calls. */
+  /**
+   * Without the g flag, so test() keeps no state between calls. For a rule with a validator, test() is
+   * true only when some match passes it (a ValidatedPattern), so every caller of test() honours it.
+   */
   readonly pattern: RegExp;
+  readonly validator?: ValidatorName;
+}
+
+/** A rule's regex when the rule has a validator: test() looks for a match that the validator accepts. */
+class ValidatedPattern extends RegExp {
+  // Methods that build a new regex from this one (split, matchAll) get a plain RegExp.
+  static override get [Symbol.species](): RegExpConstructor {
+    return RegExp;
+  }
+  constructor(
+    source: string,
+    flags: string,
+    readonly valid: (match: string) => boolean,
+  ) {
+    super(source, flags);
+  }
+  override test(text: string): boolean {
+    for (const match of text.matchAll(new RegExp(this.source, `${this.flags}g`))) if (this.valid(match[0])) return true;
+    return false;
+  }
 }
 
 export interface LeakPolicy {
@@ -61,19 +88,22 @@ export function guardMessages(policy: LeakPolicy, messages: readonly unknown[]):
 }
 
 /** The policy's redact rules, compiled for redactText(). */
-export function redactRules(policy: LeakPolicy): Array<{ id: string; all: RegExp }> {
+export function redactRules(policy: LeakPolicy): Array<{ id: string; all: RegExp; valid?: (match: string) => boolean }> {
   // g to find every match, d for the positions of capture groups. matchAll() works on a copy of
   // the regex, so one per call is safe.
-  return policy.rules.filter((rule) => rule.action === "redact").map((rule) => ({ id: rule.id, all: new RegExp(rule.pattern.source, `${rule.pattern.flags}gd`) }));
+  return policy.rules
+    .filter((rule) => rule.action === "redact")
+    .map((rule) => ({ id: rule.id, all: new RegExp(rule.pattern.source, `${rule.pattern.flags}gd`), ...(rule.validator ? { valid: VALIDATORS[rule.validator] } : {}) }));
 }
 
 /** Replaces what each redact rule matches in `original` with [REDACTED:<id>], counting per rule. */
-export function redactText(rules: ReadonlyArray<{ id: string; all: RegExp }>, original: string, counts: Map<string, number>): string {
+export function redactText(rules: ReadonlyArray<{ id: string; all: RegExp; valid?: (match: string) => boolean }>, original: string, counts: Map<string, number>): string {
   let t = original;
   for (const rule of rules) {
     let out = "";
     let done = 0;
     for (const match of t.matchAll(rule.all)) {
+      if (rule.valid && !rule.valid(match[0])) continue; // shaped like one, but its check says it is not
       // The first capture group that took part in the match, or else the whole match.
       const span = match.indices?.slice(1).find((s) => s !== undefined) ?? match.indices?.[0];
       if (!span || span[0] === span[1]) continue;
@@ -164,7 +194,7 @@ export function parseLeakPolicy(json: unknown): LeakPolicy {
   const rules = array(policy.leakGuard, "policy.leakGuard").map((raw, i) => {
     const at = `policy.leakGuard[${i}]`;
     const rule = object(raw, at);
-    onlyKeys(rule, ["id", "regex", "flags", "action", "description"], at);
+    onlyKeys(rule, ["id", "regex", "flags", "action", "description", "validator"], at);
     const id = text(rule.id, `${at}.id`);
     // The id goes into [REDACTED:<id>], an HTTP header and the usage log, so keep it plain.
     if (!RULE_ID.test(id)) fail(`${at}.id must be 1 to 64 letters, digits, ".", "_" or "-", starting with a letter or digit`);
@@ -181,7 +211,14 @@ export function parseLeakPolicy(json: unknown): LeakPolicy {
       fail(`${at}.regex is not a valid regular expression: ${(err as Error).message}`);
     }
     if (pattern.test("")) fail(`${at}.regex matches empty text, so it would match every request`);
-    const compiled: LeakRule = { id, action: rule.action as LeakAction, pattern };
+    if (rule.validator !== undefined && !VALIDATOR_NAMES.includes(rule.validator as ValidatorName)) fail(`${at}.validator must be one of ${VALIDATOR_NAMES.join(", ")}`);
+    const validator = rule.validator as ValidatorName | undefined;
+    const compiled: LeakRule = {
+      id,
+      action: rule.action as LeakAction,
+      pattern: validator ? new ValidatedPattern(pattern.source, pattern.flags, VALIDATORS[validator]) : pattern,
+      ...(validator ? { validator } : {}),
+    };
     return rule.description === undefined ? compiled : { ...compiled, description: text(rule.description, `${at}.description`) };
   });
   return { rules };

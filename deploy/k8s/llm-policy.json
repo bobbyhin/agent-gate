@@ -54,6 +54,34 @@
       "flags": "i",
       "regex": "(?:api[_-]?key|api[_-]?secret|secret[_-]?(?:access[_-]?)?key|client[_-]?secret|(?:access|auth|refresh|bearer)[_-]?token|password|passwd)[\"']?\\s*[:=]\\s*(?:\"((?=[^\"\\s]*[0-9])[^\"\\s]{12,})\"|'((?=[^'\\s]*[0-9])[^'\\s]{12,})'|((?=[A-Za-z0-9_+/=-]*[0-9])[A-Za-z0-9_+/=-]{16,})(?![A-Za-z0-9_.(+/=-]))",
       "description": "A value given to a name such as api_key, client_secret, access_token or password: quoted with 12+ characters, or unquoted with 16+, and containing a digit. Only the value is replaced."
+    },
+    {
+      "id": "credit-card",
+      "action": "redact",
+      "regex": "(?<![\\w-])[2-6](?:[ -]?\\d){12,18}(?![\\w-])",
+      "validator": "luhn",
+      "description": "A payment card number: 13 to 19 digits starting with 2 to 6, spaces or dashes allowed, that passes the Luhn check."
+    },
+    {
+      "id": "jp-my-number",
+      "action": "redact",
+      "regex": "(?<![\\w-])\\d{4}[ -]?\\d{4}[ -]?\\d{4}(?![\\w-])",
+      "validator": "jp-my-number",
+      "description": "A Japanese Individual Number (My Number): 12 digits, 4-4-4 with spaces or dashes allowed, whose last digit is the check digit of the official formula."
+    },
+    {
+      "id": "us-ssn",
+      "action": "redact",
+      "regex": "(?<![\\w-])\\d{3}[- ]\\d{2}[- ]\\d{4}(?![\\w-])",
+      "validator": "us-ssn",
+      "description": "A US Social Security number written 3-2-4 with dashes or spaces, in the ranges the SSA assigns: not 000, 666 or 900-999 first, not 00 in the middle, not 0000 last."
+    },
+    {
+      "id": "us-itin",
+      "action": "redact",
+      "regex": "(?<![\\w-])9\\d{2}[- ]\\d{2}[- ]\\d{4}(?![\\w-])",
+      "validator": "us-itin",
+      "description": "A US ITIN written the same way: 9 first, and 50-65, 70-88, 90-92 or 94-99 as the fourth and fifth digits."
     }
   ]
 }
