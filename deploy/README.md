@@ -236,6 +236,42 @@ curl -s -X POST "$URL/v1/chat/completions" -H "X-Serverless-Authorization: Beare
 Then `terraform destroy` (after `deletion_protection = false`), and record what ran in
 [What was checked](#what-was-checked).
 
+### A smoke test under load, after a deploy
+
+`npm run loadtest -- --url` loads a gateway that is already running, from a checkout of this
+repository (after `npm run build`). Unlike the three requests above, it makes real calls: every 200
+answer went to the provider behind the route, and the provider bills it. Add a gateway key made for
+the test to the config, with a small `dailyUsd` (a few cents), and keep the numbers low:
+
+```
+URL=$(terraform output -raw service_url)
+export ID_TOKEN="Bearer $(gcloud auth print-identity-token)"
+read -rs SMOKE_KEY && export SMOKE_KEY   # paste the test key (not an agent's); it is not echoed or kept in history
+npm run loadtest -- --url "$URL" --key-env SMOKE_KEY \
+    --header-env X-Serverless-Authorization=ID_TOKEN --model small --requests 20 --concurrency 5
+```
+
+Tokens and keys are read from the environment variables that `--key-env` and `--header-env` name,
+so they never appear on the command line. Before the load, one request without the gateway key must
+get the gateway's own 401 (`invalid_api_key`): that shows the request got through what stands in
+front of the gateway (Cloud Run's IAM check here, a load balancer elsewhere) and reached it. A 401 or
+403 from anything else means a header did not make it through; on Cloud Run the ID token goes in
+`X-Serverless-Authorization` so that `Authorization` can carry the gateway key. Then come the
+requests. The run fails on a 5xx, a dropped connection, or a refusal that is not one of the
+gateway's named stop rules, and prints the latency and the sum of the `x-agent-gate-cost-usd`
+headers. It cannot see the ledger, which is in the bucket; to check it against the usage log, copy
+both down and run `agent-gate usage --verify` on the copies:
+
+```
+mkdir -p smoke-state
+gcloud storage cp gs://PROJECT_ID-llm-gateway-state/ledger.json gs://PROJECT_ID-llm-gateway-state/usage.jsonl smoke-state/
+agent-gate usage --verify --config smoke.config.json   # a copy of the deployed config with "stateDir": "smoke-state"
+```
+
+The same command without `--url` runs the whole check on the local machine with a fake upstream,
+for nothing; the numbers it gives there are in the main README
+([Performance](../README.md#performance)).
+
 Running it:
 
 - **Config or policy change:** `terraform apply` writes a new version of the file secret. The service

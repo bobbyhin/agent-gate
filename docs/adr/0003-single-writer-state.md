@@ -53,9 +53,21 @@ transactional store (see the upgrade path).
   seconds; a lost node means waiting until the volume is released and the pod starts on another
   node, in the same zone if the disk is zonal, which can take minutes. Each rollout has a gap of a few seconds (Recreate). On Cloud Run, a request
   after an idle spell waits for a cold start, since the minimum is 0.
-- **No horizontal scaling.** Throughput is what one Node process gets. On Cloud Run it is lower: every
-  ledger update is several object operations on Cloud Storage, done with synchronous file calls that
-  block the event loop, so expect a few calls per second at most. This has not been measured.
+- **No horizontal scaling.** Throughput is what one Node process gets, and the ledger sets it.
+  Measured on a laptop's local SSD on 31 Oct 2026 (`npm run bench` and `npm run loadtest`; the tables
+  are in the README's [Performance](../../README.md#performance) section): one ledger write takes about
+  5 ms, 4 of them the `fsync` that makes it durable. A call that is let through costs two writes
+  (reserve and settle), and a refused call one, because `reserve()` rewrites the file either way. The
+  writes are synchronous, so they hold up the event loop, `/healthz` included: with 100 calls at once,
+  half of the calls let through waited more than half a second. The file also grows with traffic:
+  each settled reservation id stays in it for 302.5 s (so that a second settle books nothing), and
+  every write rewrites all of it. Over a sustained run of 15,000 calls, the rate fell from 84 to 39
+  calls a second as the file grew to 750 KiB, and `/healthz` took up to 1.7 s. So one process keeps up
+  a few dozen calls a second there. On Cloud Run, every ledger update is several object operations on
+  Cloud Storage instead, done with the same synchronous calls; that has not been measured, and it will
+  be slower. Ways to raise it on one host, none of them tried: not rewriting the ledger for a call it
+  refuses, keeping the settled ids out of the file that every call rewrites, and doing the writes off
+  the event loop so that `/healthz` stays quick.
 - **"At most one" is not strict on Cloud Run.** Cloud Run documents that the maximum can be exceeded
   for a brief period, for example during a traffic spike. In such a window two instances can each
   book calls, one can overwrite the other's bookings, and a cap can be passed by the calls made in
