@@ -36,6 +36,8 @@ export interface Verdict {
   why: string;
   /** For an ask: how long the approval request lives (the rule's ttlMinutes). Absent: the config's approvalTtlHours. */
   ttlMs?: number;
+  /** For an ask: a standing approval (a bounded grant, ADR 0006) may answer it. Only rules that say so. */
+  standing?: true;
 }
 
 type Test = (value: string) => boolean;
@@ -145,7 +147,7 @@ function shellVerdict(rule: string, argument: string, call: ToolCall): Verdict {
 
 // ── parsing ─────────────────────────────────────────────────────────────────────────────────
 
-const MATCH_KEYS = ["id", "server", "tool", "toolWords", "args", "decision", "why", "ttlMinutes"] as const;
+const MATCH_KEYS = ["id", "server", "tool", "toolWords", "args", "decision", "why", "ttlMinutes", "standing"] as const;
 const SHELL_KEYS = ["id", "type", "server", "tool", "toolWords", "args", "argument", "ttlMinutes"] as const;
 
 /** Checks policy JSON and compiles it. Throws ConfigError naming the bad field. */
@@ -188,6 +190,11 @@ function compileRule(raw: unknown, at: string, ids: Set<string>): CompiledRule {
   }
   const fixed: Verdict = { decision: decision(rule.decision, `${at}.decision`), rule: id, why: text(rule.why, `${at}.why`) };
   if (ttlMs !== undefined && fixed.decision !== "ask") fail(`${at}.ttlMinutes only applies to a rule whose decision is ask`);
+  if (rule.standing !== undefined) {
+    if (rule.standing !== true && rule.standing !== false) fail(`${at}.standing must be true or false`);
+    if (rule.standing && fixed.decision !== "ask") fail(`${at}.standing only applies to a rule whose decision is ask`);
+    if (rule.standing) fixed.standing = true;
+  }
   return { ...match, verdict: () => withTtl({ ...fixed }) };
 }
 

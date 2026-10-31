@@ -4,7 +4,7 @@
     {
       "id": "no-self-approval",
       "tool": ["run_command", "run_shell_command", "execute_command", "exec", "shell", "shell_exec", "bash"],
-      "args": { "command": { "regex": "approvals\\s+(approve|deny)\\b|\\.agent-gate\\b" } },
+      "args": { "command": { "regex": "approvals\\s+(approve|deny|grant)\\b|\\.agent-gate\\b" } },
       "decision": "block",
       "why": "An agent must not answer its own approval requests or touch the gateway's state."
     },
@@ -62,14 +62,16 @@
       "id": "sql-write",
       "args": { "sql": { "regex": "\\b(?:insert|update|delete|merge|upsert|into|drop|alter|truncate|create|grant|revoke|copy|call|exec|execute)\\b|;\\s*\\S", "flags": "i" } },
       "decision": "ask",
-      "why": "This SQL may change data or run more than one statement: it has a write keyword, or more text after a semicolon."
+      "why": "This SQL may change data or run more than one statement: it has a write keyword, or more text after a semicolon.",
+      "standing": true
     },
     {
       "id": "browser-input",
       "tool": ["browser_*", "puppeteer_*", "playwright_*"],
       "toolWords": ["click", "type", "press", "fill", "submit", "select", "drag", "upload", "evaluate", "run code", "dialog"],
       "decision": "ask",
-      "why": "This browser action clicks, types or submits. The gateway sees only the tool's name, not what it acts on."
+      "why": "This browser action clicks, types or submits. The gateway sees only the tool's name, not what it acts on.",
+      "standing": true
     },
     {
       "id": "browser-read",

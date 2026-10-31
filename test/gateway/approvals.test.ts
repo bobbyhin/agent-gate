@@ -93,6 +93,58 @@ describe("ApprovalStore", () => {
     });
   });
 
+  describe("standing approvals (ADR 0006)", () => {
+    const sql = (text: string, standing = true) => ({ ...request({ sql: text, db: "dev" }, "execute_sql"), rule: "sql-write", standing });
+    const grant = (over: Partial<Parameters<ApprovalStore["grant"]>[0]> = {}) =>
+      store.grant({ server: "demo", tool: "execute_sql", args: { sql: "INSERT INTO events*" }, maxUses: 2, ttlMs: HOUR, by: "alice", ...over });
+
+    it("covers matching calls up to maxUses, then the next one waits for a human", () => {
+      const g = grant();
+      assert.match(g.id, /^sa-[0-9a-f]{8}$/);
+      for (const n of [1, 2]) {
+        const r = store.resolveCall(sql(`INSERT INTO events VALUES (${n})`));
+        assert.deepEqual([r.kind, r.kind === "standing" && r.grant.id, r.kind === "standing" && r.grant.used], ["standing", g.id, n]);
+      }
+      assert.equal(store.resolveCall(sql("INSERT INTO events VALUES (3)")).kind, "pending", "used up");
+      assert.equal(store.getStanding(g.id).used, 2);
+    });
+
+    it("asks again for: an argument outside the pattern, a missing or non-string argument, another tool, after expiry, after a revoke", () => {
+      const g = grant({ maxUses: 100 });
+      assert.equal(store.resolveCall(sql("DELETE FROM events")).kind, "pending", "outside the pattern");
+      assert.equal(store.resolveCall({ ...request({ db: "dev" }, "execute_sql"), standing: true }).kind, "pending", "argument missing");
+      assert.equal(store.resolveCall({ ...request({ sql: 42 }, "execute_sql"), standing: true }).kind, "pending", "not a string");
+      assert.equal(store.resolveCall({ ...request({ sql: "INSERT INTO events VALUES (1)" }, "run_sql"), standing: true }).kind, "pending", "another tool");
+      assert.equal(store.resolveCall(sql("insert into EVENTS values (9)")).kind, "standing", "globs ignore case, as in policy rules");
+      store.revoke(g.id, { by: "alice" });
+      assert.equal(store.resolveCall(sql("INSERT INTO events VALUES (2)")).kind, "pending", "revoked");
+      assert.throws(() => store.revoke(g.id), /already revoked/);
+      const short = grant({ ttlMs: HOUR });
+      now += HOUR;
+      assert.equal(store.resolveCall(sql("INSERT INTO events VALUES (3)")).kind, "pending", "expired");
+      assert.equal(store.getStanding(short.id).used, 0);
+    });
+
+    it("answers only rules that allow it, never over a denial, and after an exact approval", () => {
+      const g = grant({ maxUses: 100 });
+      assert.equal(store.resolveCall(sql("INSERT INTO events VALUES (1)", false)).kind, "pending", "the rule does not allow standing approvals");
+      assert.equal(store.resolveAsk(sql("INSERT INTO events VALUES (5)")).kind, "pending", "resolveAsk never uses them");
+      const denied = store.resolveCall(sql("INSERT INTO events VALUES (6)", false));
+      store.deny(denied.kind === "pending" ? denied.approval.id : "");
+      assert.equal(store.resolveCall(sql("INSERT INTO events VALUES (6)")).kind, "denied", "a denial of the exact call wins");
+      const exact = store.resolveCall(sql("INSERT INTO events VALUES (7)", false));
+      store.approve(exact.kind === "pending" ? exact.approval.id : "");
+      assert.equal(store.resolveCall(sql("INSERT INTO events VALUES (7)")).kind, "approved", "the exact approval is used first");
+      assert.equal(store.getStanding(g.id).used, 0);
+    });
+
+    it("refuses unbounded grants", () => {
+      for (const over of [{ maxUses: 0 }, { maxUses: 101 }, { maxUses: 1.5 }, { ttlMs: 0 }, { ttlMs: 169 * HOUR }, { ttlMs: Number.NaN }]) {
+        assert.throws(() => grant(over), /--uses must be|--hours must be/, JSON.stringify(over));
+      }
+    });
+  });
+
   it("queues a call once, approves it, lets it through exactly once, then asks again", () => {
     const first = store.resolveAsk(request({ path: "a.txt" }));
     assert.equal(first.kind, "pending");

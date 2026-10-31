@@ -107,16 +107,21 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
         return errorResult(blockedText(verdict));
       case "ask": {
         const files = config.fileBinding ? bindFiles(call.args, config.fileBinding) : undefined;
-        const outcome = approvals.resolveAsk({
+        const outcome = approvals.resolveCall({
           ...call,
           argsHash,
           rule: verdict.rule,
           why: verdict.why,
           ...(verdict.ttlMs !== undefined ? { ttlMs: verdict.ttlMs } : {}),
           ...(files ? { files } : {}),
+          ...(verdict.standing ? { standing: true } : {}),
         });
         if (outcome.kind === "approved") {
           record(true, outcome.approval.id);
+          return undefined;
+        }
+        if (outcome.kind === "standing") {
+          record(true, outcome.grant.id); // the audit line names the standing approval that let it through
           return undefined;
         }
         record(false, outcome.approval.id);

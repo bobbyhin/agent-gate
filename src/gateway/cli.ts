@@ -10,7 +10,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { formatUsd } from "../llm/budget.js";
 import { loadLeakPolicy, loadLlmConfig } from "../llm/config.js";
 import { openLedger, startLlmGateway } from "../llm/server.js";
-import { ApprovalError, ApprovalStore, canonicalJson, cleanNote, isLive, type Approval, type Confirmation } from "./approvals.js";
+import { ApprovalError, ApprovalStore, canonicalJson, cleanNote, isLive, type Approval, type Confirmation, type StandingApproval } from "./approvals.js";
 import { AuditLog, type ApprovalEvent } from "./audit.js";
 import { loadConfig, loadPolicy, type GatewayConfig } from "./config.js";
 import { bindFiles } from "./files.js";
@@ -24,12 +24,16 @@ const USAGE = `Usage:
   agent-gate approvals approve <id> [--note <text>] [--yes] [--config <file>]
   agent-gate approvals deny <id> [--reason <text>] [--config <file>]
   agent-gate approvals stats [--json] [--config <file>]   decisions per rule: counts, wait, deny rate
+  agent-gate approvals grant <server>__<tool> --uses <n> --hours <h> [--arg <name>=<glob>]... [--note <text>] [--config <file>]
+  agent-gate approvals grants [--all] [--json] [--config <file>]   standing approvals
   agent-gate llm serve [--config <file>]              run the LLM gateway (HTTP)
   agent-gate usage [--json] [--config <file>]         LLM spend per gateway key: today, this month, caps
 
 "list" shows the requests that are waiting; --all also shows decided, used and expired ones.
 "approve" reads the call back to you and asks you to type the last 4 characters of its id;
 --yes skips that, for scripts.
+"grant" makes a standing approval: up to <n> calls to one tool within <h> hours, whose listed
+arguments match their globs; only policy rules with "standing": true use it. "deny sa-..." revokes it.
 A deny --reason is shown to the agent the next time it makes the call; an approve --note is kept
 with the approval. Both are stored, with the OS user who ran the command, in approvals.json and
 in the audit log.
@@ -74,6 +78,9 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
         reason: { type: "string" },
         note: { type: "string" },
         yes: { type: "boolean", default: false },
+        uses: { type: "string" },
+        hours: { type: "string" },
+        arg: { type: "string", multiple: true },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -90,13 +97,15 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
   const llmConfigFile = values.config ?? process.env.AGENT_GATE_LLM_CONFIG ?? "llm-gateway.config.json";
   const [command, action, id, ...extra] = positionals;
   const isServe = command === "serve" && action === undefined;
+  const isGrant = action === "grant";
   const isApprovals =
     command === "approvals" &&
     extra.length === 0 &&
-    (action === "list" || action === "stats" ? id === undefined : ["show", "approve", "deny"].includes(action ?? "") && id !== undefined) &&
+    (action === "list" || action === "stats" || action === "grants" ? id === undefined : ["show", "approve", "deny", "grant"].includes(action ?? "") && id !== undefined) &&
     (values.reason === undefined || action === "deny") &&
-    (values.note === undefined || action === "approve") &&
-    (!values.yes || action === "approve");
+    (values.note === undefined || action === "approve" || isGrant) &&
+    (!values.yes || action === "approve") &&
+    (isGrant ? values.uses !== undefined && values.hours !== undefined : values.uses === undefined && values.hours === undefined && values.arg === undefined);
   const isLlmServe = command === "llm" && action === "serve" && id === undefined;
   const isUsage = command === "usage" && action === undefined;
   if (!isServe && !isApprovals && !isLlmServe && !isUsage) {
@@ -113,8 +122,14 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
     const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"));
     if (action === "list") return list(store, values.all, values.json, io);
     if (action === "stats") return stats(store, audit.file, values.json, io);
+    if (action === "grants") return grants(store, values.all, values.json, io);
+    if (action === "grant") return grant(store, audit, config, id as string, values, io);
     if (action === "show") {
-      io.out(`${JSON.stringify(store.get(id as string), null, 2)}\n`);
+      io.out(`${JSON.stringify((id as string).startsWith("sa-") ? store.getStanding(id as string) : store.get(id as string), null, 2)}\n`);
+    } else if (action === "deny" && (id as string).startsWith("sa-")) {
+      const revoked = store.revoke(id as string, { by: currentUser(), note: values.reason });
+      writeStanding(audit, revoked, "revoked");
+      io.out(`revoked ${revoked.id}: it allows nothing more (${revoked.used} of ${revoked.maxUses} uses were spent).\n`);
     } else if (action === "approve") {
       const request = store.get(id as string);
       let confirmation: Confirmation = "--yes";
@@ -227,6 +242,67 @@ function list(store: ApprovalStore, all: boolean, json: boolean, io: Io): number
     );
   }
   return 0;
+}
+
+/** approvals grant <server>__<tool> --uses <n> --hours <h> [--arg name=glob]... : a standing approval (ADR 0006). */
+function grant(store: ApprovalStore, audit: AuditLog, config: GatewayConfig, name: string, values: { uses?: string; hours?: string; arg?: string[]; note?: string }, io: Io): number {
+  const at = name.indexOf(SEPARATOR);
+  if (at <= 0 || at + SEPARATOR.length === name.length) {
+    io.err(`agent-gate: name the tool as <server>${SEPARATOR}<tool>, as the agent sees it\n`);
+    return 2;
+  }
+  const server = name.slice(0, at);
+  const tool = name.slice(at + SEPARATOR.length);
+  if (!config.servers.some((s) => s.name === server)) throw new ApprovalError(`the config has no server named "${server}"`);
+  const args: Record<string, string> = {};
+  for (const spec of values.arg ?? []) {
+    const eq = spec.indexOf("=");
+    if (eq <= 0 || eq === spec.length - 1) {
+      io.err(`agent-gate: --arg takes <name>=<glob>, for example --arg "repo=octo/agent-gate"\n`);
+      return 2;
+    }
+    args[spec.slice(0, eq)] = spec.slice(eq + 1);
+  }
+  const granted = store.grant({ server, tool, args, maxUses: Number(values.uses), ttlMs: Number(values.hours) * 3_600_000, by: currentUser(), note: values.note });
+  writeStanding(audit, granted, "granted");
+  const pattern = Object.entries(args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ");
+  io.out(
+    `granted ${granted.id}: up to ${granted.maxUses} call(s) to ${server}${SEPARATOR}${tool}${pattern ? ` with ${pattern}` : " with any arguments"}, until ${granted.expiresAt}.\n` +
+      `Only rules with "standing": true in the policy use it, and a denial of a call still wins. Revoke it with: agent-gate approvals deny ${granted.id}\n`,
+  );
+  return 0;
+}
+
+function grants(store: ApprovalStore, all: boolean, json: boolean, io: Io): number {
+  const now = Date.now();
+  const live = (g: StandingApproval) => g.status === "active" && g.used < g.maxUses && now < Date.parse(g.expiresAt);
+  const shown = store.standing().filter((g) => all || live(g));
+  if (json) {
+    io.out(`${JSON.stringify(shown, null, 2)}\n`);
+    return 0;
+  }
+  if (shown.length === 0) io.out(all ? "No standing approvals.\n" : "No standing approvals are in force.\n");
+  for (const g of shown) {
+    const state = live(g) ? "active" : g.status === "revoked" ? "revoked" : g.used >= g.maxUses ? "used up" : "expired";
+    const pattern = Object.entries(g.args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ") || "any arguments";
+    io.out(`${g.id}  ${state}  ${g.server}${SEPARATOR}${g.tool}  ${pattern}\n  uses:    ${g.used} of ${g.maxUses}\n  until:   ${g.expiresAt}${g.decidedBy ? `  by ${g.decidedBy}` : ""}\n${g.decisionNote ? `  note:    ${g.decisionNote}\n` : ""}\n`);
+  }
+  return 0;
+}
+
+function writeStanding(audit: AuditLog, g: StandingApproval, decision: "granted" | "revoked"): void {
+  audit.writeStanding({
+    id: g.id,
+    decision,
+    server: g.server,
+    tool: g.tool,
+    args: g.args,
+    maxUses: g.maxUses,
+    used: g.used,
+    expiresAt: g.expiresAt,
+    ...(g.decidedBy ? { decidedBy: g.decidedBy } : {}),
+    ...(g.decisionNote ? { note: g.decisionNote } : {}),
+  });
 }
 
 /** The OS user running the CLI, recorded as who decided. */

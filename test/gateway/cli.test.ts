@@ -40,6 +40,11 @@ describe("agent-gate CLI", () => {
     ["approvals", "approve", "ap-12345678", "--reason", "a reason belongs to deny"],
     ["approvals", "deny", "ap-12345678", "--note", "a note belongs to approve"],
     ["approvals", "deny", "ap-12345678", "--yes"],
+    ["approvals", "grant", "demo__execute_sql", "--uses", "2"],
+    ["approvals", "grant", "demo__execute_sql", "--hours", "1"],
+    ["approvals", "approve", "ap-12345678", "--uses", "2"],
+    ["approvals", "list", "--arg", "sql=x"],
+    ["approvals", "grants", "extra"],
     ["approvals", "list", "--reason", "x"],
     ["serve", "now"],
     ["--bogus"],
@@ -258,5 +263,44 @@ describe("approvals approve: the call is read back and the human types the end o
     assert.equal(again.code, 1);
     assert.doesNotMatch(again.out, /Approve this call\?/);
     assert.match(again.err, /is approved; only a pending request can be approved/);
+  });
+});
+
+describe("approvals grant / grants / deny sa-: standing approvals", () => {
+  let tmp: string;
+  let config: string;
+  before(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-grant-"));
+    config = path.join(tmp, "gateway.config.json");
+    fs.writeFileSync(config, JSON.stringify({ servers: [{ name: "demo", command: "node" }], policy: "policy.json", stateDir: "state" }));
+  });
+  after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const audit = () => fs.readFileSync(path.join(tmp, "state", "audit.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+
+  it("grants a bounded standing approval, lists it, and revokes it, with an audit line each time", async () => {
+    const r = await run("approvals", "grant", "demo__execute_sql", "--arg", "sql=INSERT INTO events*", "--uses", "10", "--hours", "24", "--note", "seed the dev db", "--config", config);
+    assert.equal(r.code, 0, r.err);
+    const id = /granted (sa-[0-9a-f]{8}):/.exec(r.out)?.[1];
+    assert.ok(id, r.out);
+    assert.match(r.out, /up to 10 call\(s\) to demo__execute_sql with sql="INSERT INTO events\*", until /);
+    const listed = await run("approvals", "grants", "--config", config);
+    assert.match(listed.out, new RegExp(`^${id}  active  demo__execute_sql  sql="INSERT INTO events\\*"\n  uses:    0 of 10\n`));
+    const shown = JSON.parse((await run("approvals", "show", id, "--config", config)).out);
+    assert.deepEqual([shown.maxUses, shown.status, shown.decisionNote], [10, "active", "seed the dev db"]);
+    const revoked = await run("approvals", "deny", id, "--reason", "done seeding", "--config", config);
+    assert.equal(revoked.code, 0, revoked.err);
+    assert.match(revoked.out, /^revoked sa-[0-9a-f]{8}: it allows nothing more \(0 of 10 uses were spent\)\.\n$/);
+    assert.equal((await run("approvals", "grants", "--config", config)).out, "No standing approvals are in force.\n");
+    assert.deepEqual(audit().map((l) => [l.event, l.id, l.decision, l.maxUses]), [["standing-approval", id, "granted", 10], ["standing-approval", id, "revoked", 10]]);
+  });
+
+  it("refuses a grant without bounds, with a bad --arg, or for an unknown server", async () => {
+    assert.equal((await run("approvals", "grant", "demo__execute_sql", "--uses", "0", "--hours", "1", "--config", config)).code, 1);
+    assert.equal((await run("approvals", "grant", "demo__execute_sql", "--uses", "5", "--hours", "1000", "--config", config)).code, 1);
+    assert.equal((await run("approvals", "grant", "demo__execute_sql", "--uses", "5", "--hours", "1", "--arg", "=x", "--config", config)).code, 2);
+    assert.equal((await run("approvals", "grant", "execute_sql", "--uses", "5", "--hours", "1", "--config", config)).code, 2);
+    const unknown = await run("approvals", "grant", "other__execute_sql", "--uses", "5", "--hours", "1", "--config", config);
+    assert.equal(unknown.code, 1);
+    assert.match(unknown.err, /no server named "other"/);
   });
 });

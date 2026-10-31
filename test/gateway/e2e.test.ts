@@ -104,7 +104,7 @@ describe("gateway end to end", () => {
       viaGateway.tools,
       unproxied.tools.map((tool) => ({ ...tool, name: `demo__${tool.name}` })),
     );
-    assert.deepEqual(viaGateway.tools.map((t) => t.name).sort(), ["demo__delete_file", "demo__deploy", "demo__echo", "demo__run_command"]);
+    assert.deepEqual(viaGateway.tools.map((t) => t.name).sort(), ["demo__delete_file", "demo__deploy", "demo__echo", "demo__execute_sql", "demo__run_command"]);
   });
 
   it("forwards an allowed call and returns the downstream result unchanged", async () => {
@@ -352,5 +352,23 @@ describe("gateway end to end", () => {
     assert.equal(right.status, 0, right.stderr);
     assert.equal(queue().find((a) => a.id === id)?.confirmation, "typed");
     assert.equal(text(await call("demo__delete_file", { path: "notes/read-back.md" })), "pretended to delete notes/read-back.md");
+  });
+
+  it("a standing approval lets a bounded set of SQL writes through, each audited with its id", async () => {
+    const granted = cli("approvals", "grant", "demo__execute_sql", "--arg", "sql=INSERT INTO events*", "--uses", "2", "--hours", "1");
+    assert.equal(granted.code, 0, granted.err);
+    const grantId = /granted (sa-[0-9a-f]{8})/.exec(granted.out)?.[1] ?? assert.fail(granted.out);
+    const before = received().length;
+    assert.equal(text(await call("demo__execute_sql", { sql: "INSERT INTO events VALUES (1)" })), "pretended to run: INSERT INTO events VALUES (1)");
+    approvalIdIn(await call("demo__execute_sql", { sql: "DELETE FROM events" })); // outside the pattern, with a use left
+    assert.equal(text(await call("demo__execute_sql", { sql: "INSERT INTO events VALUES (2)" })), "pretended to run: INSERT INTO events VALUES (2)");
+    approvalIdIn(await call("demo__execute_sql", { sql: "INSERT INTO events VALUES (3)" })); // used up: a human again
+    assert.equal(received().length, before + 2);
+    // call lines name the standing approval; the grant has a line of its own
+    const lines = fs.readFileSync(path.join(stateDir, "audit.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(
+      lines.filter((l) => l.event === undefined && l.tool === "execute_sql").map((l) => [l.decision, l.forwarded, l.approvalId === grantId]),
+      [["ask", true, true], ["ask", false, false], ["ask", true, true], ["ask", false, false]],
+    );
   });
 });

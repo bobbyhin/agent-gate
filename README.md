@@ -516,6 +516,9 @@ agent-gate approvals approve <id> [--note <text>] [--yes]
                                                     a note is kept with the approval
 agent-gate approvals deny <id> [--reason <text>]    the reason is shown to the agent
 agent-gate approvals stats [--json]                 per rule: approved, denied, expired, waiting, deny rate, median wait
+agent-gate approvals grant <server>__<tool> --uses <n> --hours <h> [--arg <name>=<glob>]... [--note <text>]
+                                                    a standing approval (deny sa-… revokes it)
+agent-gate approvals grants [--all] [--json]        standing approvals in force (--all: also used up, expired, revoked)
 ```
 
 Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.config.json`).
@@ -550,6 +553,14 @@ Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.con
   that exact call can run. Neither knows whether the world changed in between: the system that holds
   the resource (the payment provider, the deploy tool) still has to check at the moment of the action.
 - `block` is never queued and cannot be approved.
+- **Standing approvals.** For a frequent, lower-risk call, a human can grant one yes for a bounded
+  set of calls: `agent-gate approvals grant demo__execute_sql --arg "sql=INSERT INTO events*" --uses 10
+  --hours 24`. It covers calls to that one tool whose listed arguments match their globs, at most
+  `--uses` times (1 to 100) until it expires (at most 168 hours), and only when the rule that asked
+  says `"standing": true` (in the example, `sql-write` and `browser-input`). A denial of the exact call
+  still wins, and an exact approval is used first. Each call it lets through has its id in the audit
+  line; `approvals grants` lists them, and `approvals deny sa-…` revokes one. Why and how:
+  [ADR 0006](docs/adr/0006-standing-approvals.md).
 - **Bound to file content** (with `fileBinding` in the config). An argument that names a file is
   only its text: approving "upload `/srv/agent-work/report.pdf`" did not say which report. When a call
   needs a human, the gateway hashes (SHA-256) each file that a listed argument names and keeps the
@@ -588,7 +599,7 @@ verdict carries the id of the rule that decided and a `why`.
 
 | Rule | Matches | Decision |
 | --- | --- | --- |
-| `no-self-approval` | a shell tool whose command answers an approval or touches `.agent-gate` | block |
+| `no-self-approval` | a shell tool whose command answers or grants an approval, or touches `.agent-gate` | block |
 | `protect-gateway-state` | any tool whose `path` argument points into `.agent-gate` | block |
 | `shell-guard` | a shell tool (`run_command`, `exec`, `bash` and others): its `command` goes through the shell guard | the guard's decision |
 | `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order; and cloud resources that start a bill: provision, create instance, create cluster, create corpus, create rag corpus, create bucket, enable api, enable service, scale up, create key | ask; a request lives 15 minutes |
@@ -596,8 +607,8 @@ verdict carries the id of the rule that decided and a `why`.
 | `red-line-3-ship` | push, merge, deploy, create pull request, create pr, create release | ask; a request lives 30 minutes |
 | `red-line-4-delete` | delete, remove, drop, destroy, overwrite, purge, erase, wipe, truncate | ask |
 | `red-line-5-memory` | remember, memorize, add memory, save memory, store memory, update memory, memory insert, memory append, memory replace, add observations, create entities, create relations, set preference, update profile | ask |
-| `sql-write` | an `sql` argument with a write keyword (insert, update, delete, merge, upsert, into, drop, alter, truncate, create, grant, revoke, copy, call, exec, execute) anywhere, or more text after a `;` | ask |
-| `browser-input` | `browser_*`, `puppeteer_*` and `playwright_*` tools with click, type, press, fill, submit, select, drag, upload, evaluate, run code, dialog | ask |
+| `sql-write` | an `sql` argument with a write keyword (insert, update, delete, merge, upsert, into, drop, alter, truncate, create, grant, revoke, copy, call, exec, execute) anywhere, or more text after a `;` | ask; standing approvals allowed |
+| `browser-input` | `browser_*`, `puppeteer_*` and `playwright_*` tools with click, type, press, fill, submit, select, drag, upload, evaluate, run code, dialog | ask; standing approvals allowed |
 | `browser-read` | the same tools with screenshot, snapshot, read page, navigate, console messages, network requests, tabs | allow |
 | default | everything else | allow |
 
@@ -634,7 +645,8 @@ A rule can match on any of these, and all that are present must match:
 - `args`: argument name to matcher. Each listed argument must be present and match. Strings are
   matched as they are; other values as their JSON text.
 
-A rule that can ask may set `ttlMinutes`, the life of its approval requests, in place of the config's
+A rule whose decision is `ask` may set `"standing": true`, so that a standing approval can answer it
+(see [Approval rules](#approval-rules)). A rule that can ask may set `ttlMinutes`, the life of its approval requests, in place of the config's
 `approvalTtlHours` (see Stale plans under [Approval rules](#approval-rules)). A rule whose fixed
 decision is not `ask` cannot set it.
 
@@ -1117,11 +1129,11 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 229 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 245 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
-controls, the CLI's exit codes, its read-back before an approval, and what a decision leaves behind
+controls, standing approvals and their bounds, the CLI's exit codes, its read-back before an approval, and what a decision leaves behind
 (the record, the `approval-decided` line, `stats`), and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log.
@@ -1149,7 +1161,7 @@ no secret-shaped string appears in the source and secret scanners need no except
 repository.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 229/229 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
+stopped (351/351 shell guard tests, 245/245 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
 
@@ -1209,6 +1221,7 @@ docs/adr/0001-non-blocking-approvals.md       why "ask" answers with an error in
 docs/adr/0002-reserve-then-settle-budgets.md  why budgets reserve an estimate and settle after
 docs/adr/0003-single-writer-state.md          why the gateway runs as one replica, and the way to more
 docs/adr/0004-decisions-in-code.md            why the guards decide in code, not in a prompt or a model
+docs/adr/0006-standing-approvals.md           bounded standing approvals, and why only some rules accept them
 tsconfig.json                                 compiles src/ and test/ into dist/
 AGENTS.md                                     build, layout and rules for coding agents
 CLAUDE.md                                     one line that points Claude Code to AGENTS.md

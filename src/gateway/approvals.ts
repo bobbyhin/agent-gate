@@ -16,6 +16,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { sameFiles, type BoundFile } from "./files.js";
+import { globToRegExp } from "./policy.js";
 import { readIfExists, withLock, writeAtomic } from "./state-file.js";
 
 /** "stale": approved, but a file the call names changed before the call came back. It allows nothing. */
@@ -74,7 +75,43 @@ export interface AskRequest {
   ttlMs?: number;
   /** The files the arguments name, hashed now (fileBinding). Absent: none are bound. */
   files?: BoundFile[];
+  /** The rule allows a standing approval to answer this call (policy "standing": true). */
+  standing?: boolean;
 }
+
+/**
+ * A standing approval (ADR 0006): one yes for a bounded set of calls to one tool, instead of one per
+ * call. It covers a call to exactly that server and tool whose listed arguments are present, are
+ * strings and match their globs (other arguments are free), at most `maxUses` times, until it expires,
+ * and only when the rule that asked allows it. Each use is audited with its id.
+ */
+export interface StandingApproval {
+  /** "sa-" and 8 hex digits. */
+  id: string;
+  server: string;
+  tool: string;
+  /** Argument name -> glob (as in policy rules: whole value, case-insensitive, * and ?). */
+  args: Record<string, string>;
+  maxUses: number;
+  used: number;
+  status: "active" | "revoked";
+  createdAt: string;
+  expiresAt: string;
+  decidedBy?: string;
+  decisionNote?: string;
+  lastUsedAt?: string;
+}
+
+export interface GrantInput extends DecisionInput {
+  server: string;
+  tool: string;
+  args: Record<string, string>;
+  maxUses: number;
+  ttlMs: number;
+}
+
+export const GRANT_MAX_USES = 100;
+export const GRANT_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type AskOutcome =
   /** An approval for this exact call existed and has now been used up: run the call. */
@@ -86,6 +123,12 @@ export type AskOutcome =
   | { kind: "pending"; approval: Approval; created: boolean; replaced?: Approval }
   /** A human said no to this exact call. */
   | { kind: "denied"; approval: Approval };
+
+/** What resolveCall() can answer: an AskOutcome, or a standing approval that covered the call. */
+export type CallOutcome =
+  | AskOutcome
+  /** A standing approval covered the call, and one of its uses is now spent: run the call. */
+  | { kind: "standing"; grant: StandingApproval };
 
 /** A request the CLI cannot carry out, such as approving an expired id. */
 export class ApprovalError extends Error {
@@ -173,16 +216,79 @@ export class ApprovalStore {
   }
 
   list(): Approval[] {
-    return this.read();
+    return this.read().approvals;
   }
 
   get(id: string): Approval {
-    return find(this.read(), id);
+    return find(this.read().approvals, id);
   }
 
-  /** Called by the gateway for every "ask" verdict. */
+  standing(): StandingApproval[] {
+    return this.read().standing;
+  }
+
+  getStanding(id: string): StandingApproval {
+    const grant = this.read().standing.find((g) => g.id === id);
+    if (!grant) throw new ApprovalError(`no standing approval with id ${id}`);
+    return grant;
+  }
+
+  /** A human grants a standing approval. The bounds are required and capped. */
+  grant(input: GrantInput): StandingApproval {
+    if (!Number.isSafeInteger(input.maxUses) || input.maxUses < 1 || input.maxUses > GRANT_MAX_USES) {
+      throw new ApprovalError(`--uses must be a whole number from 1 to ${GRANT_MAX_USES}`);
+    }
+    if (!Number.isFinite(input.ttlMs) || input.ttlMs <= 0 || input.ttlMs > GRANT_MAX_TTL_MS) {
+      throw new ApprovalError(`--hours must be more than 0 and at most ${GRANT_MAX_TTL_MS / 3_600_000}`);
+    }
+    return this.update((_approvals, now, standing) => {
+      const grant: StandingApproval = {
+        id: newId("sa", standing),
+        server: input.server,
+        tool: input.tool,
+        args: { ...input.args },
+        maxUses: input.maxUses,
+        used: 0,
+        status: "active",
+        createdAt: new Date(now).toISOString(),
+        expiresAt: new Date(now + input.ttlMs).toISOString(),
+      };
+      const by = cleanNote(input.by, BY_MAX_CHARS);
+      const note = cleanNote(input.note);
+      if (by !== undefined) grant.decidedBy = by;
+      if (note !== undefined) grant.decisionNote = note;
+      standing.push(grant);
+      return grant;
+    });
+  }
+
+  /** Takes a standing approval back; it allows nothing more. */
+  revoke(id: string, input: DecisionInput = {}): StandingApproval {
+    return this.update((_approvals, _now, standing) => {
+      const grant = standing.find((g) => g.id === id);
+      if (!grant) throw new ApprovalError(`no standing approval with id ${id}`);
+      if (grant.status !== "active") throw new ApprovalError(`${id} is already ${grant.status}`);
+      grant.status = "revoked";
+      const by = cleanNote(input.by, BY_MAX_CHARS);
+      const note = cleanNote(input.note);
+      if (by !== undefined) grant.decidedBy = by;
+      if (note !== undefined) grant.decisionNote = note;
+      return grant;
+    });
+  }
+
+  /** The exact-call queue alone: resolveCall() with standing approvals left out. */
   resolveAsk(request: AskRequest): AskOutcome {
-    return this.update((approvals, now) => {
+    return this.resolveCall({ ...request, standing: false }) as AskOutcome;
+  }
+
+  /**
+   * Called by the gateway for every "ask" verdict. In this order: a denial of this exact call wins;
+   * then an approval of this exact call is used; then, if the rule allows it, a standing approval
+   * that covers the call; then the call waits for a human.
+   */
+  resolveCall(request: AskRequest): CallOutcome {
+    return this.update((approvals, now, standing): CallOutcome => {
       const sameCall = approvals.filter(
         (a) => a.server === request.server && a.tool === request.tool && a.argsHash === request.argsHash && isLive(a, now),
       );
@@ -201,10 +307,17 @@ export class ApprovalStore {
         approved.status = "stale";
         replaced = approved;
       }
+      // A standing approval answers only when the rule allows it, and never over a denial (above).
+      const grant = request.standing ? standing.find((g) => covers(g, request, now)) : undefined;
+      if (grant) {
+        grant.used++;
+        grant.lastUsedAt = new Date(now).toISOString();
+        return { kind: "standing", grant };
+      }
       const pending = sameCall.find((a) => a.status === "pending");
       if (pending) return { kind: "pending", approval: pending, created: false, ...(replaced ? { replaced } : {}) };
       const created: Approval = {
-        id: newId(approvals),
+        id: newId("ap", approvals),
         server: request.server,
         tool: request.tool,
         argsHash: request.argsHash,
@@ -246,9 +359,9 @@ export class ApprovalStore {
     });
   }
 
-  private read(): Approval[] {
+  private read(): { approvals: Approval[]; standing: StandingApproval[] } {
     const content = readIfExists(this.file);
-    if (content === undefined) return [];
+    if (content === undefined) return { approvals: [], standing: [] };
     let data: unknown;
     try {
       data = JSON.parse(content);
@@ -257,26 +370,38 @@ export class ApprovalStore {
     }
     // Fail closed: a damaged file is an error, never an empty queue, because an empty queue
     // would forget denials.
-    const file = data as { version?: unknown; approvals?: unknown } | null;
-    if (typeof file !== "object" || file === null || file.version !== FILE_VERSION || !Array.isArray(file.approvals)) {
+    const file = data as { version?: unknown; approvals?: unknown; standing?: unknown } | null;
+    if (typeof file !== "object" || file === null || file.version !== FILE_VERSION || !Array.isArray(file.approvals) || (file.standing !== undefined && !Array.isArray(file.standing))) {
       throw new Error(`${this.file} is not a version ${FILE_VERSION} approvals file; fix or remove it`);
     }
-    return file.approvals as Approval[];
+    return { approvals: file.approvals as Approval[], standing: (file.standing ?? []) as StandingApproval[] };
   }
 
-  private update<T>(change: (approvals: Approval[], now: number) => T): T {
+  private update<T>(change: (approvals: Approval[], now: number, standing: StandingApproval[]) => T): T {
     return withLock(this.dir, this.lockDir, () => {
-      const approvals = this.read();
-      const before = JSON.stringify(approvals);
+      const { approvals, standing } = this.read();
+      const before = JSON.stringify({ approvals, standing });
       const now = this.now();
-      const result = change(approvals, now);
+      const result = change(approvals, now, standing);
       const kept = approvals.filter((a) => Date.parse(a.expiresAt) + KEEP_AFTER_EXPIRY_MS > now);
-      if (JSON.stringify(kept) !== before) {
-        writeAtomic(this.file, `${JSON.stringify({ version: FILE_VERSION, approvals: kept }, null, 2)}\n`);
+      const keptStanding = standing.filter((g) => Date.parse(g.expiresAt) + KEEP_AFTER_EXPIRY_MS > now);
+      if (JSON.stringify({ approvals: kept, standing: keptStanding }) !== before) {
+        const file = { version: FILE_VERSION, approvals: kept, ...(keptStanding.length ? { standing: keptStanding } : {}) };
+        writeAtomic(this.file, `${JSON.stringify(file, null, 2)}\n`);
       }
       return result;
     });
   }
+}
+
+/** Does this standing approval cover the call now: same server and tool, live, uses left, every listed argument a matching string? */
+function covers(grant: StandingApproval, request: AskRequest, now: number): boolean {
+  if (grant.status !== "active" || grant.used >= grant.maxUses || now >= Date.parse(grant.expiresAt)) return false;
+  if (grant.server !== request.server || grant.tool !== request.tool) return false;
+  return Object.entries(grant.args).every(([name, glob]) => {
+    const value = Object.prototype.hasOwnProperty.call(request.args, name) ? request.args[name] : undefined;
+    return typeof value === "string" && globToRegExp(glob).test(value);
+  });
 }
 
 function find(approvals: Approval[], id: string): Approval {
@@ -285,9 +410,9 @@ function find(approvals: Approval[], id: string): Approval {
   return approval;
 }
 
-function newId(taken: Approval[]): string {
+function newId(prefix: "ap" | "sa", taken: ReadonlyArray<{ id: string }>): string {
   for (;;) {
-    const id = `ap-${randomBytes(4).toString("hex")}`;
+    const id = `${prefix}-${randomBytes(4).toString("hex")}`;
     if (!taken.some((a) => a.id === id)) return id;
   }
 }

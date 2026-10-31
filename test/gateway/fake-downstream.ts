@@ -57,6 +57,15 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  "execute_sql",
+  { description: "Pretends to run SQL.", inputSchema: { sql: z.string() } },
+  async ({ sql }) => {
+    received("execute_sql", { sql });
+    return { content: [{ type: "text", text: `pretended to run: ${sql}` }] };
+  },
+);
+
 server.connect(new StdioServerTransport()).catch((err: unknown) => {
   process.stderr.write(`fake-downstream: ${String(err)}\n`);
   process.exit(1);

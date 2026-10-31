@@ -178,6 +178,7 @@ describe("policy.example.json: the shell rule runs the slice-1 analyzer", () => 
   it("blocks an agent that tries to answer its own approval request or touch the state", () => {
     expectVerdict("run_command", "block", "no-self-approval", { command: "node bin/agent-gate.js approvals approve ap-1234abcd" });
     expectVerdict("bash", "block", "no-self-approval", { command: "agent-gate approvals deny ap-1234abcd" });
+    expectVerdict("bash", "block", "no-self-approval", { command: "agent-gate approvals grant demo__execute_sql --uses 100 --hours 168" });
     expectVerdict("run_command", "block", "no-self-approval", { command: "cat .agent-gate/approvals.json" });
     expectVerdict("write_file", "block", "protect-gateway-state", { path: "/srv/work/.agent-gate/approvals.json" });
     expectVerdict("delete_file", "block", "protect-gateway-state", { path: ".agent-gate" });
@@ -272,6 +273,9 @@ describe("parsePolicy rejects mistakes with the field named", () => {
     ["ttlMinutes that is not positive", { default: "allow", rules: [{ ...rule, ttlMinutes: 0 }] }, /ttlMinutes must be a positive number of minutes/],
     ["ttlMinutes as text", { default: "allow", rules: [{ ...rule, ttlMinutes: "30" }] }, /ttlMinutes must be a positive number of minutes/],
     ["ttlMinutes on a rule that never asks", { default: "allow", rules: [{ ...rule, decision: "block", ttlMinutes: 30 }] }, /ttlMinutes only applies to a rule whose decision is ask/],
+    ["standing on a rule that never asks", { default: "allow", rules: [{ ...rule, decision: "allow", standing: true }] }, /standing only applies to a rule whose decision is ask/],
+    ["standing that is not true or false", { default: "allow", rules: [{ ...rule, standing: "yes" }] }, /standing must be true or false/],
+    ["standing on a shell rule", { default: "allow", rules: [{ id: "s", type: "shell", tool: "bash", standing: true }] }, /unknown field "standing"/],
   ];
   for (const [name, json, message] of table) {
     it(name, () => assert.throws(() => parsePolicy(json), (err: unknown) => err instanceof ConfigError && message.test(err.message)));
@@ -293,5 +297,14 @@ describe("ttlMinutes: a rule can give its approval requests a shorter life", () 
     assert.deepEqual([check(policy, "bash", { command: "git push" }).decision, check(policy, "bash", { command: "git push" }).ttlMs], ["ask", 5 * 60 * 1000]);
     assert.equal(check(policy, "bash", { command: "ls" }).ttlMs, undefined); // allow: nothing to expire
     assert.equal(check(policy, "bash", { command: "git push --force" }).ttlMs, undefined); // block: never queued
+  });
+});
+
+describe("standing: which rules a standing approval may answer", () => {
+  it("in the example, only sql-write and browser-input; never money, shipping, memory or the shell rule", () => {
+    assert.equal(check(example, "execute_sql", { sql: "INSERT INTO t VALUES (1)" }).standing, true);
+    assert.equal(check(example, "browser_click").standing, true);
+    for (const tool of ["create_payment", "merge_pull_request", "delete_file", "send_email", "add_memory"]) assert.equal(check(example, tool).standing, undefined, tool);
+    assert.equal(check(example, "run_command", { command: "git push" }).standing, undefined);
   });
 });

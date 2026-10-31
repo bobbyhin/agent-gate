@@ -27,6 +27,22 @@ export interface ApprovalEvent {
   confirmation?: "typed" | "--yes";
 }
 
+/** A standing approval granted or revoked by a human (ADR 0006). Its globs are the human's patterns, not call values. */
+export interface StandingEvent {
+  ts: string;
+  event: "standing-approval";
+  id: string;
+  decision: "granted" | "revoked";
+  server: string;
+  tool: string;
+  args: Record<string, string>;
+  maxUses: number;
+  used: number;
+  expiresAt: string;
+  decidedBy?: string;
+  note?: string;
+}
+
 export interface AuditEntry {
   ts: string;
   server: string;
@@ -60,6 +76,13 @@ export class AuditLog {
   write(entry: Omit<AuditEntry, "ts" | "args">, args: Record<string, unknown>, now = new Date()): AuditEntry {
     const line: AuditEntry = { ts: now.toISOString(), ...entry };
     if (this.withArguments) line.args = args;
+    fs.appendFileSync(this.file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
+    return line;
+  }
+
+  /** Appends one standing-approval event, or throws. */
+  writeStanding(event: Omit<StandingEvent, "ts" | "event">, now = new Date()): StandingEvent {
+    const line: StandingEvent = { ts: now.toISOString(), event: "standing-approval", ...event };
     fs.appendFileSync(this.file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
     return line;
   }
