@@ -159,6 +159,7 @@ export function verifyAudit(file: AuditFile, approvals: readonly Approval[] = []
         else {
           grant.uses++;
           if (grant.value.server !== v.server || grant.value.tool !== v.tool) problems.push({ line, why: `${id} was granted for ${String(grant.value.server)}__${String(grant.value.tool)}, not ${call}` });
+          if (grant.value.agent !== v.agent) problems.push({ line, why: `${id} was granted ${forAgent(grant.value.agent)}, but this call came ${fromAgent(v.agent)}` });
           if (grant.revokedAt !== undefined) problems.push({ line, why: `${id} was used after it was revoked (line ${grant.revokedAt})` });
           if (typeof grant.value.maxUses === "number" && grant.uses > grant.value.maxUses) problems.push({ line, why: `${id} was used ${grant.uses} times; it allows ${grant.value.maxUses}` });
           if (typeof v.ts === "string" && typeof grant.value.expiresAt === "string" && v.ts >= grant.value.expiresAt) problems.push({ line, why: `${id} was used after it expired (${grant.value.expiresAt})` });
@@ -170,6 +171,7 @@ export function verifyAudit(file: AuditFile, approvals: readonly Approval[] = []
           if (yes.value.server !== v.server || yes.value.tool !== v.tool || yes.value.argsHash !== v.argsHash) {
             problems.push({ line, why: `forwarded under ${id}, which was approved for other arguments or another tool (line ${yes.line})` });
           }
+          if (yes.value.agent !== v.agent) problems.push({ line, why: `forwarded under ${id}, which was approved ${forAgent(yes.value.agent)}, but this call came ${fromAgent(v.agent)} (line ${yes.line})` });
           if (typeof v.ts === "string" && typeof yes.value.ts === "string" && v.ts < yes.value.ts) problems.push({ line, why: `forwarded before ${id} was approved (line ${yes.line})` });
         }
         const before = used.get(id);
@@ -198,6 +200,15 @@ export function verifyAudit(file: AuditFile, approvals: readonly Approval[] = []
     }
   }
   return problems.sort((a, b) => a.line - b.line);
+}
+
+/** Who an approval or a grant is for: an HTTP agent, or calls with no agent (the stdio gateway). */
+function forAgent(agent: unknown): string {
+  return agent === undefined ? "for calls with no agent" : `for agent ${JSON.stringify(agent)}`;
+}
+
+function fromAgent(agent: unknown): string {
+  return agent === undefined ? "with no agent" : `from agent ${JSON.stringify(agent)}`;
 }
 
 // ── trajectory ──────────────────────────────────────────────────────────────────────────────

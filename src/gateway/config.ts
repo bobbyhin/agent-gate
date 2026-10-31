@@ -24,6 +24,11 @@
 // "profiles" ({ "<name>": { "<server>": ["glob", ...] } }) are named sets of tools: a connection that
 // runs with a profile (serve --profile <name>) sees and may call only the tools its globs match, on the
 // servers it names, on top of each server's "expose".
+// "http" ({ "listen": { "host", "port" }, "agents": [{ "name", "sha256", "policy"?, "profile"? }] }) is
+// for "serve --http": the gateway listens for agents on Streamable HTTP (src/gateway/http-server.ts).
+// An agent is known by the SHA-256 of its key, never the key, and may have a policy file and a profile
+// of its own. The host defaults to 127.0.0.1; any other host needs "allowedHosts", the Host header
+// values clients use to reach it.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -59,7 +64,32 @@ export interface GatewayConfig {
   fileBinding?: FileBindingConfig;
   /** Profile name -> server name -> globs of the tool names a connection with that profile may see and call. */
   profiles?: ReadonlyMap<string, ReadonlyMap<string, string[]>>;
+  /** serve --http: where to listen, and the agents that may connect. */
+  http?: HttpConfig;
 }
+
+/** An agent that may connect over HTTP. */
+export interface HttpAgent {
+  name: string;
+  /** Lowercase hex SHA-256 of the key it sends as "Authorization: Bearer <key>". */
+  sha256: string;
+  /** Its own policy file; absent: the config's "policy". */
+  policyFile?: string;
+  /** A profile from "profiles"; absent: every tool that "expose" allows. */
+  profile?: string;
+}
+
+export interface HttpConfig {
+  host: string;
+  port: number;
+  agents: HttpAgent[];
+  /** Host header values a request may carry, lowercase ("host:port", or "host" behind a proxy). Empty: the listen address's own. */
+  allowedHosts: string[];
+  /** A session nobody used for this long is closed. */
+  sessionIdleMs: number;
+}
+
+export const HTTP_DEFAULTS = { host: "127.0.0.1", port: 8788, sessionIdleMinutes: 60 } as const;
 
 export const DEFAULT_APPROVAL_TTL_HOURS = 24;
 
@@ -81,7 +111,7 @@ export function loadPolicy(file: string): Policy {
 
 export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
   const config = object(json, "config");
-  onlyKeys(config, ["servers", "policy", "stateDir", "approvalTtlHours", "auditArguments", "pinTools", "resultGuard", "fileBinding", "profiles"], "config");
+  onlyKeys(config, ["servers", "policy", "stateDir", "approvalTtlHours", "auditArguments", "pinTools", "resultGuard", "fileBinding", "profiles", "http"], "config");
 
   const servers = array(config.servers, "config.servers").map((raw, i) => server(raw, `config.servers[${i}]`));
   if (servers.length === 0) fail("config.servers must list at least one server");
@@ -98,7 +128,7 @@ export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
   const pinTools = config.pinTools ?? true;
   if (typeof pinTools !== "boolean") fail("config.pinTools must be true or false");
 
-  return {
+  const result: GatewayConfig = {
     servers,
     policyFile: path.resolve(baseDir, text(config.policy, "config.policy")),
     stateDir: path.resolve(baseDir, text(config.stateDir, "config.stateDir")),
@@ -108,6 +138,60 @@ export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
     ...(config.resultGuard === undefined ? {} : { resultGuard: resultGuard(config.resultGuard, baseDir) }),
     ...(config.fileBinding === undefined ? {} : { fileBinding: fileBinding(config.fileBinding, baseDir) }),
     ...(config.profiles === undefined ? {} : { profiles: profiles(config.profiles, names) }),
+  };
+  if (config.http !== undefined) result.http = httpConfig(config.http, baseDir, result.profiles);
+  return result;
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/** A loopback address or localhost: a listener there, or a server there, is on this machine. */
+export function isLocalHost(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, "").toLowerCase();
+  return h === "localhost" || h === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+function httpConfig(raw: unknown, baseDir: string, profiles: ReadonlyMap<string, unknown> | undefined): HttpConfig {
+  const at = "config.http";
+  const spec = object(raw, at);
+  onlyKeys(spec, ["listen", "agents", "allowedHosts", "sessionIdleMinutes"], at);
+  const listen = object(spec.listen ?? {}, `${at}.listen`);
+  onlyKeys(listen, ["host", "port"], `${at}.listen`);
+  const host = listen.host === undefined ? HTTP_DEFAULTS.host : text(listen.host, `${at}.listen.host`);
+  const allowedHosts = array(spec.allowedHosts ?? [], `${at}.allowedHosts`).map((h, i) => text(h, `${at}.allowedHosts[${i}]`).toLowerCase());
+  // A listener on another address is reached by names the gateway cannot guess; the Host check needs them.
+  if (!isLocalHost(host) && allowedHosts.length === 0) {
+    fail(`${at}.allowedHosts must list the host names clients use (for example "gate.example.com"), because ${at}.listen.host is not a loopback address`);
+  }
+  const names = new Set<string>();
+  const hashes = new Set<string>();
+  const agents = array(spec.agents, `${at}.agents`).map((rawAgent, i) => {
+    const where = `${at}.agents[${i}]`;
+    const a = object(rawAgent, where);
+    onlyKeys(a, ["name", "sha256", "policy", "profile"], where);
+    const name = text(a.name, `${where}.name`);
+    if (!PLAIN_NAME.test(name)) fail(`${where}.name must be 1 to 64 letters, digits, ".", "_" or "-", starting with a letter or digit`);
+    if (names.has(name)) fail(`${at}.agents: the name "${name}" is used twice`);
+    const sha256 = text(a.sha256, `${where}.sha256`);
+    if (!SHA256_HEX.test(sha256)) fail(`${where}.sha256 must be 64 lowercase hex characters (the SHA-256 of the agent's key, not the key)`);
+    if (hashes.has(sha256)) fail(`${where}.sha256 is the same as an earlier agent's`);
+    names.add(name);
+    hashes.add(sha256);
+    const agent: HttpAgent = { name, sha256 };
+    if (a.policy !== undefined) agent.policyFile = path.resolve(baseDir, text(a.policy, `${where}.policy`));
+    if (a.profile !== undefined) {
+      agent.profile = text(a.profile, `${where}.profile`);
+      if (!profiles?.has(agent.profile)) fail(`${where}.profile "${agent.profile}" is not one of config.profiles`);
+    }
+    return agent;
+  });
+  if (agents.length === 0) fail(`${at}.agents must list at least one agent`);
+  return {
+    host,
+    port: listen.port === undefined ? HTTP_DEFAULTS.port : integerIn(listen.port, `${at}.listen.port`, 0, 65535),
+    agents,
+    allowedHosts,
+    sessionIdleMs: (spec.sessionIdleMinutes === undefined ? HTTP_DEFAULTS.sessionIdleMinutes : integerIn(spec.sessionIdleMinutes, `${at}.sessionIdleMinutes`, 1, 24 * 60)) * 60_000,
   };
 }
 
@@ -209,9 +293,7 @@ function remote(s: Record<string, unknown>, at: string, name: string): ServerCon
     return fail(`${at}.url is not a valid URL`);
   }
   if (url.username || url.password) fail(`${at}.url must not contain credentials; put them in a header with headersFromEnv`);
-  const host = url.hostname.replace(/^\[|\]$/g, "");
-  const local = host === "localhost" || host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) fail(`${at}.url must use https:// (plain http:// only for a server on this machine)`);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLocalHost(url.hostname))) fail(`${at}.url must use https:// (plain http:// only for a server on this machine)`);
   const result: ServerConfig = { name, url: url.toString() };
   if (s.headersFromEnv !== undefined) {
     const headers = object(s.headersFromEnv, `${at}.headersFromEnv`);

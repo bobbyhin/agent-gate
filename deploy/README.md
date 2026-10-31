@@ -8,6 +8,10 @@ a demo on one machine with Docker Compose, Kubernetes, and Google Cloud Run with
 real cluster, and no image has been pushed anywhere. [What was checked](#what-was-checked) lists
 what ran where.
 
+The MCP gateway is not packaged here. Its network mode, `serve --http`, runs on one machine;
+[ADR 0012](../docs/adr/0012-an-http-endpoint-for-agents.md) lists what deploying it would take, the
+open part being how a human answers approvals when the state directory is in a bucket.
+
 ## What is here
 
 Paths are from the repository root, and so are the commands below unless they say otherwise.

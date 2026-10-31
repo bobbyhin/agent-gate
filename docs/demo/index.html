@@ -126,8 +126,8 @@
    "isError": false,
    "audit": [
     {
-     "ts": "2026-10-31T09:05:27.370Z",
-     "connId": "cn-2c6667a2",
+     "ts": "2026-10-31T09:20:38.739Z",
+     "connId": "cn-1120d05c",
      "seq": 1,
      "server": "demo",
      "tool": "echo",
@@ -138,9 +138,9 @@
      "forwarded": true
     },
     {
-     "ts": "2026-10-31T09:05:27.372Z",
+     "ts": "2026-10-31T09:20:38.740Z",
      "event": "call-result",
-     "connId": "cn-2c6667a2",
+     "connId": "cn-1120d05c",
      "seq": 1,
      "server": "demo",
      "tool": "echo",
@@ -168,12 +168,12 @@
      "path": "notes/old.md"
     }
    },
-   "answer": "agent-gate: this call needs a human decision, so it was not run.\nReason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\nApproval id: ap-24b2a4b0 (expires 2026-11-01T09:05:27.374Z)\nA human can approve it with: agent-gate approvals approve ap-24b2a4b0\nOnce it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.\nDo not try to get the same result another way.",
+   "answer": "agent-gate: this call needs a human decision, so it was not run.\nReason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\nApproval id: ap-a8397269 (expires 2026-11-01T09:20:38.741Z)\nA human can approve it with: agent-gate approvals approve ap-a8397269\nOnce it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.\nDo not try to get the same result another way.",
    "isError": true,
    "audit": [
     {
-     "ts": "2026-10-31T09:05:27.379Z",
-     "connId": "cn-2c6667a2",
+     "ts": "2026-10-31T09:20:38.746Z",
+     "connId": "cn-1120d05c",
      "seq": 2,
      "server": "demo",
      "tool": "delete_file",
@@ -182,12 +182,12 @@
      "why": "Red line 4: this tool looks like it deletes or overwrites data.",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
      "forwarded": false,
-     "approvalId": "ap-24b2a4b0"
+     "approvalId": "ap-a8397269"
     }
    ],
    "queue": [
     {
-     "id": "ap-24b2a4b0",
+     "id": "ap-a8397269",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -206,11 +206,11 @@
   {
    "actor": "human",
    "command": "$ agent-gate approvals list",
-   "answer": "ap-24b2a4b0  pending  demo__delete_file\n  why:     Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\n  args:    {\"path\":\"notes/old.md\"}\n  created: 2026-10-31T09:05:27.374Z  expires: 2026-11-01T09:05:27.374Z",
+   "answer": "ap-a8397269  pending  demo__delete_file\n  why:     Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\n  args:    {\"path\":\"notes/old.md\"}\n  created: 2026-10-31T09:20:38.741Z  expires: 2026-11-01T09:20:38.741Z",
    "audit": [],
    "queue": [
     {
-     "id": "ap-24b2a4b0",
+     "id": "ap-a8397269",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -225,26 +225,26 @@
   },
   {
    "actor": "human",
-   "command": "$ agent-gate approvals approve ap-24b2a4b0 --yes",
-   "answer": "approved ap-24b2a4b0: demo__delete_file {\"path\":\"notes/old.md\"}\nThe agent can now make this exact call once, until 2026-11-01T09:05:27.374Z.",
+   "command": "$ agent-gate approvals approve ap-a8397269 --yes",
+   "answer": "approved ap-a8397269: demo__delete_file {\"path\":\"notes/old.md\"}\nThe agent can now make this exact call once, until 2026-11-01T09:20:38.741Z.",
    "audit": [
     {
-     "ts": "2026-10-31T09:05:27.535Z",
+     "ts": "2026-10-31T09:20:38.916Z",
      "event": "approval-decided",
-     "approvalId": "ap-24b2a4b0",
+     "approvalId": "ap-a8397269",
      "server": "demo",
      "tool": "delete_file",
      "rule": "red-line-4-delete",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
      "decision": "approved",
-     "waitMs": 156,
+     "waitMs": 169,
      "decidedBy": "alice",
      "confirmation": "--yes"
     }
    ],
    "queue": [
     {
-     "id": "ap-24b2a4b0",
+     "id": "ap-a8397269",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -271,8 +271,8 @@
    "isError": false,
    "audit": [
     {
-     "ts": "2026-10-31T09:05:27.547Z",
-     "connId": "cn-2c6667a2",
+     "ts": "2026-10-31T09:20:38.927Z",
+     "connId": "cn-1120d05c",
      "seq": 3,
      "server": "demo",
      "tool": "delete_file",
@@ -281,17 +281,17 @@
      "why": "Red line 4: this tool looks like it deletes or overwrites data.",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
      "forwarded": true,
-     "approvalId": "ap-24b2a4b0"
+     "approvalId": "ap-a8397269"
     },
     {
-     "ts": "2026-10-31T09:05:27.548Z",
+     "ts": "2026-10-31T09:20:38.928Z",
      "event": "call-result",
-     "connId": "cn-2c6667a2",
+     "connId": "cn-1120d05c",
      "seq": 3,
      "server": "demo",
      "tool": "delete_file",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
-     "durationMs": 1,
+     "durationMs": 0,
      "isError": false,
      "resultHash": "sha256:2c439525489f5c192e7dc1890336d9ab6723bda91cd0bdb43d148e109a30058b",
      "resultBytes": 71
@@ -299,7 +299,7 @@
    ],
    "queue": [
     {
-     "id": "ap-24b2a4b0",
+     "id": "ap-a8397269",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -323,12 +323,12 @@
      "path": "notes/old.md"
     }
    },
-   "answer": "agent-gate: this call needs a human decision, so it was not run.\nReason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\nApproval id: ap-d4df6722 (expires 2026-11-01T09:05:27.549Z)\nA human can approve it with: agent-gate approvals approve ap-d4df6722\nOnce it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.\nDo not try to get the same result another way.",
+   "answer": "agent-gate: this call needs a human decision, so it was not run.\nReason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\nApproval id: ap-ff316f3e (expires 2026-11-01T09:20:38.929Z)\nA human can approve it with: agent-gate approvals approve ap-ff316f3e\nOnce it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.\nDo not try to get the same result another way.",
    "isError": true,
    "audit": [
     {
-     "ts": "2026-10-31T09:05:27.552Z",
-     "connId": "cn-2c6667a2",
+     "ts": "2026-10-31T09:20:38.932Z",
+     "connId": "cn-1120d05c",
      "seq": 4,
      "server": "demo",
      "tool": "delete_file",
@@ -337,12 +337,12 @@
      "why": "Red line 4: this tool looks like it deletes or overwrites data.",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
      "forwarded": false,
-     "approvalId": "ap-d4df6722"
+     "approvalId": "ap-ff316f3e"
     }
    ],
    "queue": [
     {
-     "id": "ap-24b2a4b0",
+     "id": "ap-a8397269",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -351,7 +351,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-d4df6722",
+     "id": "ap-ff316f3e",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -378,8 +378,8 @@
    "isError": true,
    "audit": [
     {
-     "ts": "2026-10-31T09:05:27.555Z",
-     "connId": "cn-2c6667a2",
+     "ts": "2026-10-31T09:20:38.934Z",
+     "connId": "cn-1120d05c",
      "seq": 5,
      "server": "demo",
      "tool": "run_command",
@@ -392,7 +392,7 @@
    ],
    "queue": [
     {
-     "id": "ap-24b2a4b0",
+     "id": "ap-a8397269",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -401,7 +401,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-d4df6722",
+     "id": "ap-ff316f3e",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -429,8 +429,8 @@
    "isError": false,
    "audit": [
     {
-     "ts": "2026-10-31T09:05:27.559Z",
-     "connId": "cn-2c6667a2",
+     "ts": "2026-10-31T09:20:38.939Z",
+     "connId": "cn-1120d05c",
      "seq": 6,
      "server": "demo",
      "tool": "echo",
@@ -441,14 +441,14 @@
      "forwarded": true
     },
     {
-     "ts": "2026-10-31T09:05:27.560Z",
+     "ts": "2026-10-31T09:20:38.940Z",
      "event": "call-result",
-     "connId": "cn-2c6667a2",
+     "connId": "cn-1120d05c",
      "seq": 6,
      "server": "demo",
      "tool": "echo",
      "argsHash": "sha256:2be1ec49aec7b4441c9b0be83b50372b65247faffe8d857902b12422d3abfb2c",
-     "durationMs": 0,
+     "durationMs": 1,
      "isError": false,
      "resultHash": "sha256:59b599e99b44ee17c01e4a8706b7f55a054f9d4ff151dcf9667280b8ddce1f8e",
      "resultBytes": 271
@@ -456,7 +456,7 @@
    ],
    "queue": [
     {
-     "id": "ap-24b2a4b0",
+     "id": "ap-a8397269",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -465,7 +465,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-d4df6722",
+     "id": "ap-ff316f3e",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -490,8 +490,8 @@
    "isError": true,
    "audit": [
     {
-     "ts": "2026-10-31T09:05:27.563Z",
-     "connId": "cn-2c6667a2",
+     "ts": "2026-10-31T09:20:38.943Z",
+     "connId": "cn-1120d05c",
      "seq": 7,
      "server": "demo",
      "tool": "run_command",
@@ -504,7 +504,7 @@
    ],
    "queue": [
     {
-     "id": "ap-24b2a4b0",
+     "id": "ap-a8397269",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -513,7 +513,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-d4df6722",
+     "id": "ap-ff316f3e",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -535,7 +535,7 @@
    "audit": [],
    "queue": [
     {
-     "id": "ap-24b2a4b0",
+     "id": "ap-a8397269",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -544,7 +544,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-d4df6722",
+     "id": "ap-ff316f3e",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -570,25 +570,25 @@
   "decide": {
    "id": "decide",
    "file": "src/gateway/server.ts",
-   "line": 243,
-   "text": "    switch (verdict.decision) {\n      case \"allow\":\n        record(true);\n        return run();\n      case \"warn\":\n        record(true);\n        log(`WARN ${call.server}${SEPARATOR}${call.tool}: ${verdict.why} (rule ${verdict.rule})`);\n        return run();\n      case \"block\":\n        record(false);\n        return refuse(errorResult(blockedText(verdict)));\n      case \"ask\": {\n        const files = config.fileBinding ? bindFiles(args, config.fileBinding) : undefined;\n        const outcome = approvals.resolveCall({\n          ...call,\n          args,\n          argsHash,\n          rule: verdict.rule,\n          why: verdict.why,\n          ...(verdict.ttlMs !== undefined ? { ttlMs: verdict.ttlMs } : {}),\n          ...(files ? { files } : {}),\n          ...(verdict.standing ? { standing: true } : {}),\n          ...(context.agentPath ? { agentPath: context.agentPath } : {}),\n          ...(verdict.alsoMatched ? { alsoMatched: verdict.alsoMatched } : {}),\n          ...(verdict.rewrittenBy ? { rewrittenBy: verdict.rewrittenBy } : {}),\n        });\n        if (outcome.kind === \"approved\" || outcome.kind === \"standing\") {\n          // the audit line names the approval, or the standing approval, that let it through\n          record(true, outcome.kind === \"approved\" ? outcome.approval.id : outcome.grant.id);\n          if (repeats && limited) repeats.record(limits, call.server, call.tool, argsHash);\n          return run();\n        }\n        record(false, outcome.approval.id);\n        return refuse(errorResult(outcome.kind === \"denied\" ? deniedText(outcome.approval) : pendingText(outcome.approval, outcome.created, outcome.replaced)));"
+   "line": 311,
+   "text": "      switch (verdict.decision) {\n        case \"allow\":\n          record(true);\n          return run();\n        case \"warn\":\n          record(true);\n          log(`WARN ${call.server}${SEPARATOR}${call.tool}: ${verdict.why} (rule ${verdict.rule})`);\n          return run();\n        case \"block\":\n          record(false);\n          return refuse(errorResult(blockedText(verdict)));\n        case \"ask\": {\n          const files = config.fileBinding ? bindFiles(args, config.fileBinding) : undefined;\n          const outcome = approvals.resolveCall({\n            ...call,\n            args,\n            argsHash,\n            rule: verdict.rule,\n            why: verdict.why,\n            ...(verdict.ttlMs !== undefined ? { ttlMs: verdict.ttlMs } : {}),\n            ...(files ? { files } : {}),\n            ...(verdict.standing ? { standing: true } : {}),\n            ...(context.agentPath ? { agentPath: context.agentPath } : {}),\n            ...(verdict.alsoMatched ? { alsoMatched: verdict.alsoMatched } : {}),\n            ...(verdict.rewrittenBy ? { rewrittenBy: verdict.rewrittenBy } : {}),\n            ...(spec.agent !== undefined ? { agent: spec.agent } : {}),\n          });\n          if (outcome.kind === \"approved\" || outcome.kind === \"standing\") {\n            // the audit line names the approval, or the standing approval, that let it through\n            record(true, outcome.kind === \"approved\" ? outcome.approval.id : outcome.grant.id);\n            if (repeats && limited) repeats.record(limits, call.server, call.tool, argsHash);\n            return run();\n          }\n          record(false, outcome.approval.id);"
   },
   "resolveCall": {
    "id": "resolveCall",
    "file": "src/gateway/approvals.ts",
-   "line": 303,
-   "text": "  resolveCall(request: AskRequest): CallOutcome {\n    return this.update((approvals, now, standing): CallOutcome => {\n      const sameCall = approvals.filter(\n        (a) => a.server === request.server && a.tool === request.tool && a.argsHash === request.argsHash && isLive(a, now),\n      );\n      // A denial wins over everything else for the same call.\n      const denied = sameCall.find((a) => a.status === \"denied\");\n      if (denied) return { kind: \"denied\", approval: denied };\n      const approved = sameCall.find((a) => a.status === \"approved\");\n      let replaced: Approval | undefined;\n      if (approved && sameFiles(approved.files, request.files)) {\n        approved.status = \"used\";\n        approved.usedAt = new Date(now).toISOString();\n        return { kind: \"approved\", approval: approved };\n      }\n      if (approved) {\n        // A file changed or went away since the human saw the request: this yes was for other content.\n        approved.status = \"stale\";\n        replaced = approved;\n      }\n      // A standing approval answers only when the rule allows it, and never over a denial (above).\n      const grant = request.standing ? standing.find((g) => covers(g, request, now)) : undefined;\n      if (grant) {\n        grant.used++;\n        grant.lastUsedAt = new Date(now).toISOString();\n        return { kind: \"standing\", grant };\n      }\n      const pending = sameCall.find((a) => a.status === \"pending\");\n      if (pending) return { kind: \"pending\", approval: pending, created: false, ...(replaced ? { replaced } : {}) };\n      const created: Approval = {\n        id: newId(\"ap\", approvals),\n        server: request.server,\n        tool: request.tool,\n        argsHash: request.argsHash,\n        args: request.args,\n        ...(request.files ? { files: request.files } : {}),\n        rule: request.rule,\n        why: request.why,\n        ...(request.agentPath ? { agentPath: request.agentPath } : {}),\n        ...(request.alsoMatched ? { alsoMatched: request.alsoMatched } : {}),\n        ...(request.rewrittenBy ? { rewrittenBy: request.rewrittenBy } : {}),\n        status: \"pending\",\n        createdAt: new Date(now).toISOString(),\n        expiresAt: new Date(now + (request.ttlMs ?? this.ttlMs)).toISOString(),\n      };"
+   "line": 313,
+   "text": "  resolveCall(request: AskRequest): CallOutcome {\n    return this.update((approvals, now, standing): CallOutcome => {\n      // The same call from the same agent: an approval made for one agent's call is not another's.\n      const sameCall = approvals.filter(\n        (a) => a.server === request.server && a.tool === request.tool && a.argsHash === request.argsHash && a.agent === request.agent && isLive(a, now),\n      );\n      // A denial wins over everything else for the same call.\n      const denied = sameCall.find((a) => a.status === \"denied\");\n      if (denied) return { kind: \"denied\", approval: denied };\n      const approved = sameCall.find((a) => a.status === \"approved\");\n      let replaced: Approval | undefined;\n      if (approved && sameFiles(approved.files, request.files)) {\n        approved.status = \"used\";\n        approved.usedAt = new Date(now).toISOString();\n        return { kind: \"approved\", approval: approved };\n      }\n      if (approved) {\n        // A file changed or went away since the human saw the request: this yes was for other content.\n        approved.status = \"stale\";\n        replaced = approved;\n      }\n      // A standing approval answers only when the rule allows it, and never over a denial (above).\n      const grant = request.standing ? standing.find((g) => covers(g, request, now)) : undefined;\n      if (grant) {\n        grant.used++;\n        grant.lastUsedAt = new Date(now).toISOString();\n        return { kind: \"standing\", grant };\n      }\n      const pending = sameCall.find((a) => a.status === \"pending\");\n      if (pending) return { kind: \"pending\", approval: pending, created: false, ...(replaced ? { replaced } : {}) };\n      const created: Approval = {\n        id: newId(\"ap\", approvals),\n        server: request.server,\n        tool: request.tool,\n        argsHash: request.argsHash,\n        args: request.args,\n        ...(request.files ? { files: request.files } : {}),\n        rule: request.rule,\n        why: request.why,\n        ...(request.agentPath ? { agentPath: request.agentPath } : {}),\n        ...(request.alsoMatched ? { alsoMatched: request.alsoMatched } : {}),\n        ...(request.rewrittenBy ? { rewrittenBy: request.rewrittenBy } : {}),\n        ...(request.agent !== undefined ? { agent: request.agent } : {}),\n        status: \"pending\",\n        createdAt: new Date(now).toISOString(),"
   },
   "approve": {
    "id": "approve",
    "file": "src/gateway/approvals.ts",
-   "line": 353,
+   "line": 365,
    "text": "  approve(id: string, input: DecisionInput = {}): Approval {\n    return this.update((approvals, now) => {\n      const approval = find(approvals, id);\n      if (approval.status !== \"pending\") throw new ApprovalError(`${id} is ${approval.status}; only a pending request can be approved`);\n      if (!isLive(approval, now)) throw new ApprovalError(`${id} expired at ${approval.expiresAt}; the agent has to make the call again to ask again`, { ...approval });\n      approval.status = \"approved\";\n      applyDecision(approval, now, input);\n      return approval;\n    });\n  }"
   },
   "auditWrite": {
    "id": "auditWrite",
    "file": "src/gateway/audit.ts",
-   "line": 141,
+   "line": 147,
    "text": "  write(entry: Omit\u003cAuditEntry, \"ts\" | \"args\">, args: Record\u003cstring, unknown>, now = new Date()): AuditEntry {\n    const line: AuditEntry = { ts: now.toISOString(), ...entry };\n    if (this.withArguments) line.args = args;\n    fs.appendFileSync(this.file, `${JSON.stringify(line)}\\n`, { mode: 0o600 });\n    return line;\n  }"
   },
   "forcePush": {
@@ -607,7 +607,7 @@
    "id": "verify",
    "file": "src/gateway/audit-tools.ts",
    "line": 153,
-   "text": "      // A call that ran after an ask: an approval let it through.\n      if (!id) {\n        problems.push({ line, why: `a call to ${call} that needed a human was forwarded without an approval id` });\n      } else if (id.startsWith(\"sa-\")) {\n        const grant = grants.get(id);\n        if (!grant) problems.push({ line, why: `forwarded under ${id}, which no standing-approval line granted before it` });\n        else {\n          grant.uses++;\n          if (grant.value.server !== v.server || grant.value.tool !== v.tool) problems.push({ line, why: `${id} was granted for ${String(grant.value.server)}__${String(grant.value.tool)}, not ${call}` });\n          if (grant.revokedAt !== undefined) problems.push({ line, why: `${id} was used after it was revoked (line ${grant.revokedAt})` });\n          if (typeof grant.value.maxUses === \"number\" && grant.uses > grant.value.maxUses) problems.push({ line, why: `${id} was used ${grant.uses} times; it allows ${grant.value.maxUses}` });\n          if (typeof v.ts === \"string\" && typeof grant.value.expiresAt === \"string\" && v.ts >= grant.value.expiresAt) problems.push({ line, why: `${id} was used after it expired (${grant.value.expiresAt})` });\n        }\n      } else {\n        const yes = approved.get(id);\n        if (!yes) problems.push({ line, why: `forwarded under ${id}, which no approval-decided line approved before it` });\n        else {\n          if (yes.value.server !== v.server || yes.value.tool !== v.tool || yes.value.argsHash !== v.argsHash) {\n            problems.push({ line, why: `forwarded under ${id}, which was approved for other arguments or another tool (line ${yes.line})` });\n          }\n          if (typeof v.ts === \"string\" && typeof yes.value.ts === \"string\" && v.ts \u003c yes.value.ts) problems.push({ line, why: `forwarded before ${id} was approved (line ${yes.line})` });\n        }\n        const before = used.get(id);\n        if (before !== undefined) problems.push({ line, why: `${id} let a second call through; it was used on line ${before}` });\n        else used.set(id, line);\n        const record = records.get(id);\n        if (record && record.status !== \"used\") problems.push({ line, why: `forwarded under ${id}, but approvals.json says it is ${record.status}` });\n        if (record && record.argsHash !== v.argsHash) problems.push({ line, why: `forwarded under ${id}, but approvals.json has other arguments for it` });"
+   "text": "      // A call that ran after an ask: an approval let it through.\n      if (!id) {\n        problems.push({ line, why: `a call to ${call} that needed a human was forwarded without an approval id` });\n      } else if (id.startsWith(\"sa-\")) {\n        const grant = grants.get(id);\n        if (!grant) problems.push({ line, why: `forwarded under ${id}, which no standing-approval line granted before it` });\n        else {\n          grant.uses++;\n          if (grant.value.server !== v.server || grant.value.tool !== v.tool) problems.push({ line, why: `${id} was granted for ${String(grant.value.server)}__${String(grant.value.tool)}, not ${call}` });\n          if (grant.value.agent !== v.agent) problems.push({ line, why: `${id} was granted ${forAgent(grant.value.agent)}, but this call came ${fromAgent(v.agent)}` });\n          if (grant.revokedAt !== undefined) problems.push({ line, why: `${id} was used after it was revoked (line ${grant.revokedAt})` });\n          if (typeof grant.value.maxUses === \"number\" && grant.uses > grant.value.maxUses) problems.push({ line, why: `${id} was used ${grant.uses} times; it allows ${grant.value.maxUses}` });\n          if (typeof v.ts === \"string\" && typeof grant.value.expiresAt === \"string\" && v.ts >= grant.value.expiresAt) problems.push({ line, why: `${id} was used after it expired (${grant.value.expiresAt})` });\n        }\n      } else {\n        const yes = approved.get(id);\n        if (!yes) problems.push({ line, why: `forwarded under ${id}, which no approval-decided line approved before it` });\n        else {\n          if (yes.value.server !== v.server || yes.value.tool !== v.tool || yes.value.argsHash !== v.argsHash) {\n            problems.push({ line, why: `forwarded under ${id}, which was approved for other arguments or another tool (line ${yes.line})` });\n          }\n          if (yes.value.agent !== v.agent) problems.push({ line, why: `forwarded under ${id}, which was approved ${forAgent(yes.value.agent)}, but this call came ${fromAgent(v.agent)} (line ${yes.line})` });\n          if (typeof v.ts === \"string\" && typeof yes.value.ts === \"string\" && v.ts \u003c yes.value.ts) problems.push({ line, why: `forwarded before ${id} was approved (line ${yes.line})` });\n        }\n        const before = used.get(id);\n        if (before !== undefined) problems.push({ line, why: `${id} let a second call through; it was used on line ${before}` });\n        else used.set(id, line);\n        const record = records.get(id);"
   }
  }
 }

@@ -1,0 +1,21 @@
+{
+  "servers": [
+    {
+      "name": "demo",
+      "command": "node",
+      "args": ["dist/test/gateway/fake-downstream.js"]
+    }
+  ],
+  "policy": "policy.example.json",
+  "stateDir": ".agent-gate",
+  "profiles": {
+    "read-only": { "demo": ["echo", "search_*"] }
+  },
+  "http": {
+    "listen": { "host": "127.0.0.1", "port": 8788 },
+    "agents": [
+      { "name": "builder", "sha256": "bbc627634c96ab790461fa070f7648a369a742d945812196fd84cc64d11b88ed" },
+      { "name": "reader", "sha256": "367d765d57df060416a2e39dc82a405ece2ec7bed9add34f22739394cc572355", "profile": "read-only" }
+    ]
+  }
+}

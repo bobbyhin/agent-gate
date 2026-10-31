@@ -16,6 +16,7 @@ import { AuditLog, type ApprovalEvent } from "./audit.js";
 import { auditStats, loadExpected, readAudit, scoreTrajectory, trajectoryOf, verifyAudit } from "./audit-tools.js";
 import { loadConfig, loadPolicy, type GatewayConfig } from "./config.js";
 import { bindFiles } from "./files.js";
+import { startHttpGateway } from "./http-server.js";
 import { createGateway, SEPARATOR } from "./server.js";
 import { downstreamCandidates, openApiCandidates, suggest, type Candidate } from "./suggest.js";
 import { ToolPins } from "./tool-pins.js";
@@ -25,12 +26,14 @@ const USAGE = `Usage:
   agent-gate serve [--profile <name>] [--config <file>]
                                                       run the MCP gateway on stdin/stdout; with a profile
                                                       from the config, the agent sees only its tools
+  agent-gate serve --http [--config <file>]           serve the agents in the config's "http" section over
+                                                      Streamable HTTP at /mcp, each with its own key
   agent-gate approvals list [--all] [--json] [--config <file>]
   agent-gate approvals show <id> [--config <file>]    print one request in full
   agent-gate approvals approve <id> [--note <text>] [--yes] [--config <file>]
   agent-gate approvals deny <id> [--reason <text>] [--config <file>]
   agent-gate approvals stats [--json] [--config <file>]   decisions per rule: counts, wait, deny rate
-  agent-gate approvals grant <server>__<tool> --uses <n> --hours <h> [--arg <name>=<glob>]... [--note <text>] [--config <file>]
+  agent-gate approvals grant <server>__<tool> --uses <n> --hours <h> [--arg <name>=<glob>]... [--agent <name>] [--note <text>] [--config <file>]
   agent-gate approvals grants [--all] [--json] [--config <file>]   standing approvals
   agent-gate llm serve [--config <file>]              run the LLM gateway (HTTP)
   agent-gate usage [--json] [--config <file>]         LLM spend per gateway key: today, this month, caps
@@ -55,6 +58,7 @@ const USAGE = `Usage:
 --yes skips that, for scripts.
 "grant" makes a standing approval: up to <n> calls to one tool within <h> hours, whose listed
 arguments match their globs; only policy rules with "standing": true use it. "deny sa-..." revokes it.
+With --agent it covers that HTTP agent's calls only; without, only calls that come with no agent (stdio).
 A deny --reason is shown to the agent the next time it makes the call; an approve --note is kept
 with the approval. Both are stored, with the OS user who ran the command, in approvals.json and
 in the audit log.
@@ -65,13 +69,13 @@ The LLM gateway's ("llm serve", "usage") is --config, else $AGENT_GATE_LLM_CONFI
 
 /** Every command: the options it takes, the ones it needs, and whether it takes an id after the action word. */
 const COMMANDS: Readonly<Record<string, { options: readonly string[]; required?: readonly string[]; id?: true }>> = {
-  serve: { options: ["profile"] },
+  serve: { options: ["profile", "http"] },
   "approvals list": { options: ["all", "json"] },
   "approvals show": { options: [], id: true },
   "approvals approve": { options: ["note", "yes"], id: true },
   "approvals deny": { options: ["reason"], id: true },
   "approvals stats": { options: ["json"] },
-  "approvals grant": { options: ["uses", "hours", "arg", "note"], required: ["uses", "hours"], id: true },
+  "approvals grant": { options: ["uses", "hours", "arg", "note", "agent"], required: ["uses", "hours"], id: true },
   "approvals grants": { options: ["all", "json"] },
   "llm serve": { options: [] },
   usage: { options: ["json", "by", "verify"] },
@@ -131,6 +135,8 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
         run: { type: "string" },
         openapi: { type: "string" },
         profile: { type: "string" },
+        http: { type: "boolean", default: false },
+        agent: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -160,7 +166,13 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
   }
 
   try {
-    if (name === "serve") return await serve(configFile, values.profile);
+    if (name === "serve") {
+      if (values.http && values.profile !== undefined) {
+        io.err(`agent-gate: --profile is for one stdio client; with --http each agent's profile is set in the config\n\n${USAGE}`);
+        return 2;
+      }
+      return values.http ? await serveHttp(configFile) : await serve(configFile, values.profile);
+    }
     if (name === "llm serve") return await serveLlm(llmConfigFile);
     if (name === "usage") {
       if (values.by !== undefined && values.verify) {
@@ -233,6 +245,17 @@ async function serve(configFile: string, profile: string | undefined): Promise<n
   await new Promise<void>((resolve) => {
     process.stdin.once("end", resolve);
     process.stdin.once("close", resolve);
+    process.once("SIGINT", resolve);
+    process.once("SIGTERM", resolve);
+  });
+  await gateway.close();
+  return 0;
+}
+
+async function serveHttp(configFile: string): Promise<number> {
+  const config = loadConfig(configFile);
+  const gateway = await startHttpGateway(config);
+  await new Promise<void>((resolve) => {
     process.once("SIGINT", resolve);
     process.once("SIGTERM", resolve);
   });
@@ -463,6 +486,7 @@ function list(store: ApprovalStore, all: boolean, json: boolean, io: Io): number
         `  why:     ${a.why} (rule ${a.rule})`,
         ...(a.alsoMatched ?? []).map((m) => `  also:    ${m.rule} (${m.decision}: ${m.why})`),
         ...(a.rewrittenBy ? [`  edited:  by ${a.rewrittenBy.join(", ")}; the args below are what will run`] : []),
+        ...(a.agent !== undefined ? [`  agent:   ${a.agent} (its key; only its own call can use this approval)`] : []),
         ...(a.agentPath ? [`  agents:  ${a.agentPath}`] : []),
         `  args:    ${preview(canonicalJson(a.args))}`,
         ...(a.files ?? []).map((f) => `  file:    ${f.path} ${f.sha256 ?? "(did not exist)"}`),
@@ -477,7 +501,7 @@ function list(store: ApprovalStore, all: boolean, json: boolean, io: Io): number
 }
 
 /** approvals grant <server>__<tool> --uses <n> --hours <h> [--arg name=glob]... : a standing approval (ADR 0006). */
-function grant(store: ApprovalStore, audit: AuditLog, config: GatewayConfig, name: string, values: { uses?: string; hours?: string; arg?: string[]; note?: string }, io: Io): number {
+function grant(store: ApprovalStore, audit: AuditLog, config: GatewayConfig, name: string, values: { uses?: string; hours?: string; arg?: string[]; note?: string; agent?: string }, io: Io): number {
   const at = name.indexOf(SEPARATOR);
   if (at <= 0 || at + SEPARATOR.length === name.length) {
     io.err(`agent-gate: name the tool as <server>${SEPARATOR}<tool>, as the agent sees it\n`);
@@ -486,6 +510,7 @@ function grant(store: ApprovalStore, audit: AuditLog, config: GatewayConfig, nam
   const server = name.slice(0, at);
   const tool = name.slice(at + SEPARATOR.length);
   if (!config.servers.some((s) => s.name === server)) throw new ApprovalError(`the config has no server named "${server}"`);
+  if (values.agent !== undefined && !config.http?.agents.some((a) => a.name === values.agent)) throw new ApprovalError(`the config has no HTTP agent named "${values.agent}"`);
   const args: Record<string, string> = {};
   for (const spec of values.arg ?? []) {
     const eq = spec.indexOf("=");
@@ -495,11 +520,11 @@ function grant(store: ApprovalStore, audit: AuditLog, config: GatewayConfig, nam
     }
     args[spec.slice(0, eq)] = spec.slice(eq + 1);
   }
-  const granted = store.grant({ server, tool, args, maxUses: Number(values.uses), ttlMs: Number(values.hours) * 3_600_000, by: currentUser(), note: values.note });
+  const granted = store.grant({ server, tool, args, ...(values.agent !== undefined ? { agent: values.agent } : {}), maxUses: Number(values.uses), ttlMs: Number(values.hours) * 3_600_000, by: currentUser(), note: values.note });
   writeStanding(audit, granted, "granted");
   const pattern = Object.entries(args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ");
   io.out(
-    `granted ${granted.id}: up to ${granted.maxUses} call(s) to ${server}${SEPARATOR}${tool}${pattern ? ` with ${pattern}` : " with any arguments"}, until ${granted.expiresAt}.\n` +
+    `granted ${granted.id}: up to ${granted.maxUses} call(s) to ${server}${SEPARATOR}${tool}${pattern ? ` with ${pattern}` : " with any arguments"}${granted.agent !== undefined ? ` from agent "${granted.agent}"` : ""}, until ${granted.expiresAt}.\n` +
       `Only rules with "standing": true in the policy use it, and a denial of a call still wins. Revoke it with: agent-gate approvals deny ${granted.id}\n`,
   );
   return 0;
@@ -517,7 +542,7 @@ function grants(store: ApprovalStore, all: boolean, json: boolean, io: Io): numb
   for (const g of shown) {
     const state = live(g) ? "active" : g.status === "revoked" ? "revoked" : g.used >= g.maxUses ? "used up" : "expired";
     const pattern = Object.entries(g.args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ") || "any arguments";
-    io.out(`${g.id}  ${state}  ${g.server}${SEPARATOR}${g.tool}  ${pattern}\n  uses:    ${g.used} of ${g.maxUses}\n  until:   ${g.expiresAt}${g.decidedBy ? `  by ${g.decidedBy}` : ""}\n${g.decisionNote ? `  note:    ${g.decisionNote}\n` : ""}\n`);
+    io.out(`${g.id}  ${state}  ${g.server}${SEPARATOR}${g.tool}  ${pattern}\n${g.agent !== undefined ? `  agent:   ${g.agent}\n` : ""}  uses:    ${g.used} of ${g.maxUses}\n  until:   ${g.expiresAt}${g.decidedBy ? `  by ${g.decidedBy}` : ""}\n${g.decisionNote ? `  note:    ${g.decisionNote}\n` : ""}\n`);
   }
   return 0;
 }
@@ -529,6 +554,7 @@ function writeStanding(audit: AuditLog, g: StandingApproval, decision: "granted"
     server: g.server,
     tool: g.tool,
     args: g.args,
+    ...(g.agent !== undefined ? { agent: g.agent } : {}),
     maxUses: g.maxUses,
     used: g.used,
     expiresAt: g.expiresAt,
@@ -561,6 +587,7 @@ export function readBack(a: Approval, config: Pick<GatewayConfig, "fileBinding">
   return [
     `Approve this call? ${a.id}`,
     `  call:     ${a.server}${SEPARATOR}${a.tool}`,
+    ...(a.agent !== undefined ? [`  agent:    ${a.agent} (known by its key; only its own call can use this approval)`] : []),
     ...(a.agentPath ? [`  agents:   ${a.agentPath} (as the client states it)`] : []),
     `  args:     ${args[0]}`,
     ...args.slice(1).map((line) => `            ${line}`),
@@ -611,6 +638,7 @@ function writeEvent(audit: AuditLog, a: Approval, decision: ApprovalEvent["decis
     ...(by ? { decidedBy: by } : {}),
     ...(decision !== "expired" && a.decisionNote ? { note: a.decisionNote } : {}),
     ...(decision === "approved" && a.confirmation ? { confirmation: a.confirmation } : {}),
+    ...(a.agent !== undefined ? { agent: a.agent } : {}),
   });
 }
 

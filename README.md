@@ -339,7 +339,8 @@ analyze("ls");
 
 The shell guard only sees shell commands. Spending money and posting usually happen through tools
 instead: an MCP server for payments, email, chat or a code host. The MCP gateway is the layer for
-those. It is a stdio MCP server that sits between the agent and one or more downstream MCP
+those. It is an MCP server, over stdio for one agent or over Streamable HTTP for several (see
+[Agents over HTTP](#agents-over-http)), that sits between the agent and one or more downstream MCP
 servers: local ones that it starts over stdio, or remote ones that it reaches over Streamable HTTP.
 The agent sees every downstream tool as `<server>__<tool>`, and before a call is forwarded, a
 policy decides one of four things:
@@ -426,6 +427,8 @@ example `{ "name": "files", "command": "npx", "args": ["-y", "@modelcontextproto
   tools. A connection started with `serve --profile read-only` sees and may call only the tools that
   its globs match, on the servers it names; a server it does not name shows it nothing. See
   [Tool lists](#tool-lists).
+- `http` (optional): the agents that may connect over the network with `serve --http`, and where to
+  listen. See [Agents over HTTP](#agents-over-http).
 
 Then give the agent the gateway instead of the downstream servers. For Claude Code, in `.mcp.json`:
 
@@ -443,6 +446,90 @@ Then give the agent the gateway instead of the downstream servers. For Claude Co
 Some clients add their own prefix (Claude Code shows `mcp__gate__demo__delete_file`) and limit
 the length of tool names, so keep server names short. To give an agent a narrower set of tools than
 another, add `"--profile", "read-only"` to its `args` (one `serve` process serves one client).
+
+### Agents over HTTP
+
+`agent-gate serve --http` serves several agents from one process, over Streamable HTTP at `/mcp`. Each
+agent has a key, and the config holds only the key's SHA-256; an agent may have a policy file and a
+profile of its own. `gateway.config.http.example.json` has two:
+
+```json
+"http": {
+  "listen": { "host": "127.0.0.1", "port": 8788 },
+  "agents": [
+    { "name": "builder", "sha256": "bbc627634c96ab790461fa070f7648a369a742d945812196fd84cc64d11b88ed" },
+    { "name": "reader", "sha256": "367d765d57df060416a2e39dc82a405ece2ec7bed9add34f22739394cc572355", "profile": "read-only" }
+  ]
+}
+```
+
+Their keys are `demo-builder-key-not-a-secret` and `demo-reader-key-not-a-secret`. For a real agent,
+make a key with `KEY="agk_$(openssl rand -hex 24)"`, give it to the agent, and put the output of
+`printf %s "$KEY" | shasum -a 256` in the config; add `"policy": "<file>"` to give the agent a policy
+other than the config's. A real run, from the repository root after `npm run build` (`Date` and
+connection headers left out):
+
+```
+$ node bin/agent-gate.js serve --http --config gateway.config.http.example.json &
+[agent-gate] listening on http://127.0.0.1:8788/mcp for 2 agent(s), as 127.0.0.1:8788, localhost:8788, [::1]:8788
+
+$ export AGENT_KEY=demo-builder-key-not-a-secret
+$ curl -s -i http://127.0.0.1:8788/mcp -H "Authorization: Bearer $AGENT_KEY" \
+    -H "content-type: application/json" -H "accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+HTTP/1.1 200 OK
+content-type: application/json
+mcp-session-id: b017edba-61f0-4166-bd1c-08d27b878280
+content-length: 165
+
+{"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"agent-gate","version":"0.1.0"}},"jsonrpc":"2.0","id":1}
+```
+
+After `notifications/initialized`, the builder calls `demo__delete_file` in that session and gets the
+same answer as over stdio, `Approval id: ap-82e54b9f`. The human sees which agent asked:
+
+```
+$ node bin/agent-gate.js approvals list --config gateway.config.http.example.json
+ap-82e54b9f  pending  demo__delete_file
+  why:     Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)
+  agent:   builder (its key; only its own call can use this approval)
+  args:    {"path":"notes/old.md"}
+  created: 2026-10-31T09:13:40.022Z  expires: 2026-11-01T09:13:40.022Z
+```
+
+Once it is approved, the builder's repeat runs (`pretended to delete notes/old.md`), and both call lines
+say `"agent": "builder"`. A request without a key, and the reader's key with the builder's session id:
+
+```
+HTTP/1.1 401 Unauthorized
+www-authenticate: Bearer realm="agent-gate-mcp"
+
+{"jsonrpc":"2.0","error":{"code":-32000,"message":"agent-gate: missing or unknown agent key; send it as Authorization: Bearer <key>"},"id":null}
+
+HTTP/1.1 404 Not Found
+
+{"jsonrpc":"2.0","error":{"code":-32001,"message":"Session not found"},"id":null}
+```
+
+What holds for every agent:
+
+- **Its key is its identity.** No key or an unknown one gets 401, and nothing is opened. Each MCP
+  session gets its own `connId` and belongs to the agent that opened it: another agent's key gets 404
+  for its id, the same answer as an id that does not exist.
+- **Its own rules.** Calls are decided by the agent's policy, and it sees and may call only the tools
+  of its profile, on top of each server's `expose`. Every call line names the agent.
+- **Its own approvals.** An approval is bound to the agent whose call asked for it: another agent's
+  identical call is asked about anew. `approvals grant --agent <name>` makes a standing approval for
+  one agent; without `--agent`, a grant covers only calls that come with no agent (stdio). `audit
+  verify` fails a call that ran under another agent's approval or grant.
+- **Only the gateway's own names.** The `Host` header, and the `Origin` header when there is one, must
+  name the listener (any loopback spelling of it) or one of `http.allowedHosts`, else 403. That stops a
+  web page from reaching the listener through a browser (DNS rebinding). The listener binds 127.0.0.1
+  unless `http.listen.host` says otherwise, and any other address needs `allowedHosts`.
+- Plain HTTP with static keys, and no OAuth flow: for anything beyond this machine, put a TLS proxy in
+  front. Sessions live in memory; a restart ends them, and one left idle for `sessionIdleMinutes`
+  (default 60) is closed. Why it is built this way, and what deploying it would take:
+  [ADR 0012](docs/adr/0012-an-http-endpoint-for-agents.md).
 
 ### An approval, step by step
 
@@ -546,8 +633,8 @@ agent-gate approvals approve <id> [--note <text>] [--yes]
                                                     a note is kept with the approval
 agent-gate approvals deny <id> [--reason <text>]    the reason is shown to the agent
 agent-gate approvals stats [--json]                 per rule: approved, denied, expired, waiting, deny rate, median wait
-agent-gate approvals grant <server>__<tool> --uses <n> --hours <h> [--arg <name>=<glob>]... [--note <text>]
-                                                    a standing approval (deny sa-… revokes it)
+agent-gate approvals grant <server>__<tool> --uses <n> --hours <h> [--arg <name>=<glob>]... [--agent <name>] [--note <text>]
+                                                    a standing approval (deny sa-… revokes it); --agent: for that HTTP agent
 agent-gate approvals grants [--all] [--json]        standing approvals in force (--all: also used up, expired, revoked)
 agent-gate audit stats [--json]                     per tool: calls, decisions, errors, p50/p95 time (see Audit log)
 agent-gate audit verify [--json]                    the log checked against the gateway's rules (exit 1 on a problem)
@@ -592,6 +679,8 @@ Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.con
   that exact call can run. Neither knows whether the world changed in between: the system that holds
   the resource (the payment provider, the deploy tool) still has to check at the moment of the action.
 - `block` is never queued and cannot be approved.
+- **Bound to the agent** (with `serve --http`). An approval is for the call of the agent that asked;
+  another agent's identical call needs its own. See [Agents over HTTP](#agents-over-http).
 - **Standing approvals.** For a frequent, lower-risk call, a human can grant one yes for a bounded
   set of calls: `agent-gate approvals grant demo__execute_sql --arg "sql=INSERT INTO events*" --uses 10
   --hours 24`. It covers calls to that one tool whose listed arguments match their globs, at most
@@ -979,8 +1068,10 @@ context and an agent path, plus a blocked shell call; the user name is changed, 
 ```
 
 - `connId` names the gateway connection (one per `agent-gate serve` process, which serves one
-  client) and `seq` numbers its calls 1, 2, 3 in the order they came in. Together they tie a call
-  line to its result line, and they order the calls of one session.
+  client, or one per session with `serve --http`) and `seq` numbers its calls 1, 2, 3 in the order
+  they came in. Together they tie a call line to its result line, and they order the calls of one
+  session. `agent` names the HTTP agent, known by its key, and `profile` the profile the connection
+  runs with, when there is one.
 - `forwarded` says whether the call reached the downstream server.
 - `alsoMatched` names the rules after the deciding one that matched too. `originalArgsHash` and
   `rewrittenBy` appear when rewrite rules edited the arguments (see [Policy](#policy)); `argsHash`
@@ -1194,7 +1285,10 @@ data:
 - A downstream call may take `timeoutSeconds` (default 60), and progress notifications are not
   relayed, so a tool that runs longer fails through the gateway with the request-timeout error.
 - Remote servers authenticate with headers from the environment only: there is no OAuth flow. The
-  gateway is a client of them; it does not listen on the network itself.
+  gateway listens on the network only with `serve --http`: plain HTTP with static keys, bound to
+  127.0.0.1 by default, with no TLS of its own and no OAuth. Approvals are answered at the CLI next
+  to the state directory, so a deployment on another machine would need another way to reach the
+  human (ADR 0012).
 
 ## LLM gateway
 
@@ -2008,6 +2102,7 @@ records written after a call has already happened; those fail loudly instead, on
 | MCP gateway | it is killed (`kill -9`) mid-run | the queue survives; an approved call runs once after a restart; no state file is left half written | `test/gateway/crash.test.ts` |
 | MCP gateway | a downstream server fails to start or refuses the gateway's header; the header's variable is not set | the gateway does not start, naming the server or the variable and never a header value | `test/gateway/http-downstream.test.ts` |
 | MCP gateway | a downstream server goes away later | its calls fail, and their result lines say so; the other servers' calls go on | `test/gateway/http-downstream.test.ts` |
+| MCP gateway over HTTP | a request has no key or an unknown one, another `Host` or `Origin`, or another agent's session id | 401, 403 or 404 before the request reaches a session; nothing is opened or run | `test/gateway/http-endpoint.test.ts` |
 | LLM gateway | `ledger.json` is damaged | the call is refused before anything is sent upstream, because an empty ledger would hand every key its whole budget again | `test/llm/failure.test.ts`, `budget.test.ts` |
 | LLM gateway | a provider key's variable is not set | the gateway does not start, naming the variable | `test/llm/cli.test.ts` |
 | LLM gateway | the upstream answers 5xx or 408, or times out | retries after a random wait, then the fallback; else 502 or 504, and nothing is charged | `test/llm/upstream.test.ts`, `e2e.test.ts` |
@@ -2076,7 +2171,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 429 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 450 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
@@ -2099,7 +2194,10 @@ structured content, instruction-like text flagged, ordinary text left alone), `a
 the gateway wrote passes; each of ten hand edits fails it) and `audit trajectory` (the three modes,
 precision and recall), a remote server over Streamable HTTP on 127.0.0.1 (its header from the
 environment, a timeout, a 401 at startup whose quoted header value stays out of the log, a server
-that goes away), what the gateway does when one of its own parts fails, and an end-to-end test. That test starts `agent-gate serve`
+that goes away), agents over HTTP (`serve --http` on 127.0.0.1: each agent's own policy and profile,
+401 without a key or with a wrong one, 403 for another `Host` or `Origin`, 404 for another agent's
+session, an approval or a standing approval that one agent cannot use for another, `audit verify` on
+the whole log), what the gateway does when one of its own parts fails, and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log,
 including a call-result line, with the hash of what came back, for every forwarded call.
@@ -2179,7 +2277,7 @@ an evaluation set of whole runs, each replayed and checked step by step. It chec
 not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 429/429 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 450/450 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -2190,7 +2288,8 @@ Node 20 and 22; a second job, which starts only after those pass, checks the dep
 src/command-guard.js                          the analyzer: analyze(command) -> { action, label, why }
 src/command-guard.d.ts                        its types, for the TypeScript gateway
 bin/claude-pretooluse-hook.js                 the Claude Code PreToolUse hook
-src/gateway/server.ts                         the MCP gateway: lists <server>__<tool>, decides, forwards
+src/gateway/server.ts                         the MCP gateway: lists <server>__<tool>, decides, forwards (one core, a session per client)
+src/gateway/http-server.ts                    serve --http: agents over Streamable HTTP, each known by its key
 src/gateway/policy.ts                         the policy engine (pure but for path matchers): evaluate(policy, call) -> verdict
 src/gateway/approvals.ts                      the approval queue in <stateDir>/approvals.json
 src/gateway/repeats.ts                        loop limits: recent runs per call in <stateDir>/repeats.json
@@ -2221,6 +2320,7 @@ src/llm/config.ts                             loads and checks the LLM gateway c
 bin/agent-gate.js                             the CLI entry point (runs the build in dist/)
 policy.example.json                           the red lines as a gateway policy
 gateway.config.example.json                   a config that proxies the fake test server
+gateway.config.http.example.json              the same server for two agents over HTTP, with demo keys
 llm-policy.example.json                       the leak guard rules
 llm-gateway.config.example.json               an LLM gateway config for the fake upstream
 llm-gateway.config.ollama.example.json        a cloud upstream for most calls, Ollama on this machine for personal numbers
@@ -2279,6 +2379,7 @@ docs/adr/0007-where-agent-gate-sits.md        a control plane in front of calls,
 docs/adr/0008-second-reviewer-escalate-only.md a second reviewer that can only make a decision stricter (partly built)
 docs/adr/0010-retries.md                      why retries wait a random time up to a cap, and a 429 goes to the fallback first
 docs/adr/0011-streaming.md                    why a streamed answer is held until it is scanned, unless scanning is off
+docs/adr/0012-an-http-endpoint-for-agents.md  agents over HTTP: a key per agent, approvals bound to it; what deploying it needs
 tsconfig.json                                 compiles src/ and test/ into dist/
 AGENTS.md                                     build, layout and rules for coding agents
 CLAUDE.md                                     one line that points Claude Code to AGENTS.md

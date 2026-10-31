@@ -6,7 +6,9 @@
 // once, and is then marked "used". Denied and expired approvals never let anything through.
 // With "fileBinding" in the config, it is also bound to the content of the files the call names
 // (src/gateway/files.ts): if one changed before the call came back, the approval is marked "stale"
-// and a new request is queued.
+// and a new request is queued. A call from an HTTP agent (serve --http) is bound to that agent too:
+// another agent's identical call does not use it, and a standing approval covers only the agent it
+// names (or, naming none, only calls that come with no agent: the stdio gateway).
 //
 // Everything lives in one JSON file, <stateDir>/approvals.json. The gateway and the CLI are
 // separate processes, so every change is a locked read-modify-write, and every write goes to a
@@ -46,6 +48,8 @@ export interface Approval {
   alsoMatched?: AlsoMatched[];
   /** Rewrite rules that edited the arguments; `args` are the edited ones, the call that will run. */
   rewrittenBy?: string[];
+  /** The HTTP agent whose call made the request (authenticated by its key); only its own identical call can use it. */
+  agent?: string;
   status: ApprovalStatus;
   createdAt: string;
   /** createdAt + TTL. After this, the record cannot be approved and cannot allow a call. */
@@ -90,6 +94,8 @@ export interface AskRequest {
   agentPath?: string;
   alsoMatched?: AlsoMatched[];
   rewrittenBy?: string[];
+  /** The HTTP agent making the call; absent for the stdio gateway. */
+  agent?: string;
 }
 
 /**
@@ -105,6 +111,8 @@ export interface StandingApproval {
   tool: string;
   /** Argument name -> glob (as in policy rules: whole value, case-insensitive, * and ?). */
   args: Record<string, string>;
+  /** The HTTP agent it is for; absent: calls that come with no agent (the stdio gateway). */
+  agent?: string;
   maxUses: number;
   used: number;
   status: "active" | "revoked";
@@ -119,6 +127,7 @@ export interface GrantInput extends DecisionInput {
   server: string;
   tool: string;
   args: Record<string, string>;
+  agent?: string;
   maxUses: number;
   ttlMs: number;
 }
@@ -260,6 +269,7 @@ export class ApprovalStore {
         server: input.server,
         tool: input.tool,
         args: { ...input.args },
+        ...(input.agent !== undefined ? { agent: input.agent } : {}),
         maxUses: input.maxUses,
         used: 0,
         status: "active",
@@ -302,8 +312,9 @@ export class ApprovalStore {
    */
   resolveCall(request: AskRequest): CallOutcome {
     return this.update((approvals, now, standing): CallOutcome => {
+      // The same call from the same agent: an approval made for one agent's call is not another's.
       const sameCall = approvals.filter(
-        (a) => a.server === request.server && a.tool === request.tool && a.argsHash === request.argsHash && isLive(a, now),
+        (a) => a.server === request.server && a.tool === request.tool && a.argsHash === request.argsHash && a.agent === request.agent && isLive(a, now),
       );
       // A denial wins over everything else for the same call.
       const denied = sameCall.find((a) => a.status === "denied");
@@ -341,6 +352,7 @@ export class ApprovalStore {
         ...(request.agentPath ? { agentPath: request.agentPath } : {}),
         ...(request.alsoMatched ? { alsoMatched: request.alsoMatched } : {}),
         ...(request.rewrittenBy ? { rewrittenBy: request.rewrittenBy } : {}),
+        ...(request.agent !== undefined ? { agent: request.agent } : {}),
         status: "pending",
         createdAt: new Date(now).toISOString(),
         expiresAt: new Date(now + (request.ttlMs ?? this.ttlMs)).toISOString(),
@@ -413,7 +425,7 @@ export class ApprovalStore {
 /** Does this standing approval cover the call now: same server and tool, live, uses left, every listed argument a matching string? */
 function covers(grant: StandingApproval, request: AskRequest, now: number): boolean {
   if (grant.status !== "active" || grant.used >= grant.maxUses || now >= Date.parse(grant.expiresAt)) return false;
-  if (grant.server !== request.server || grant.tool !== request.tool) return false;
+  if (grant.server !== request.server || grant.tool !== request.tool || grant.agent !== request.agent) return false;
   return Object.entries(grant.args).every(([name, glob]) => {
     const value = Object.prototype.hasOwnProperty.call(request.args, name) ? request.args[name] : undefined;
     return typeof value === "string" && globToRegExp(glob).test(value);

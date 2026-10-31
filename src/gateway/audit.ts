@@ -30,6 +30,8 @@ export interface ApprovalEvent {
   note?: string;
   /** For "approved": "typed" after the read-back, or "--yes". */
   confirmation?: "typed" | "--yes";
+  /** The HTTP agent the request belongs to; only its own call can use the approval. */
+  agent?: string;
 }
 
 /** A standing approval granted or revoked by a human (ADR 0006). Its globs are the human's patterns, not call values. */
@@ -41,6 +43,8 @@ export interface StandingEvent {
   server: string;
   tool: string;
   args: Record<string, string>;
+  /** The HTTP agent it covers; absent: calls with no agent (stdio). */
+  agent?: string;
   maxUses: number;
   used: number;
   expiresAt: string;
@@ -68,6 +72,8 @@ export interface AuditEntry extends CallContext {
   transport?: "http";
   /** The profile the connection ran with (config "profiles"), when it had one. */
   profile?: string;
+  /** The HTTP agent that made the call, known by its key (serve --http); absent over stdio. */
+  agent?: string;
   /** Set when rewrite rules edited the arguments: argsHash is then the edited call's, this the agent's. */
   originalArgsHash?: string;
   rewrittenBy?: string[];
