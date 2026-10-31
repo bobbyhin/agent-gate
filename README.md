@@ -514,7 +514,10 @@ Then give the agent the gateway instead of the downstream servers. For Claude Co
 
 Some clients add their own prefix (Claude Code shows `mcp__gate__demo__delete_file`) and limit
 the length of tool names, so keep server names short. To give an agent a narrower set of tools than
-another, add `"--profile", "read-only"` to its `args` (one `serve` process serves one client).
+another, add `"--profile", "read-only"` to its `args` (one `serve` process serves one client). Over
+stdio a profile holds only while the agent cannot change how its gateway is started (this file, or
+the command); for a tier the agent cannot choose, use `serve --http`, where the profile belongs to
+the agent's key.
 
 ### Agents over HTTP
 
@@ -845,8 +848,11 @@ list, as well as which calls run. A server's tools are listed minus four kinds:
   `demo__search_notes` only, while another agent's gateway, with `--profile full`, shows every tool.
   A call outside the profile is blocked (rule `not-in-profile`) and never forwarded, and every call
   line names the profile (`"profile": "read-only"`). A tool has to pass both: the server's `expose`
-  and the profile. A lower-tier agent then neither reads the higher tier's tools nor can call them,
-  and its list of tools costs fewer tokens. An unknown profile stops the gateway at startup.
+  and the profile. A lower-tier agent then neither reads the higher tier's tools nor can call them
+  through that gateway, and its list of tools costs fewer tokens. Over stdio this holds only while the
+  agent cannot change how its gateway is started (its MCP config or the `serve` command); for a tier
+  the agent cannot choose, use `serve --http`, where the profile belongs to the agent's key. An
+  unknown profile stops the gateway at startup.
 - **Always blocked.** A tool that the policy blocks whatever its arguments (a block rule that
   matches its name and has no `args`, with no rule before it that could let a call through) is left
   out. A call to it is still decided by the policy, and blocked.
