@@ -15,6 +15,14 @@ async function run(...argv: string[]): Promise<{ code: number; out: string; err:
   return { code, out, err };
 }
 
+/** Like run(), with a human who types `typed` at the prompt (undefined: end of input). */
+async function runTyping(typed: string | undefined, ...argv: string[]): Promise<{ code: number; out: string; err: string }> {
+  let out = "";
+  let err = "";
+  const code = await main(argv, { out: (t) => (out += t), err: (t) => (err += t), readLine: async () => typed });
+  return { code, out, err };
+}
+
 describe("agent-gate CLI", () => {
   it("prints usage for --help", async () => {
     const r = await run("--help");
@@ -31,6 +39,7 @@ describe("agent-gate CLI", () => {
     ["approvals", "stats", "ap-12345678"],
     ["approvals", "approve", "ap-12345678", "--reason", "a reason belongs to deny"],
     ["approvals", "deny", "ap-12345678", "--note", "a note belongs to approve"],
+    ["approvals", "deny", "ap-12345678", "--yes"],
     ["approvals", "list", "--reason", "x"],
     ["serve", "now"],
     ["--bogus"],
@@ -99,7 +108,7 @@ describe("approvals approve --note / deny --reason: the record, the audit line, 
   });
 
   it("approve --note stores the note, and list --all shows who decided and why", async () => {
-    const r = await run("approvals", "approve", ids.approved!, "--note", "ok for the demo folder", "--config", config);
+    const r = await run("approvals", "approve", ids.approved!, "--note", "ok for the demo folder", "--yes", "--config", config);
     assert.equal(r.code, 0, r.err);
     assert.deepEqual([record(ids.approved!).status, record(ids.approved!).decisionNote], ["approved", "ok for the demo folder"]);
     const listed = await run("approvals", "list", "--all", "--config", config);
@@ -135,7 +144,7 @@ describe("approvals approve --note / deny --reason: the record, the audit line, 
       ],
     );
     for (const l of lines) {
-      const keys = ["ts", "event", "approvalId", "server", "tool", "rule", "argsHash", "decision", "waitMs", "decidedBy", ...(l.decision === "expired" ? [] : ["note"])];
+      const keys = ["ts", "event", "approvalId", "server", "tool", "rule", "argsHash", "decision", "waitMs", "decidedBy", ...(l.decision === "expired" ? [] : ["note"]), ...(l.decision === "approved" ? ["confirmation"] : [])];
       assert.deepEqual(Object.keys(l).sort(), keys.sort(), String(l.approvalId));
       assert.equal(l.rule, "red-line-4-delete");
       assert.equal(l.decidedBy, me);
@@ -164,5 +173,90 @@ describe("approvals approve --note / deny --reason: the record, the audit line, 
     assert.match(text.out, /^rule {15}approved {2}denied {2}expired {2}waiting {2}deny rate {2}median wait\n/);
     // each cell is padded to its column's width, then two spaces: "1" in the 8-wide approved column leaves 9
     assert.match(text.out, /\nred-line-4-delete {2}1 {9}2 {7}1 {8}0 {8}67% {8}1m 3\ds\n$/);
+  });
+});
+
+describe("approvals approve: the call is read back and the human types the end of its id", () => {
+  const TTL = 24 * 60 * 60 * 1000;
+  let tmp: string;
+  let config: string;
+  let stateDir: string;
+  let work: string;
+  const longText = "x".repeat(400);
+
+  before(() => {
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-readback-")));
+    stateDir = path.join(tmp, "state");
+    work = path.join(tmp, "work");
+    fs.mkdirSync(work);
+    config = path.join(tmp, "gateway.config.json");
+    fs.writeFileSync(config, JSON.stringify({ servers: [{ name: "demo", command: "node" }], policy: "policy.json", stateDir: "state", fileBinding: { roots: ["work"], arguments: ["path"] } }));
+  });
+  after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  /** Queues a request through the real store, binding the file of its "path" as the gateway would. */
+  function ask(args: Record<string, unknown>, files?: Approval["files"]): Approval {
+    const store = new ApprovalStore(stateDir, TTL);
+    return store.resolveAsk({ server: "demo", tool: "upload_file", args, argsHash: hashArguments(args), rule: "red-line-2-public", why: "Red line 2", ...(files ? { files } : {}) }).approval;
+  }
+  const record = (id: string): Approval => new ApprovalStore(stateDir, TTL).get(id);
+  const lastEvent = (): Record<string, unknown> => {
+    const lines = fs.readFileSync(path.join(stateDir, "audit.jsonl"), "utf8").trim().split("\n");
+    return JSON.parse(lines[lines.length - 1]!);
+  };
+
+  it("typing the last 4 characters approves; the read-back shows every argument in full, the rule and the time left", async () => {
+    const a = ask({ path: "notes.txt", body: longText });
+    const r = await runTyping(a.id.slice(-4), "approvals", "approve", a.id, "--config", config);
+    assert.equal(r.code, 0, r.err);
+    assert.match(r.out, new RegExp(`^Approve this call\\? ${a.id}\\n  call:     demo__upload_file\\n  args:     \\{\\n`));
+    assert.ok(r.out.includes(`"body": "${longText}"`), "the whole argument, not a preview");
+    assert.match(r.out, /\n  rule:     red-line-2-public: Red line 2\n  expires:  \S+ \(in (?:23h 59m|1d 00h)\)\n/);
+    assert.match(r.out, new RegExp(`Type the last 4 characters of the id \\(${a.id.slice(-4)}\\) to approve it`));
+    assert.deepEqual([record(a.id).status, record(a.id).confirmation], ["approved", "typed"]);
+    assert.deepEqual([lastEvent().approvalId, lastEvent().decision, lastEvent().confirmation], [a.id, "approved", "typed"]);
+  });
+
+  it("anything else typed, or nothing, approves nothing", async () => {
+    const a = ask({ path: "other.txt" });
+    const wrong = await runTyping("yes", "approvals", "approve", a.id, "--config", config);
+    assert.equal(wrong.code, 1);
+    assert.match(wrong.err, new RegExp(`"yes" is not ${a.id.slice(-4)}, so ${a.id} was not approved`));
+    const nothing = await runTyping(undefined, "approvals", "approve", a.id, "--config", config);
+    assert.equal(nothing.code, 1);
+    assert.match(nothing.err, /nothing was typed, so .* was not approved\. In a script, pass --yes\./);
+    const noInput = await run("approvals", "approve", a.id, "--config", config); // an Io that cannot read
+    assert.equal(noInput.code, 1);
+    assert.equal(record(a.id).status, "pending");
+  });
+
+  it("--yes approves without the read-back, and says so in the record and the audit line", async () => {
+    const a = ask({ path: "scripted.txt" });
+    const r = await run("approvals", "approve", a.id, "--yes", "--config", config);
+    assert.equal(r.code, 0, r.err);
+    assert.doesNotMatch(r.out, /Approve this call\?/);
+    assert.deepEqual([record(a.id).status, record(a.id).confirmation, lastEvent().confirmation], ["approved", "--yes", "--yes"]);
+  });
+
+  it("shows whether each bound file still matches what the request saw", async () => {
+    const file = path.join(work, "report.txt");
+    fs.writeFileSync(file, "v1");
+    const { bindFiles } = await import("../../src/gateway/files.js");
+    const binding = { roots: [work], arguments: ["path"] };
+    const a = ask({ path: file }, bindFiles({ path: file }, binding));
+    const same = await runTyping("no", "approvals", "approve", a.id, "--config", config);
+    assert.match(same.out, new RegExp(`  file:     ${file} sha256:[0-9a-f]{64}, unchanged since the request\\n`));
+    fs.writeFileSync(file, "v2");
+    const changed = await runTyping("no", "approvals", "approve", a.id, "--config", config);
+    assert.match(changed.out, /, CHANGED since the request: the agent will be asked again\n/);
+  });
+
+  it("a request that is no longer pending is refused at once, without asking", async () => {
+    const a = ask({ path: "twice.txt" });
+    assert.equal((await run("approvals", "approve", a.id, "--yes", "--config", config)).code, 0);
+    const again = await runTyping(a.id.slice(-4), "approvals", "approve", a.id, "--config", config);
+    assert.equal(again.code, 1);
+    assert.doesNotMatch(again.out, /Approve this call\?/);
+    assert.match(again.err, /is approved; only a pending request can be approved/);
   });
 });

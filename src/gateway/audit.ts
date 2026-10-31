@@ -23,6 +23,8 @@ export interface ApprovalEvent {
   decidedBy?: string;
   /** The human's reason or note, as stored in approvals.json (one line, at most 500 characters). */
   note?: string;
+  /** For "approved": "typed" after the read-back, or "--yes". */
+  confirmation?: "typed" | "--yes";
 }
 
 export interface AuditEntry {

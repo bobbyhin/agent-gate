@@ -4,14 +4,16 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as readline from "node:readline";
 import { parseArgs } from "node:util";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { formatUsd } from "../llm/budget.js";
 import { loadLeakPolicy, loadLlmConfig } from "../llm/config.js";
 import { openLedger, startLlmGateway } from "../llm/server.js";
-import { ApprovalError, ApprovalStore, canonicalJson, cleanNote, isLive, type Approval } from "./approvals.js";
+import { ApprovalError, ApprovalStore, canonicalJson, cleanNote, isLive, type Approval, type Confirmation } from "./approvals.js";
 import { AuditLog, type ApprovalEvent } from "./audit.js";
-import { loadConfig, loadPolicy } from "./config.js";
+import { loadConfig, loadPolicy, type GatewayConfig } from "./config.js";
+import { bindFiles } from "./files.js";
 import { createGateway, SEPARATOR } from "./server.js";
 import { ConfigError } from "./validate.js";
 
@@ -19,13 +21,15 @@ const USAGE = `Usage:
   agent-gate serve [--config <file>]                  run the MCP gateway on stdin/stdout
   agent-gate approvals list [--all] [--json] [--config <file>]
   agent-gate approvals show <id> [--config <file>]    print one request in full
-  agent-gate approvals approve <id> [--note <text>] [--config <file>]
+  agent-gate approvals approve <id> [--note <text>] [--yes] [--config <file>]
   agent-gate approvals deny <id> [--reason <text>] [--config <file>]
   agent-gate approvals stats [--json] [--config <file>]   decisions per rule: counts, wait, deny rate
   agent-gate llm serve [--config <file>]              run the LLM gateway (HTTP)
   agent-gate usage [--json] [--config <file>]         LLM spend per gateway key: today, this month, caps
 
 "list" shows the requests that are waiting; --all also shows decided, used and expired ones.
+"approve" reads the call back to you and asks you to type the last 4 characters of its id;
+--yes skips that, for scripts.
 A deny --reason is shown to the agent the next time it makes the call; an approve --note is kept
 with the approval. Both are stored, with the OS user who ran the command, in approvals.json and
 in the audit log.
@@ -37,11 +41,23 @@ The LLM gateway's ("llm serve", "usage") is --config, else $AGENT_GATE_LLM_CONFI
 export interface Io {
   out: (text: string) => void;
   err: (text: string) => void;
+  /** One line typed by the human, or undefined at end of input. Without it, approve needs --yes. */
+  readLine?: () => Promise<string | undefined>;
 }
 
 const processIo: Io = {
   out: (text) => process.stdout.write(text),
   err: (text) => process.stderr.write(text),
+  readLine: () =>
+    new Promise((resolve) => {
+      const rl = readline.createInterface({ input: process.stdin, terminal: false });
+      let line: string | undefined;
+      rl.once("line", (text) => {
+        line = text;
+        rl.close();
+      });
+      rl.once("close", () => resolve(line));
+    }),
 };
 
 /** Runs one command and returns the exit code: 0 done, 1 failed, 2 bad usage. */
@@ -57,6 +73,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
         json: { type: "boolean", default: false },
         reason: { type: "string" },
         note: { type: "string" },
+        yes: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -78,7 +95,8 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
     extra.length === 0 &&
     (action === "list" || action === "stats" ? id === undefined : ["show", "approve", "deny"].includes(action ?? "") && id !== undefined) &&
     (values.reason === undefined || action === "deny") &&
-    (values.note === undefined || action === "approve");
+    (values.note === undefined || action === "approve") &&
+    (!values.yes || action === "approve");
   const isLlmServe = command === "llm" && action === "serve" && id === undefined;
   const isUsage = command === "usage" && action === undefined;
   if (!isServe && !isApprovals && !isLlmServe && !isUsage) {
@@ -98,7 +116,26 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
     if (action === "show") {
       io.out(`${JSON.stringify(store.get(id as string), null, 2)}\n`);
     } else if (action === "approve") {
-      const approval = decide(store, audit, id as string, "approved", values.note);
+      const request = store.get(id as string);
+      let confirmation: Confirmation = "--yes";
+      // Read back what is being approved, and wait for the human to type the end of its id. A request
+      // that is no longer pending or has expired skips this: decide() refuses it with the reason.
+      if (!values.yes && request.status === "pending" && isLive(request, Date.now())) {
+        const code = request.id.slice(-4);
+        io.out(`${readBack(request, config)}Type the last 4 characters of the id (${code}) to approve it, anything else to stop: `);
+        const typed = io.readLine ? await io.readLine() : undefined;
+        io.out("\n");
+        if (typed === undefined) {
+          io.err(`agent-gate: nothing was typed, so ${request.id} was not approved. In a script, pass --yes.\n`);
+          return 1;
+        }
+        if (typed.trim() !== code && typed.trim() !== request.id) {
+          io.err(`agent-gate: ${JSON.stringify(typed.trim().slice(0, 40))} is not ${code}, so ${request.id} was not approved.\n`);
+          return 1;
+        }
+        confirmation = "typed";
+      }
+      const approval = decide(store, audit, id as string, "approved", values.note, confirmation);
       io.out(`approved ${describeCall(approval)}\nThe agent can now make this exact call once, until ${approval.expiresAt}.\n`);
     } else {
       const approval = decide(store, audit, id as string, "denied", values.reason);
@@ -201,12 +238,36 @@ function currentUser(): string | undefined {
   }
 }
 
+/**
+ * What the human is approving, in full: the call, every argument, the rule and its reason, the files
+ * the request is bound to (hashed again now, to show whether they still match), and the time left.
+ */
+export function readBack(a: Approval, config: Pick<GatewayConfig, "fileBinding">, now = Date.now()): string {
+  const args = JSON.stringify(JSON.parse(canonicalJson(a.args)), null, 2).split("\n");
+  const current = a.files && config.fileBinding ? bindFiles(a.args, config.fileBinding) : [];
+  const files = (a.files ?? []).map((f) => {
+    const again = current.find((c) => c.argument === f.argument);
+    const state = again && again.path === f.path && again.sha256 === f.sha256 ? "unchanged since the request" : "CHANGED since the request: the agent will be asked again";
+    return `  file:     ${f.path} ${f.sha256 ?? "(did not exist)"}, ${state}`;
+  });
+  return [
+    `Approve this call? ${a.id}`,
+    `  call:     ${a.server}${SEPARATOR}${a.tool}`,
+    `  args:     ${args[0]}`,
+    ...args.slice(1).map((line) => `            ${line}`),
+    `  rule:     ${a.rule}: ${a.why}`,
+    ...files,
+    `  expires:  ${a.expiresAt} (in ${duration(Math.max(0, Date.parse(a.expiresAt) - now))})`,
+    "",
+  ].join("\n");
+}
+
 /** Records a human's decision in approvals.json, then as an approval-decided line in the audit log. */
-function decide(store: ApprovalStore, audit: AuditLog, id: string, decision: "approved" | "denied", note: string | undefined): Approval {
+function decide(store: ApprovalStore, audit: AuditLog, id: string, decision: "approved" | "denied", note: string | undefined, confirmation?: Confirmation): Approval {
   const by = currentUser();
   let approval: Approval;
   try {
-    approval = decision === "approved" ? store.approve(id, { by, note }) : store.deny(id, { by, note });
+    approval = decision === "approved" ? store.approve(id, { by, note, ...(confirmation ? { confirmation } : {}) }) : store.deny(id, { by, note });
   } catch (err) {
     // A request found expired is worth a line too: it shows how long requests wait unanswered.
     if (err instanceof ApprovalError && err.expired) {
@@ -238,6 +299,7 @@ function writeEvent(audit: AuditLog, a: Approval, decision: ApprovalEvent["decis
     waitMs: Math.max(0, end - Date.parse(a.createdAt)) || 0,
     ...(by ? { decidedBy: by } : {}),
     ...(decision !== "expired" && a.decisionNote ? { note: a.decisionNote } : {}),
+    ...(decision === "approved" && a.confirmation ? { confirmation: a.confirmation } : {}),
   });
 }
 

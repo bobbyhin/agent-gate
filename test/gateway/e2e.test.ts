@@ -141,7 +141,7 @@ describe("gateway end to end", () => {
 
   let secondId = "";
   it("after approval the identical call runs exactly once, then needs a new approval", async () => {
-    const approved = cli("approvals", "approve", firstId);
+    const approved = cli("approvals", "approve", firstId, "--yes");
     assert.equal(approved.code, 0, approved.err);
     assert.match(approved.out, new RegExp(`^approved ${firstId}: demo__delete_file \\{"path":"notes/old.md"\\}`));
 
@@ -158,7 +158,7 @@ describe("gateway end to end", () => {
   });
 
   it("an approval does not cover different arguments", async () => {
-    assert.equal(cli("approvals", "approve", secondId).code, 0);
+    assert.equal(cli("approvals", "approve", secondId, "--yes").code, 0);
     const other = await call("demo__delete_file", { path: "notes/other.md" });
     const otherId = approvalIdIn(other);
     assert.notEqual(otherId, secondId);
@@ -326,7 +326,7 @@ describe("gateway end to end", () => {
     const first = approvalIdIn(await call("demo__delete_file", { path: file }));
     const record = queue().find((a) => a.id === first);
     assert.equal(record?.files?.length, 1, "the file is bound to the request");
-    assert.equal(cli("approvals", "approve", first).code, 0);
+    assert.equal(cli("approvals", "approve", first, "--yes").code, 0);
 
     fs.writeFileSync(file, "quarterly numbers v2"); // changed after the human said yes
     const changed = await call("demo__delete_file", { path: file });
@@ -336,8 +336,21 @@ describe("gateway end to end", () => {
     assert.equal(received().length, before, "nothing reached the server");
     assert.equal(queue().find((a) => a.id === first)?.status, "stale");
 
-    assert.equal(cli("approvals", "approve", second).code, 0);
+    assert.equal(cli("approvals", "approve", second, "--yes").code, 0);
     assert.equal(text(await call("demo__delete_file", { path: file })), `pretended to delete ${file}`);
     assert.equal(received().length, before + 1);
+  });
+
+  it("the real CLI reads the call back and approves only when the human types the end of its id", async () => {
+    const id = approvalIdIn(await call("demo__delete_file", { path: "notes/read-back.md" }));
+    const typing = (input: string) => spawnSync(process.execPath, [BIN, "approvals", "approve", id, "--config", configFile], { encoding: "utf8", input });
+    const wrong = typing("y\n");
+    assert.equal(wrong.status, 1);
+    assert.match(wrong.stdout, /^Approve this call\? ap-[0-9a-f]{8}\n  call:     demo__delete_file\n  args:     \{\n              "path": "notes\/read-back\.md"\n            \}\n/);
+    assert.equal(queue().find((a) => a.id === id)?.status, "pending");
+    const right = typing(`${id.slice(-4)}\n`);
+    assert.equal(right.status, 0, right.stderr);
+    assert.equal(queue().find((a) => a.id === id)?.confirmation, "typed");
+    assert.equal(text(await call("demo__delete_file", { path: "notes/read-back.md" })), "pretended to delete notes/read-back.md");
   });
 });

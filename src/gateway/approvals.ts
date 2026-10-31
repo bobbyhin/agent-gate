@@ -48,13 +48,19 @@ export interface Approval {
    * approval (--note). One line, cleaned by cleanNote(). A denial's reason is shown to the agent.
    */
   decisionNote?: string;
+  /** How the human confirmed an approval: "typed" (the read-back, then the id's last characters) or "--yes". */
+  confirmation?: Confirmation;
   usedAt?: string;
 }
+
+export type Confirmation = "typed" | "--yes";
 
 /** Who decided and what they wrote: the optional extras of approve() and deny(). */
 export interface DecisionInput {
   by?: string;
   note?: string;
+  /** Approvals only: how the human confirmed. */
+  confirmation?: Confirmation;
 }
 
 export interface AskRequest {
@@ -125,6 +131,8 @@ function applyDecision(approval: Approval, now: number, input: DecisionInput): v
   else approval.decidedBy = by;
   if (note === undefined) delete approval.decisionNote;
   else approval.decisionNote = note;
+  if (input.confirmation === undefined) delete approval.confirmation;
+  else approval.confirmation = input.confirmation;
 }
 
 /** JSON with object keys sorted at every level, so equal arguments always give the same text. */

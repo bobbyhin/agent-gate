@@ -456,10 +456,32 @@ ap-f646780e  pending  demo__delete_file
   args:    {"path":"notes/old.md"}
   created: 2026-10-14T08:55:58.716Z  expires: 2026-10-15T08:55:58.716Z
 
-$ agent-gate approvals approve ap-f646780e
+$ agent-gate approvals approve ap-f646780e --yes
 approved ap-f646780e: demo__delete_file {"path":"notes/old.md"}
 The agent can now make this exact call once, until 2026-10-15T08:55:58.716Z.
 ```
+
+Without `--yes`, `approve` first reads the call back, with every argument in full, and waits for
+the last four characters of the id. The human approves what they just read, not an id that looks
+like another one. From another run:
+
+```
+$ agent-gate approvals approve ap-cf8aaecd
+Approve this call? ap-cf8aaecd
+  call:     demo__delete_file
+  args:     {
+              "path": "notes/old.md"
+            }
+  rule:     red-line-4-delete: Red line 4: this tool looks like it deletes or overwrites data.
+  expires:  2026-11-01T00:10:11.971Z (in 1d 00h)
+Type the last 4 characters of the id (aecd) to approve it, anything else to stop: aecd
+
+approved ap-cf8aaecd: demo__delete_file {"path":"notes/old.md"}
+The agent can now make this exact call once, until 2026-11-01T00:10:11.971Z.
+```
+
+Anything else, or the end of the input, approves nothing (exit code 1). With `fileBinding`, the
+read-back also lists each bound file and says whether it still matches what the request saw.
 
 The agent makes the same call again. This time it is forwarded, and the agent gets the downstream
 server's result, `pretended to delete notes/old.md`. If it makes the call a third time, it gets a
@@ -488,7 +510,10 @@ The CLI commands are:
 ```
 agent-gate approvals list [--all] [--json]          waiting requests (--all: also decided, used, expired)
 agent-gate approvals show <id>                      one request in full, with all of its arguments
-agent-gate approvals approve <id> [--note <text>]   a note is kept with the approval
+agent-gate approvals approve <id> [--note <text>] [--yes]
+                                                    reads the call back and waits for the id's last
+                                                    4 characters; --yes skips that, for scripts;
+                                                    a note is kept with the approval
 agent-gate approvals deny <id> [--reason <text>]    the reason is shown to the agent
 agent-gate approvals stats [--json]                 per rule: approved, denied, expired, waiting, deny rate, median wait
 ```
@@ -506,6 +531,9 @@ Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.con
   id back.
 - A denied call stays denied. Repeating it gets "a human denied this exact call", and nothing new is
   queued until the denial expires. `deny` also takes back an approval that has not been used yet.
+- An approval is confirmed. `approve` reads the call back and the human types the end of its id;
+  `--yes` skips that. The record and the audit line keep which it was (`"confirmation": "typed"`
+  or `"--yes"`), so the log shows that a human read the call, not only that an id was approved.
 - A decision can carry words: `deny --reason` and `approve --note`. They are stored in the record
   as `decisionNote`, with `decidedBy`, the OS user who ran the command, and cut to one line of at
   most 500 characters with control characters and bidirectional-text marks removed. A denial's
@@ -634,8 +662,8 @@ run.
 The CLI adds a second kind of line when a human approves or denies a request, or tries to after
 it expired. It has `"event": "approval-decided"`, the approval id, the rule, the decision
 (`approved`, `denied` or `expired`), `waitMs` (from the request to the decision, or to the expiry),
-who decided and the reason or note. This one is from the denial above, with the user name
-changed:
+who decided, the reason or note, and for an approval how it was confirmed (`confirmation`). This
+one is from the denial above, with the user name changed:
 
 ```json
 {"ts":"2026-10-30T22:13:09.399Z","event":"approval-decided","approvalId":"ap-22f08012","server":"demo","tool":"delete_file","rule":"red-line-4-delete","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","decision":"denied","waitMs":74,"decidedBy":"alice","note":"Keep it; move it to notes/archive/ instead."}
@@ -1082,12 +1110,12 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 218 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 225 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
-controls, the CLI's exit codes and what a decision leaves behind (the record, the
-`approval-decided` line, `stats`), and an end-to-end test. That test starts `agent-gate serve`
+controls, the CLI's exit codes, its read-back before an approval, and what a decision leaves behind
+(the record, the `approval-decided` line, `stats`), and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log.
 One step plays a prompt injection: a tool result tells the agent to upload its SSH key, the agent
@@ -1112,7 +1140,7 @@ no secret-shaped string appears in the source and secret scanners need no except
 repository.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 218/218 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
+stopped (351/351 shell guard tests, 225/225 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
 
