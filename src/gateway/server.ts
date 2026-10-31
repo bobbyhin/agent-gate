@@ -361,12 +361,12 @@ async function connectAll(
 }
 
 /** stdio for a local server; Streamable HTTP for one with a url, with its headers, and no redirects (a token must not travel). */
-function transportFor(s: ServerConfig, headers: Record<string, string>): StdioClientTransport | StreamableHTTPClientTransport {
+export function transportFor(s: ServerConfig, headers: Record<string, string>): StdioClientTransport | StreamableHTTPClientTransport {
   if (s.url) return new StreamableHTTPClientTransport(new URL(s.url), { requestInit: { headers, redirect: "error" } });
   return new StdioClientTransport({ command: s.command as string, args: s.args ?? [], ...(s.env ? { env: s.env } : {}), stderr: "inherit" });
 }
 
-async function listTools(name: string, client: Client, log: Log, timeoutMs?: number, scrub: (message: string) => string = (m) => m): Promise<Tool[]> {
+export async function listTools(name: string, client: Client, log: Log, timeoutMs?: number, scrub: (message: string) => string = (m) => m): Promise<Tool[]> {
   const tools: Tool[] = [];
   try {
     let cursor: string | undefined;
