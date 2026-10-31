@@ -192,6 +192,11 @@ function matches(rule: Pick<CompiledRule, "server" | "tool" | "toolWords" | "arg
   return true;
 }
 
+/** True when a rule's server, tool and toolWords conditions match this tool; its argument conditions are left aside (pure). */
+export function matchesName(rule: CompiledRule, server: string, tool: string): boolean {
+  return matches({ ...rule, args: [] }, { server, tool, args: {} });
+}
+
 /**
  * For globs and regexes: strings are matched as they are; any other argument value is matched as its
  * JSON text. A glob reads text only: it does not resolve paths, so a symlink into a protected folder,

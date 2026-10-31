@@ -17,6 +17,7 @@ import { auditStats, loadExpected, readAudit, scoreTrajectory, trajectoryOf, ver
 import { loadConfig, loadPolicy, type GatewayConfig } from "./config.js";
 import { bindFiles } from "./files.js";
 import { createGateway, SEPARATOR } from "./server.js";
+import { downstreamCandidates, openApiCandidates, suggest, type Candidate } from "./suggest.js";
 import { ToolPins } from "./tool-pins.js";
 import { ConfigError } from "./validate.js";
 
@@ -45,6 +46,7 @@ const USAGE = `Usage:
   agent-gate tools list [--json] [--config <file>]    pinned tool definitions, and the changed ones withheld
   agent-gate tools show <server>__<tool> [--config <file>]    the pinned and the changed definition
   agent-gate tools accept <server>__<tool> [--config <file>]  pin the changed definition: the tool is listed again
+  agent-gate policy suggest [--openapi <spec.json>] [--json] [--config <file>]  each tool's decision, and a draft policy
 
 "list" shows the requests that are waiting; --all also shows decided, used and expired ones.
 "approve" reads the call back to you and asks you to type the last 4 characters of its id;
@@ -77,6 +79,7 @@ const COMMANDS: Readonly<Record<string, { options: readonly string[]; required?:
   "tools list": { options: ["json"] },
   "tools show": { options: [], id: true },
   "tools accept": { options: [], id: true },
+  "policy suggest": { options: ["json", "openapi"] },
 };
 
 export interface Io {
@@ -124,6 +127,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
         mode: { type: "string" },
         conn: { type: "string" },
         run: { type: "string" },
+        openapi: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -163,6 +167,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
       if (values.verify) return usageVerify(llmConfigFile, values.json, io);
       return values.by === undefined ? usage(llmConfigFile, values.json, io) : usageBy(llmConfigFile, values.by, values.json, io);
     }
+    if (name === "policy suggest") return await policySuggest(configFile, values.openapi, values.json, io);
     const config = loadConfig(configFile);
     const store = new ApprovalStore(config.stateDir, config.approvalTtlMs);
     const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"));
@@ -707,4 +712,59 @@ function describeCall(a: Approval): string {
 const PREVIEW_CHARS = 300;
 function preview(json: string): string {
   return json.length <= PREVIEW_CHARS ? json : `${json.slice(0, PREVIEW_CHARS)}... (${json.length} characters; "approvals show <id>" prints all of it)`;
+}
+
+/** policy suggest: each tool's decision under the config's policy, the tools no rule names, and a draft policy. */
+async function policySuggest(configFile: string, openapi: string | undefined, json: boolean, io: Io): Promise<number> {
+  const config = loadConfig(configFile);
+  const policy = loadPolicy(config.policyFile);
+  const raw = JSON.parse(fs.readFileSync(config.policyFile, "utf8")) as unknown;
+  let candidates: Candidate[];
+  let failures: string[] = [];
+  if (openapi === undefined) ({ candidates, failures } = await downstreamCandidates(config));
+  else {
+    let spec: unknown;
+    try {
+      spec = JSON.parse(fs.readFileSync(openapi, "utf8"));
+    } catch (err) {
+      throw new ConfigError(`cannot read ${openapi} as JSON (a YAML document has to be converted to JSON first): ${(err as Error).message}`);
+    }
+    candidates = openApiCandidates(spec);
+  }
+  const report = suggest(policy, raw, candidates, new Map(config.servers.flatMap((s) => (s.expose ? [[s.name, s.expose] as const] : []))));
+  for (const failure of failures) io.err(`agent-gate: ${failure}\n`);
+  if (json) {
+    io.out(`${JSON.stringify({ ...report, failures }, null, 2)}\n`);
+    return failures.length > 0 ? 1 : 0;
+  }
+  const table = [["tool", "now", "rule", "draft", "note"]];
+  for (const s of report.suggestions) {
+    const notes = [
+      s.http ? `${s.http.method.toUpperCase()} ${s.http.path}` : "",
+      s.dependsOn.length > 0 ? `arguments can change it (${s.dependsOn.join(", ")})` : "",
+      s.hints ? `the server says: ${s.hints.join(", ")}` : "",
+    ].filter(Boolean);
+    table.push([`${s.server}${SEPARATOR}${s.tool}`, s.decision, s.rule, s.draft, notes.join("; ")]);
+  }
+  io.out(`${report.suggestions.length} tools, decided from their names by ${path.basename(config.policyFile)} ("now") and by the draft below ("draft"):\n`);
+  printTable(table, io);
+  if (report.argumentRules.length > 0) io.out(`\nRules that look only at arguments can change any of these when the arguments match: ${report.argumentRules.join(", ")}.\n`);
+  io.out(
+    report.unmatched.length === 0
+      ? "\nEvery tool matched a rule.\n"
+      : `\nNo rule names ${report.unmatched.length} of them, so the policy's default (${policy.default}) decides: ${report.unmatched.join(", ")}\n`,
+  );
+  // One rule per line, so the draft can be read and edited.
+  const { rules, repeat } = report.draft;
+  const draft = [
+    "{",
+    '  "default": "ask",',
+    '  "rules": [',
+    rules.map((rule) => `    ${JSON.stringify(rule)}`).join(",\n"),
+    `  ]${repeat ? "," : ""}`,
+    ...(repeat ? [`  "repeat": ${JSON.stringify(repeat)}`] : []),
+    "}",
+  ].join("\n");
+  io.out(`\nDraft policy: the same rules, an allow rule for the tools whose names read, and "default": "ask". Check every line before you use it:\n${draft}\n`);
+  return failures.length > 0 ? 1 : 0;
 }

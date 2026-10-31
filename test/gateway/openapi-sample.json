@@ -1,0 +1,28 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Notes service (a made-up API for the policy suggest tests)", "version": "1.0.0" },
+  "paths": {
+    "/notes": {
+      "get": { "operationId": "listNotes", "summary": "List notes" },
+      "post": { "operationId": "createNote", "summary": "Create a note" }
+    },
+    "/notes/{id}": {
+      "get": { "operationId": "getNote", "summary": "Read one note" },
+      "put": { "operationId": "updateNote", "summary": "Replace a note" },
+      "patch": { "summary": "Change part of a note (no operationId)" },
+      "delete": { "operationId": "deleteNote", "summary": "Delete a note" }
+    },
+    "/notes/{id}/share": {
+      "post": { "operationId": "shareNote", "summary": "Share a note with someone" }
+    },
+    "/notes/{id}/export": {
+      "get": { "operationId": "exportNote", "summary": "Export a note as a file" }
+    },
+    "/search": {
+      "post": { "operationId": "searchNotes", "summary": "Search notes (a read sent as POST)" }
+    },
+    "/health": {
+      "head": { "operationId": "checkHealth", "summary": "Is the service up" }
+    }
+  }
+}

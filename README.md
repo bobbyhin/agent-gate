@@ -551,6 +551,8 @@ agent-gate audit trajectory --expect <file> [--mode exact|in-order|any-order] [-
 agent-gate tools list [--json]                      pinned tool definitions, and the changed ones withheld (see Tool lists)
 agent-gate tools show <server>__<tool>              the pinned and the changed definition, to compare
 agent-gate tools accept <server>__<tool>            pin the changed definition, so the tool is listed again
+agent-gate policy suggest [--openapi <spec.json>] [--json]
+                                                    each tool's decision from its name, and a draft policy (see Policy)
 ```
 
 Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.config.json`).
@@ -873,6 +875,49 @@ string argument (`"argument"`, default `command`) and maps pass, warn, ask and b
 warn, ask and block. A missing or non-string argument is asked about. If the analyzer itself fails,
 the legacy rules decide and anything they do not block is asked about, as in the hook.
 
+**Starting with an unfamiliar server.** `agent-gate policy suggest` lists the tools of the servers in
+the config (or, with `--openapi <spec.json>`, the operations of an OpenAPI document, named by their
+`operationId`), and shows what the policy decides for each one from its name, which tools no rule
+names, and a draft policy: the same rules, an allow rule for the tools whose names read, and
+`"default": "ask"`. A name reads when it starts with `get`, `list`, `read`, `search`, `find`,
+`describe`, `show`, `view` or `count` and has no word that changes something; `fetch` is not a read,
+because a URL can carry data out. From an OpenAPI document, the GET and HEAD operations are the
+reads. A real run against the filesystem server, with the example policy:
+
+```
+$ agent-gate policy suggest --config files.config.json
+14 tools, decided from their names by policy.example.json ("now") and by the draft below ("draft"):
+tool                              now    rule                  draft  note
+files__read_file                  allow  default               allow  the server says: read-only
+files__read_text_file             allow  default               allow  the server says: read-only
+files__read_media_file            allow  default               allow  the server says: read-only
+files__read_multiple_files        allow  default               allow  the server says: read-only
+files__write_file                 ask    red-line-4-overwrite  ask    the server says: destructive
+files__edit_file                  ask    red-line-4-overwrite  ask    the server says: destructive
+files__create_directory           allow  default               ask
+files__list_directory             allow  default               allow  the server says: read-only
+files__list_directory_with_sizes  allow  default               allow  the server says: read-only
+files__directory_tree             allow  default               ask    the server says: read-only
+files__move_file                  ask    red-line-4-overwrite  ask    the server says: destructive
+files__search_files               allow  default               allow  the server says: read-only
+files__get_file_info              allow  default               allow  the server says: read-only
+files__list_allowed_directories   allow  default               allow  the server says: read-only
+
+Rules that look only at arguments can change any of these when the arguments match: protect-gateway-state, sql-write.
+
+No rule names 11 of them, so the policy's default (allow) decides: files__read_file, files__read_text_file, files__read_media_file, files__read_multiple_files, files__create_directory, files__list_directory, files__list_directory_with_sizes, files__directory_tree, files__search_files, files__get_file_info, files__list_allowed_directories
+```
+
+The draft policy follows, one rule per line (`--json` prints the whole report). The example policy
+names three of the 14 tools; its default lets the other 11 run, `create_directory` among them. The
+draft allows the nine whose names read and asks about the other two: `create_directory`, and
+`directory_tree`, which reads but has no read verb. "The server says" is the server's own annotations
+(`readOnlyHint`, `destructiveHint`): shown, never used, because the server declares them about
+itself. The names decide, so a read without a read verb waits for a human, and a write named like a
+read would be allowed: the draft is where a human starts, not a finished policy. An OpenAPI document
+must be JSON (convert a YAML one first). A server that cannot be started or listed is named, and the
+command exits 1.
+
 Mistakes in the policy or the config stop the gateway at startup with the field named, for
 example `policy.rules[2].decision must be one of allow, warn, ask, block`. Unknown fields are
 errors too, so a typo cannot silently turn a rule off.
@@ -1060,7 +1105,7 @@ data:
   The filesystem reference server's `write_file`, `edit_file` and `move_file` ask (red line 4, by
   their names), but a tool whose name has none of a rule's words, such as `save_file`, gets the
   default. For an unfamiliar server, consider `"default": "ask"` with allow rules for the tools you
-  know only read.
+  know only read; `agent-gate policy suggest` drafts one from the server's tool list.
 - A denial binds the exact call. The same file named another way (`notes/../notes/old.md`) is a new
   request: it asks again rather than running, but a human has to see that it is the same file. And a
   shell tool is still a way round a denied `delete_file`: the shell guard does not ask about deleting
@@ -1977,13 +2022,14 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 398 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 404 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
 lists with each tool labelled with the decision it should get (`test/gateway/tool-lists/`), and the
 README's table of example rules checked against `policy.example.json`; a red team of 20 ways to get a
-denied delete done another way (other tools, shell commands, the path written another way); which
+denied delete done another way (other tools, shell commands, the path written another way); `policy
+suggest` (reads by name, an OpenAPI document, the draft it prints, a server that cannot start); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
 controls, standing approvals and their bounds, the escalate-only rule of a second reviewer, the CLI's exit codes, its read-back before an approval, and what a decision leaves behind
@@ -2076,7 +2122,7 @@ audit log; the end-to-end test scores its own run that way. It checks which call
 the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 398/398 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 404/404 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -2097,6 +2143,7 @@ src/gateway/result-guard.ts                   reads results: withholds or redact
 src/gateway/advisor.ts                        the escalate-only rule for a second reviewer (ADR 0008; not wired yet)
 src/gateway/audit.ts                          the audit log, <stateDir>/audit.jsonl
 src/gateway/audit-tools.ts                    reads the audit log back: audit stats, verify, trajectory
+src/gateway/suggest.ts                        policy suggest: each tool's decision from its name, and a draft policy
 src/gateway/context.ts                        correlation ids a client may send: trace, session, run, agent path
 src/gateway/config.ts                         loads and checks the gateway config
 src/gateway/validate.ts                       field-by-field checks for the configs and the policies
@@ -2140,6 +2187,8 @@ test/generated-commands.js                    20,594 generated commands for the 
 test/gateway/*.test.ts                        gateway tests: policy, config, approvals, CLI, end to end
 test/gateway/fake-downstream.ts               the fake MCP server for the end-to-end test
 test/gateway/fake-http-downstream.ts          a fake remote MCP server over Streamable HTTP, on 127.0.0.1
+test/gateway/tool-lists/                      tool lists of real or realistic servers, each tool labelled by hand
+test/gateway/workarounds.json                 red team: 20 ways round a denied delete, before and after red-line-4-overwrite
 test/llm/*.test.ts                            LLM gateway tests: routing, budget, leak guard, upstream, end to end, deploy configs
 test/llm/fake-upstream.ts                     a fake OpenAI-compatible provider for the tests, the example and the demo
 test/llm/fake-secrets.ts                      every fake secret the tests use, in one file
