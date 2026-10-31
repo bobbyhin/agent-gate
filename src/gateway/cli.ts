@@ -18,6 +18,7 @@ import { loadConfig, loadPolicy, type GatewayConfig } from "./config.js";
 import { bindFiles } from "./files.js";
 import { startHttpGateway } from "./http-server.js";
 import { createGateway, SEPARATOR } from "./server.js";
+import { readStatus } from "./status.js";
 import { downstreamCandidates, openApiCandidates, suggest, type Candidate } from "./suggest.js";
 import { ToolPins } from "./tool-pins.js";
 import { ConfigError } from "./validate.js";
@@ -28,6 +29,8 @@ const USAGE = `Usage:
                                                       from the config, the agent sees only its tools
   agent-gate serve --http [--config <file>]           serve the agents in the config's "http" section over
                                                       Streamable HTTP at /mcp, each with its own key
+  agent-gate status [--json] [--config <file>]        each running gateway's downstream servers: up,
+                                                      restarting, down or failed, restarts, last error
   agent-gate approvals list [--all] [--json] [--config <file>]
   agent-gate approvals show <id> [--config <file>]    print one request in full
   agent-gate approvals approve <id> [--note <text>] [--yes] [--config <file>]
@@ -70,6 +73,7 @@ The LLM gateway's ("llm serve", "usage") is --config, else $AGENT_GATE_LLM_CONFI
 /** Every command: the options it takes, the ones it needs, and whether it takes an id after the action word. */
 const COMMANDS: Readonly<Record<string, { options: readonly string[]; required?: readonly string[]; id?: true }>> = {
   serve: { options: ["profile", "http"] },
+  status: { options: ["json"] },
   "approvals list": { options: ["all", "json"] },
   "approvals show": { options: [], id: true },
   "approvals approve": { options: ["note", "yes"], id: true },
@@ -152,8 +156,8 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
   const configFile = values.config ?? process.env.AGENT_GATE_CONFIG ?? "gateway.config.json";
   const llmConfigFile = values.config ?? process.env.AGENT_GATE_LLM_CONFIG ?? "llm-gateway.config.json";
   const [command, action, id, ...extra] = positionals;
-  // "serve" and "usage" take no action word; every other command does.
-  const single = command === "serve" || command === "usage";
+  // "serve", "status" and "usage" take no action word; every other command does.
+  const single = command === "serve" || command === "status" || command === "usage";
   const name = single ? command : `${command} ${action}`;
   const spec = Object.prototype.hasOwnProperty.call(COMMANDS, name) ? COMMANDS[name] : undefined;
   const given = Object.entries(values)
@@ -184,6 +188,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
     }
     if (name === "policy suggest") return await policySuggest(configFile, values.openapi, values.json, io);
     const config = loadConfig(configFile);
+    if (name === "status") return statusCommand(config, values.json, io);
     const store = new ApprovalStore(config.stateDir, config.approvalTtlMs);
     const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"));
     if (name === "audit stats") return auditStatsCommand(audit.file, values.json, io);
@@ -343,6 +348,28 @@ function usageVerify(configFile: string, json: boolean, io: Io): number {
   if (different.length > 0) {
     io.err(`agent-gate: the usage log and the ledger differ for ${different.map((r) => `"${r.key}"`).join(", ")}: a usage line was lost, a cost was booked twice, or a file was edited\n`);
     return 1;
+  }
+  return 0;
+}
+
+/** status: the downstream servers of every gateway process running on this state directory. */
+function statusCommand(config: GatewayConfig, json: boolean, io: Io): number {
+  const processes = readStatus(path.join(config.stateDir, "status.json"));
+  if (json) {
+    io.out(`${JSON.stringify(processes, null, 2)}\n`);
+    return 0;
+  }
+  if (processes.length === 0) {
+    io.out("No gateway is running on this state directory.\n");
+    return 0;
+  }
+  for (const p of processes) {
+    io.out(`gateway pid ${p.pid} (${p.mode}), started ${p.startedAt}, updated ${p.updatedAt}\n`);
+    const rows = [["  server", "state", "restarts", "failed tries", "since", "next try", "last error"]];
+    for (const [name, s] of Object.entries(p.servers)) {
+      rows.push([`  ${name}`, s.state, `${s.restarts}`, `${s.tries} of ${s.maxTries}`, s.since, s.nextTryAt ?? "-", s.lastError ?? "-"]);
+    }
+    printTable(rows, io);
   }
   return 0;
 }

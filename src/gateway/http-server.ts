@@ -44,7 +44,7 @@ interface Open {
   lastSeen: number;
 }
 
-export async function startHttpGateway(config: GatewayConfig, log: Log = stderrLog, options: Pick<GatewayOptions, "env"> & { now?: () => number } = {}): Promise<HttpGateway> {
+export async function startHttpGateway(config: GatewayConfig, log: Log = stderrLog, options: Pick<GatewayOptions, "env" | "restartBackoffMs"> & { now?: () => number } = {}): Promise<HttpGateway> {
   const spec = config.http;
   if (!spec) throw new ConfigError('this config has no "http" section; "serve --http" needs one: { "listen": { "host", "port" }, "agents": [...] }');
   const now = options.now ?? Date.now;
@@ -56,7 +56,7 @@ export async function startHttpGateway(config: GatewayConfig, log: Log = stderrL
     return policy;
   };
   const agents = new Map(spec.agents.map((a) => [a.sha256, { ...a, policy: policyOf(a.policyFile ?? config.policyFile) }] as const));
-  const core = await createCore(config, [...policies.values()], log, options);
+  const core = await createCore(config, [...policies.values()], log, { ...options, mode: "http" });
   const open = new Map<string, Open>();
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

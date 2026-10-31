@@ -24,6 +24,9 @@
 // "profiles" ({ "<name>": { "<server>": ["glob", ...] } }) are named sets of tools: a connection that
 // runs with a profile (serve --profile <name>) sees and may call only the tools its globs match, on the
 // servers it names, on top of each server's "expose".
+// Per server, "optional": true lets the gateway start without a server that cannot be started (it is
+// tried again when needed), and "maxRestarts" (default 3) is how many failed tries in a row to start a
+// server again, after it went away, are made before it is given up (src/gateway/downstream.ts).
 // "http" ({ "listen": { "host", "port" }, "agents": [{ "name", "sha256", "policy"?, "profile"? }] }) is
 // for "serve --http": the gateway listens for agents on Streamable HTTP (src/gateway/http-server.ts).
 // An agent is known by the SHA-256 of its key, never the key, and may have a policy file and a profile
@@ -49,7 +52,13 @@ export interface ServerConfig {
   timeoutMs?: number;
   /** Globs of the tool names the agent may see and call. Absent: all of them. */
   expose?: string[];
+  /** The gateway starts without it when it cannot be started; it is tried again when needed. */
+  optional?: boolean;
+  /** Failed tries in a row to start it again (after it went away, or as an optional server) before it is given up. */
+  maxRestarts?: number;
 }
+
+export const DEFAULT_MAX_RESTARTS = 3;
 
 export interface GatewayConfig {
   servers: ServerConfig[];
@@ -253,7 +262,7 @@ const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 
 function server(raw: unknown, at: string): ServerConfig {
   const s = object(raw, at);
-  onlyKeys(s, ["name", "command", "args", "env", "url", "headersFromEnv", "timeoutSeconds", "expose"], at);
+  onlyKeys(s, ["name", "command", "args", "env", "url", "headersFromEnv", "timeoutSeconds", "expose", "optional", "maxRestarts"], at);
   const name = text(s.name, `${at}.name`);
   if (!SERVER_NAME.test(name)) fail(`${at}.name must use letters, digits, "-" and single "_" between them (no "__")`);
   if (s.url !== undefined && (s.command !== undefined || s.args !== undefined || s.env !== undefined)) fail(`${at} has both "url" and a command; a server is either local (command) or remote (url)`);
@@ -264,6 +273,11 @@ function server(raw: unknown, at: string): ServerConfig {
     if (expose.length === 0) fail(`${at}.expose must list at least one glob; leave it out to expose every tool`);
     result.expose = expose;
   }
+  if (s.optional !== undefined) {
+    if (typeof s.optional !== "boolean") fail(`${at}.optional must be true or false`);
+    if (s.optional) result.optional = true;
+  }
+  if (s.maxRestarts !== undefined) result.maxRestarts = integerIn(s.maxRestarts, `${at}.maxRestarts`, 0, 10);
   return result;
 }
 

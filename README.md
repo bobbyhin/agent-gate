@@ -407,6 +407,11 @@ example `{ "name": "files", "command": "npx", "args": ["-y", "@modelcontextproto
   value that a server quotes back in an error is cut out of the gateway's log and of what the agent
   sees. Call lines in the audit log for such a server have `"transport": "http"`.
 - `timeoutSeconds` (optional, per server, default 60) is how long one request to the server may take.
+- `optional` (per server, default `false`): the gateway starts without this server when it cannot be
+  started, and tries it again when it is needed. A server that is not optional and cannot be started
+  stops the gateway. `maxRestarts` (per server, default 3, at most 10) is how many failed tries in a
+  row to start a server again are made before it is given up. See
+  [When a server goes away](#when-a-server-goes-away).
 - `command` and `args` start the server. A server gets only a short list of safe environment
   variables (such as `PATH` and `HOME`), not the gateway's whole environment. Add an `env` object
   for the variables it needs.
@@ -643,6 +648,7 @@ agent-gate audit trajectory --expect <file> [--mode exact|in-order|any-order] [-
 agent-gate tools list [--json]                      pinned tool definitions, and the changed ones withheld (see Tool lists)
 agent-gate tools show <server>__<tool>              the pinned and the changed definition, to compare
 agent-gate tools accept <server>__<tool>            pin the changed definition, so the tool is listed again
+agent-gate status [--json]                          each running gateway's downstream servers: up, restarting, down or failed
 agent-gate policy suggest [--openapi <spec.json>] [--json]
                                                     each tool's decision from its name, and a draft policy (see Policy)
 ```
@@ -1241,6 +1247,42 @@ data:
   see the results of tools that the agent reaches some other way. The flags are a short list of
   phrases, so an injection written another way is not flagged.
 
+### When a server goes away
+
+A downstream server can crash, or be missing when the gateway starts. The gateway keeps the others
+working and says what is wrong (`src/gateway/downstream.ts`):
+
+- **A local server that exits** is started again after 1 s, then 2 s, 4 s and so on (at most 30 s
+  apart). Meanwhile its tools are left out of `tools/list` (the clients are told the list changed),
+  and a call to one is refused with the reason and when the next try is, as a `block` with rule
+  `server-down` in the audit log. After `maxRestarts` failed tries in a row (default 3) it is given up
+  until the gateway restarts. A server that dies again within 10 s of coming back counts as a failed
+  try, so a crash loop ends too.
+- **An `optional` server that cannot be started** does not stop the gateway. It is tried again when
+  it is needed (a `tools/list`, or a call to one of its tools), once its wait is over, up to
+  `maxRestarts` times. A server that is not optional still stops the gateway at startup, naming it.
+- **`agent-gate status`** shows each server of every gateway process running on the state directory.
+  Each process keeps its own entry in `<stateDir>/status.json`, with the approvals' lock and atomic
+  write; the entries of processes that are gone are dropped.
+
+From a real run, with `demo` exiting in the middle of a call and `docs` an optional server that does
+not start. The next call to `demo` gets:
+
+```
+agent-gate could not run this call: server "demo" went away and is being restarted: try 1 of 3 in 1 s; last error: the server's process exited. (rule server-down) Try again later.
+```
+
+```
+$ agent-gate status
+gateway pid 72507 (stdio), started 2026-10-31T09:28:54.035Z, updated 2026-10-31T09:28:54.126Z
+  server  state       restarts  failed tries  since                     next try                  last error
+  demo    restarting  0         0 of 3        2026-10-31T09:28:54.126Z  2026-10-31T09:28:55.126Z  the server's process exited
+  docs    down        0         0 of 3        2026-10-31T09:28:54.104Z  2026-10-31T09:28:55.104Z  MCP error -32000: Connection closed
+```
+
+A second later `demo` is `up`, with `restarts 1`, and its calls run again. `docs` is tried the next
+time a client lists the tools.
+
 ### What the gateway does not cover
 
 - It trusts the downstream server's tool names, and it cannot see what a tool does inside. A tool
@@ -1279,9 +1321,9 @@ data:
   decides is the agent's next call:
   if the agent obeys and tries to upload a secret through a shell tool, the shell rule blocks it, as
   the end-to-end test shows.
-- Downstream servers are started (or, with a `url`, connected to) once. If one fails, the gateway
-  does not start; if one dies or goes away later, its calls fail until the gateway is restarted, and
-  the other servers' calls go on.
+- A remote server (`url`) has no process for the gateway to watch: if it goes away, each call to it
+  fails on its own (see [When a server goes away](#when-a-server-goes-away)). A server given up after
+  `maxRestarts` stays down until the gateway is restarted.
 - A downstream call may take `timeoutSeconds` (default 60), and progress notifications are not
   relayed, so a tool that runs longer fails through the gateway with the request-timeout error.
 - Remote servers authenticate with headers from the environment only: there is no OAuth flow. The
@@ -2101,7 +2143,9 @@ records written after a call has already happened; those fail loudly instead, on
 | MCP gateway | `repeats.json` is damaged | calls under a loop limit are not run | `test/gateway/repeat.test.ts` |
 | MCP gateway | it is killed (`kill -9`) mid-run | the queue survives; an approved call runs once after a restart; no state file is left half written | `test/gateway/crash.test.ts` |
 | MCP gateway | a downstream server fails to start or refuses the gateway's header; the header's variable is not set | the gateway does not start, naming the server or the variable and never a header value | `test/gateway/http-downstream.test.ts` |
-| MCP gateway | a downstream server goes away later | its calls fail, and their result lines say so; the other servers' calls go on | `test/gateway/http-downstream.test.ts` |
+| MCP gateway | a remote downstream server goes away later | its calls fail, and their result lines say so; the other servers' calls go on | `test/gateway/http-downstream.test.ts` |
+| MCP gateway | a local downstream server exits later | it is started again after 1 s, 2 s, 4 s ...; meanwhile its tools are not listed and a call to one is refused with the reason (rule `server-down`); after `maxRestarts` failed tries in a row it is given up; the other servers' calls go on | `test/gateway/restarts.test.ts` |
+| MCP gateway | an `optional` server cannot be started | the gateway starts without it and tries it again when it is needed | `test/gateway/restarts.test.ts` |
 | MCP gateway over HTTP | a request has no key or an unknown one, another `Host` or `Origin`, or another agent's session id | 401, 403 or 404 before the request reaches a session; nothing is opened or run | `test/gateway/http-endpoint.test.ts` |
 | LLM gateway | `ledger.json` is damaged | the call is refused before anything is sent upstream, because an empty ledger would hand every key its whole budget again | `test/llm/failure.test.ts`, `budget.test.ts` |
 | LLM gateway | a provider key's variable is not set | the gateway does not start, naming the variable | `test/llm/cli.test.ts` |
@@ -2171,7 +2215,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 450 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 458 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
@@ -2197,7 +2241,10 @@ environment, a timeout, a 401 at startup whose quoted header value stays out of 
 that goes away), agents over HTTP (`serve --http` on 127.0.0.1: each agent's own policy and profile,
 401 without a key or with a wrong one, 403 for another `Host` or `Origin`, 404 for another agent's
 session, an approval or a standing approval that one agent cannot use for another, `audit verify` on
-the whole log), what the gateway does when one of its own parts fails, and an end-to-end test. That test starts `agent-gate serve`
+the whole log), downstream servers that fail (one that exits mid-call is started again while the
+others go on, an optional one starts once it can, one that never starts and a crash loop are given up,
+a required one stops the gateway, `status` and its file), what the gateway does when one of its own
+parts fails, and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log,
 including a call-result line, with the hash of what came back, for every forwarded call.
@@ -2277,7 +2324,7 @@ an evaluation set of whole runs, each replayed and checked step by step. It chec
 not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 450/450 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 458/458 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -2290,6 +2337,8 @@ src/command-guard.d.ts                        its types, for the TypeScript gate
 bin/claude-pretooluse-hook.js                 the Claude Code PreToolUse hook
 src/gateway/server.ts                         the MCP gateway: lists <server>__<tool>, decides, forwards (one core, a session per client)
 src/gateway/http-server.ts                    serve --http: agents over Streamable HTTP, each known by its key
+src/gateway/downstream.ts                     keeps the downstream servers connected: restarts, optional servers
+src/gateway/status.ts                         <stateDir>/status.json, for agent-gate status
 src/gateway/policy.ts                         the policy engine (pure but for path matchers): evaluate(policy, call) -> verdict
 src/gateway/approvals.ts                      the approval queue in <stateDir>/approvals.json
 src/gateway/repeats.ts                        loop limits: recent runs per call in <stateDir>/repeats.json

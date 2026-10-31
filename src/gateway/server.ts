@@ -18,6 +18,10 @@
 // arguments, and those whose definition changed since it was pinned (a call to one asks;
 // src/gateway/tool-pins.ts).
 //
+// The downstream servers are kept connected by src/gateway/downstream.ts: one that goes away is
+// started again, an optional one may be missing at startup, and a call to a server that is not up is
+// refused with the reason (rule server-down).
+//
 // ponytail: only tools are proxied. Resources, prompts, and requests from a downstream server
 // back to the client (sampling, elicitation) are not.
 
@@ -25,24 +29,20 @@ import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
   CallToolResultSchema,
   ErrorCode,
   ListToolsRequestSchema,
-  ListToolsResultSchema,
   McpError,
-  ToolListChangedNotificationSchema,
   type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { ApprovalStore, hashArguments, type Approval } from "./approvals.js";
 import { AuditLog, hashJson } from "./audit.js";
-import type { GatewayConfig, ServerConfig } from "./config.js";
+import type { GatewayConfig } from "./config.js";
 import { contextFromMeta, type CallContext } from "./context.js";
 import { ConfigError } from "./validate.js";
 import { bindFiles } from "./files.js";
@@ -51,11 +51,12 @@ import { loadLeakPolicy } from "../llm/config.js";
 import { RepeatStore } from "./repeats.js";
 import { guardResult, type ResultGuard } from "./result-guard.js";
 import { ToolPins } from "./tool-pins.js";
+import { Downstreams, listTools, VERSION } from "./downstream.js";
+import { StatusFile } from "./status.js";
 
-export const VERSION = "0.1.0";
+// Where they lived before src/gateway/downstream.ts; other modules import them from here.
+export { listTools, transportFor, VERSION } from "./downstream.js";
 export const SEPARATOR = "__";
-// ponytail: a server that keeps returning a nextCursor is cut off after this many pages.
-const MAX_LIST_PAGES = 100;
 
 export interface Gateway {
   /** Not yet connected to a transport: the caller connects it (the CLI uses stdio). */
@@ -71,6 +72,8 @@ export interface GatewayOptions {
   env?: NodeJS.ProcessEnv;
   /** A profile from the config's "profiles": this connection sees and may call only its tools. */
   profile?: string;
+  /** The first wait before a server that went away is started again (default 1000 ms; tests shorten it). */
+  restartBackoffMs?: number;
 }
 
 /** Who a connection is: the policy that decides its calls, its profile, and the HTTP agent behind it. */
@@ -105,7 +108,7 @@ export interface GatewayCore {
 export async function createGateway(config: GatewayConfig, policy: Policy, log: Log = stderrLog, options: GatewayOptions = {}): Promise<Gateway> {
   // An unknown profile is a config mistake: found before any downstream server is started.
   if (options.profile !== undefined) profileTests(config, options.profile);
-  const core = await createCore(config, [policy], log, options);
+  const core = await createCore(config, [policy], log, { ...options, mode: "stdio" });
   let session: Session;
   try {
     session = core.openSession({ policy, ...(options.profile !== undefined ? { profile: options.profile } : {}) });
@@ -134,7 +137,12 @@ function profileTests(config: GatewayConfig, name: string): Map<string, RegExp[]
  * Connects the downstream servers and opens the state directory, once per process. `policies` are
  * every policy a session may use: the loop-limit counts are kept as long as the longest window needs.
  */
-export async function createCore(config: GatewayConfig, policies: readonly Policy[], log: Log = stderrLog, options: Pick<GatewayOptions, "env"> = {}): Promise<GatewayCore> {
+export async function createCore(
+  config: GatewayConfig,
+  policies: readonly Policy[],
+  log: Log = stderrLog,
+  options: Pick<GatewayOptions, "env" | "restartBackoffMs"> & { mode?: "stdio" | "http" } = {},
+): Promise<GatewayCore> {
   fs.mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
   const approvals = new ApprovalStore(config.stateDir, config.approvalTtlMs);
   const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"), config.auditArguments);
@@ -156,12 +164,21 @@ export async function createCore(config: GatewayConfig, policies: readonly Polic
   const secrets = [...headers.values()].flatMap((h) => Object.values(h)).filter((value) => value.length >= 4);
   const scrub = (message: string): string => secrets.reduce((text, secret) => text.split(secret).join("[REDACTED:header]"), message);
   const servers = new Map(config.servers.map((s) => [s.name, s]));
-  // The sessions' servers, told when a downstream server's tool list changes.
+  // The sessions' servers, told when a downstream server's tool list changes, or a server comes or goes.
   const sessions = new Set<Server>();
-  const downstream = await connectAll(config, headers, scrub, () => {
-    for (const s of sessions) s.sendToolListChanged().catch(() => undefined);
-  });
-  log(`${downstream.size} downstream server(s) (${[...downstream.keys()].join(", ")}), state in ${config.stateDir}`);
+  const status = new StatusFile(config.stateDir, { mode: options.mode ?? "stdio", startedAt: new Date().toISOString() });
+  const downstream = new Downstreams(
+    config,
+    headers,
+    scrub,
+    log,
+    () => {
+      for (const s of sessions) s.sendToolListChanged().catch(() => undefined);
+    },
+    { status, ...(options.restartBackoffMs !== undefined ? { backoffMs: options.restartBackoffMs } : {}) },
+  );
+  await downstream.start();
+  log(`${downstream.names().length} downstream server(s) (${downstream.names().join(", ")}), state in ${config.stateDir}`);
 
   function recordTool(event: Parameters<AuditLog["writeTool"]>[0]): void {
     try {
@@ -186,7 +203,13 @@ export async function createCore(config: GatewayConfig, policies: readonly Polic
     sessions.add(server);
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const lists = await Promise.all([...downstream].map(([name, client]) => visibleTools(name, client)));
+      // A server that is not up lists nothing (an optional one due for a try is tried first).
+      const lists = await Promise.all(
+        downstream.names().map(async (name) => {
+          const client = await downstream.client(name);
+          return client ? visibleTools(name, client) : [];
+        }),
+      );
       return { tools: lists.flat() };
     });
 
@@ -214,8 +237,8 @@ export async function createCore(config: GatewayConfig, policies: readonly Polic
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { name, arguments: rawArgs } = request.params;
       const route = splitName(name);
-      const client = route && downstream.get(route.server);
-      if (!route || !client) throw new McpError(ErrorCode.InvalidParams, `Unknown tool: ${name}`);
+      if (!route || !downstream.has(route.server)) throw new McpError(ErrorCode.InvalidParams, `Unknown tool: ${name}`);
+      const client = await downstream.client(route.server);
 
       const n = ++seq;
       const context = contextFromMeta(request.params._meta);
@@ -223,8 +246,9 @@ export async function createCore(config: GatewayConfig, policies: readonly Polic
       let decided: Decided;
       try {
         // A tool the gateway has not listed yet is listed now, so that its definition is pinned (or found changed) first.
-        if (pins && isExposed(call.server, call.tool) && inProfile(call.server, call.tool) && pins.status(call.server, call.tool) === "unknown") await visibleTools(call.server, client);
-        decided = decide(call, n, context);
+        if (client && pins && isExposed(call.server, call.tool) && inProfile(call.server, call.tool) && pins.status(call.server, call.tool) === "unknown") await visibleTools(call.server, client);
+        // A server that is not up cannot run the call: it is refused, and recorded, with the reason.
+        decided = decide(call, n, context, client ? undefined : downstream.whyDown(call.server));
       } catch (err) {
         // The policy, the approval file or the audit log failed: the call is not run.
         // ponytail: such a failure goes to stderr only; the audit log may be what failed.
@@ -234,7 +258,7 @@ export async function createCore(config: GatewayConfig, policies: readonly Polic
       if (decided.refusal) return decided.refusal;
       // A rewritten call goes on with its edited arguments; any other exactly as the agent sent it.
       const forwardArgs = decided.rewrittenBy ? decided.args : rawArgs;
-      return forwardAndRecord(client, { ...call, args: decided.args }, n, decided.argsHash, forwardArgs, extra.signal, decided.rewrittenBy);
+      return forwardAndRecord(client as Client, { ...call, args: decided.args }, n, decided.argsHash, forwardArgs, extra.signal, decided.rewrittenBy);
     });
 
     /** What decide() found: an error result when the call must not run, and the arguments it runs with. */
@@ -245,12 +269,15 @@ export async function createCore(config: GatewayConfig, policies: readonly Polic
       rewrittenBy?: string[];
     }
 
-    function decide(call: ToolCall, n: number, context: CallContext): Decided {
+    /** `down`: why the call's server is not up, when it is not. */
+    function decide(call: ToolCall, n: number, context: CallContext, down?: string): Decided {
       let verdict: Verdict = !isExposed(call.server, call.tool)
         ? { decision: "block", rule: "not-exposed", why: `the gateway config's "expose" list for server "${call.server}" leaves this tool out` }
         : !inProfile(call.server, call.tool)
           ? { decision: "block", rule: "not-in-profile", why: `profile "${spec.profile}" leaves this tool out, so this connection may not call it` }
-          : evaluate(policy, call);
+          : down !== undefined
+            ? { decision: "block", rule: "server-down", why: down }
+            : evaluate(policy, call);
       // A tool whose definition changed since it was pinned does not run unattended.
       if (pins && (verdict.decision === "allow" || verdict.decision === "warn") && pins.status(call.server, call.tool) === "changed") {
         verdict = {
@@ -415,7 +442,12 @@ export async function createCore(config: GatewayConfig, policies: readonly Polic
     async close() {
       await Promise.allSettled([...sessions].map((s) => s.close()));
       sessions.clear();
-      await Promise.allSettled([...downstream.values()].map((client) => client.close()));
+      await downstream.close();
+      try {
+        status.remove();
+      } catch (err) {
+        log(`could not update the status file: ${errorText(err)}`);
+      }
     },
   };
 }
@@ -424,59 +456,6 @@ function splitName(name: string): { server: string; tool: string } | undefined {
   const at = name.indexOf(SEPARATOR);
   if (at <= 0 || at + SEPARATOR.length === name.length) return undefined;
   return { server: name.slice(0, at), tool: name.slice(at + SEPARATOR.length) };
-}
-
-// ponytail: every downstream server is started (or, for a url, connected to) once, at startup. If
-// one fails, the gateway does not start; if one dies later, its calls fail until the gateway is
-// restarted.
-async function connectAll(
-  config: GatewayConfig,
-  headers: ReadonlyMap<string, Record<string, string>>,
-  scrub: (message: string) => string,
-  onToolListChanged: () => void,
-): Promise<Map<string, Client>> {
-  const results = await Promise.allSettled(
-    config.servers.map(async (s) => {
-      const client = new Client({ name: "agent-gate", version: VERSION });
-      client.setNotificationHandler(ToolListChangedNotificationSchema, async () => onToolListChanged());
-      await client.connect(transportFor(s, headers.get(s.name) ?? {}), s.timeoutMs === undefined ? {} : { timeout: s.timeoutMs });
-      return [s.name, client] as const;
-    }),
-  );
-  const connected = new Map<string, Client>();
-  const failures: string[] = [];
-  results.forEach((result, i) => {
-    if (result.status === "fulfilled") connected.set(result.value[0], result.value[1]);
-    else failures.push(`"${config.servers[i]?.name}": ${scrub(errorText(result.reason))}`);
-  });
-  if (failures.length > 0) {
-    await Promise.allSettled([...connected.values()].map((client) => client.close()));
-    throw new Error(`could not start downstream server ${failures.join("; ")}`);
-  }
-  return connected;
-}
-
-/** stdio for a local server; Streamable HTTP for one with a url, with its headers, and no redirects (a token must not travel). */
-export function transportFor(s: ServerConfig, headers: Record<string, string>): StdioClientTransport | StreamableHTTPClientTransport {
-  if (s.url) return new StreamableHTTPClientTransport(new URL(s.url), { requestInit: { headers, redirect: "error" } });
-  return new StdioClientTransport({ command: s.command as string, args: s.args ?? [], ...(s.env ? { env: s.env } : {}), stderr: "inherit" });
-}
-
-export async function listTools(name: string, client: Client, log: Log, timeoutMs?: number, scrub: (message: string) => string = (m) => m): Promise<Tool[]> {
-  const tools: Tool[] = [];
-  try {
-    let cursor: string | undefined;
-    for (let page = 0; page < MAX_LIST_PAGES; page++) {
-      const result = await client.request({ method: "tools/list", params: cursor === undefined ? {} : { cursor } }, ListToolsResultSchema, timeoutMs === undefined ? {} : { timeout: timeoutMs });
-      tools.push(...result.tools); // the server's own names; visibleTools() adds the prefix
-      cursor = result.nextCursor;
-      if (cursor === undefined) break;
-    }
-  } catch (err) {
-    // One broken server should not hide the tools of the others.
-    log(`could not list the tools of "${name}": ${scrub(errorText(err))}`);
-  }
-  return tools;
 }
 
 async function forward(
@@ -538,6 +517,8 @@ function deniedText(approval: Approval): string {
 }
 
 function blockedText(verdict: Verdict): string {
+  // Not a decision about the call: the server cannot take it now. The agent may try later.
+  if (verdict.rule === "server-down") return `agent-gate could not run this call: ${verdict.why}. (rule server-down) Try again later.`;
   return [
     `agent-gate blocked this call, so it was not run: ${verdict.why} (rule ${verdict.rule})`,
     `Blocked calls cannot be approved. ${DO_NOT_WORK_AROUND}`,

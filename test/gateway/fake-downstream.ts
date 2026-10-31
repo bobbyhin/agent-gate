@@ -2,14 +2,29 @@
 // Its tools only pretend: nothing is deleted and no command is run.
 // With --log <file>, every call it receives is appended to that file as one JSON line, so a test
 // can prove which calls reached it and which did not.
+// Two ways to fail, for the tests of restarts: with --exit-on-text <word>, an echo of exactly that word
+// makes the process exit at once, without an answer (a crash in the middle of a call); with
+// --fail-start-if <file>, the process exits at startup while that file exists (a server that will not
+// start until something changes); with --exit-after-ms <n>, it exits n ms after it starts (a crash loop).
 
 import * as fs from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const logAt = process.argv.indexOf("--log");
-const logFile = logAt >= 0 ? process.argv[logAt + 1] : undefined;
+const option = (name: string): string | undefined => {
+  const at = process.argv.indexOf(name);
+  return at >= 0 ? process.argv[at + 1] : undefined;
+};
+const logFile = option("--log");
+const exitOnText = option("--exit-on-text");
+const failStartIf = option("--fail-start-if");
+const exitAfterMs = option("--exit-after-ms");
+if (exitAfterMs !== undefined) setTimeout(() => process.exit(5), Number(exitAfterMs));
+if (failStartIf !== undefined && fs.existsSync(failStartIf)) {
+  process.stderr.write("fake-downstream: told not to start\n");
+  process.exit(3);
+}
 
 function received(tool: string, args: Record<string, unknown>): void {
   if (logFile) fs.appendFileSync(logFile, `${JSON.stringify({ tool, args })}\n`);
@@ -26,6 +41,7 @@ const echoTool = server.registerTool(
   },
   async ({ text }) => {
     received("echo", { text });
+    if (exitOnText !== undefined && text === exitOnText) process.exit(4);
     return { content: [{ type: "text", text }], structuredContent: { echoed: text, length: text.length } };
   },
 );

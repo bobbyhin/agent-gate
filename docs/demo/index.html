@@ -126,8 +126,8 @@
    "isError": false,
    "audit": [
     {
-     "ts": "2026-10-31T09:20:38.739Z",
-     "connId": "cn-1120d05c",
+     "ts": "2026-10-31T09:29:23.586Z",
+     "connId": "cn-1de8d472",
      "seq": 1,
      "server": "demo",
      "tool": "echo",
@@ -138,14 +138,14 @@
      "forwarded": true
     },
     {
-     "ts": "2026-10-31T09:20:38.740Z",
+     "ts": "2026-10-31T09:29:23.589Z",
      "event": "call-result",
-     "connId": "cn-1120d05c",
+     "connId": "cn-1de8d472",
      "seq": 1,
      "server": "demo",
      "tool": "echo",
      "argsHash": "sha256:cbbbdcd27692344de5dbab3abcaba413fb0f45307267de7081401576df1cb176",
-     "durationMs": 2,
+     "durationMs": 3,
      "isError": false,
      "resultHash": "sha256:18687cbcbbbe577d59f89473d37a53854caea9bb3ebfe514c0637f290ae69a06",
      "resultBytes": 94
@@ -168,12 +168,12 @@
      "path": "notes/old.md"
     }
    },
-   "answer": "agent-gate: this call needs a human decision, so it was not run.\nReason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\nApproval id: ap-a8397269 (expires 2026-11-01T09:20:38.741Z)\nA human can approve it with: agent-gate approvals approve ap-a8397269\nOnce it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.\nDo not try to get the same result another way.",
+   "answer": "agent-gate: this call needs a human decision, so it was not run.\nReason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\nApproval id: ap-bcc54d72 (expires 2026-11-01T09:29:23.591Z)\nA human can approve it with: agent-gate approvals approve ap-bcc54d72\nOnce it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.\nDo not try to get the same result another way.",
    "isError": true,
    "audit": [
     {
-     "ts": "2026-10-31T09:20:38.746Z",
-     "connId": "cn-1120d05c",
+     "ts": "2026-10-31T09:29:23.595Z",
+     "connId": "cn-1de8d472",
      "seq": 2,
      "server": "demo",
      "tool": "delete_file",
@@ -182,12 +182,12 @@
      "why": "Red line 4: this tool looks like it deletes or overwrites data.",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
      "forwarded": false,
-     "approvalId": "ap-a8397269"
+     "approvalId": "ap-bcc54d72"
     }
    ],
    "queue": [
     {
-     "id": "ap-a8397269",
+     "id": "ap-bcc54d72",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -206,11 +206,11 @@
   {
    "actor": "human",
    "command": "$ agent-gate approvals list",
-   "answer": "ap-a8397269  pending  demo__delete_file\n  why:     Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\n  args:    {\"path\":\"notes/old.md\"}\n  created: 2026-10-31T09:20:38.741Z  expires: 2026-11-01T09:20:38.741Z",
+   "answer": "ap-bcc54d72  pending  demo__delete_file\n  why:     Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\n  args:    {\"path\":\"notes/old.md\"}\n  created: 2026-10-31T09:29:23.591Z  expires: 2026-11-01T09:29:23.591Z",
    "audit": [],
    "queue": [
     {
-     "id": "ap-a8397269",
+     "id": "ap-bcc54d72",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -225,26 +225,26 @@
   },
   {
    "actor": "human",
-   "command": "$ agent-gate approvals approve ap-a8397269 --yes",
-   "answer": "approved ap-a8397269: demo__delete_file {\"path\":\"notes/old.md\"}\nThe agent can now make this exact call once, until 2026-11-01T09:20:38.741Z.",
+   "command": "$ agent-gate approvals approve ap-bcc54d72 --yes",
+   "answer": "approved ap-bcc54d72: demo__delete_file {\"path\":\"notes/old.md\"}\nThe agent can now make this exact call once, until 2026-11-01T09:29:23.591Z.",
    "audit": [
     {
-     "ts": "2026-10-31T09:20:38.916Z",
+     "ts": "2026-10-31T09:29:24.162Z",
      "event": "approval-decided",
-     "approvalId": "ap-a8397269",
+     "approvalId": "ap-bcc54d72",
      "server": "demo",
      "tool": "delete_file",
      "rule": "red-line-4-delete",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
      "decision": "approved",
-     "waitMs": 169,
+     "waitMs": 539,
      "decidedBy": "alice",
      "confirmation": "--yes"
     }
    ],
    "queue": [
     {
-     "id": "ap-a8397269",
+     "id": "ap-bcc54d72",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -271,8 +271,8 @@
    "isError": false,
    "audit": [
     {
-     "ts": "2026-10-31T09:20:38.927Z",
-     "connId": "cn-1120d05c",
+     "ts": "2026-10-31T09:29:24.227Z",
+     "connId": "cn-1de8d472",
      "seq": 3,
      "server": "demo",
      "tool": "delete_file",
@@ -281,17 +281,17 @@
      "why": "Red line 4: this tool looks like it deletes or overwrites data.",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
      "forwarded": true,
-     "approvalId": "ap-a8397269"
+     "approvalId": "ap-bcc54d72"
     },
     {
-     "ts": "2026-10-31T09:20:38.928Z",
+     "ts": "2026-10-31T09:29:24.228Z",
      "event": "call-result",
-     "connId": "cn-1120d05c",
+     "connId": "cn-1de8d472",
      "seq": 3,
      "server": "demo",
      "tool": "delete_file",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
-     "durationMs": 0,
+     "durationMs": 1,
      "isError": false,
      "resultHash": "sha256:2c439525489f5c192e7dc1890336d9ab6723bda91cd0bdb43d148e109a30058b",
      "resultBytes": 71
@@ -299,7 +299,7 @@
    ],
    "queue": [
     {
-     "id": "ap-a8397269",
+     "id": "ap-bcc54d72",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -323,12 +323,12 @@
      "path": "notes/old.md"
     }
    },
-   "answer": "agent-gate: this call needs a human decision, so it was not run.\nReason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\nApproval id: ap-ff316f3e (expires 2026-11-01T09:20:38.929Z)\nA human can approve it with: agent-gate approvals approve ap-ff316f3e\nOnce it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.\nDo not try to get the same result another way.",
+   "answer": "agent-gate: this call needs a human decision, so it was not run.\nReason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\nApproval id: ap-edbad1b3 (expires 2026-11-01T09:29:24.229Z)\nA human can approve it with: agent-gate approvals approve ap-edbad1b3\nOnce it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.\nDo not try to get the same result another way.",
    "isError": true,
    "audit": [
     {
-     "ts": "2026-10-31T09:20:38.932Z",
-     "connId": "cn-1120d05c",
+     "ts": "2026-10-31T09:29:24.234Z",
+     "connId": "cn-1de8d472",
      "seq": 4,
      "server": "demo",
      "tool": "delete_file",
@@ -337,12 +337,12 @@
      "why": "Red line 4: this tool looks like it deletes or overwrites data.",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
      "forwarded": false,
-     "approvalId": "ap-ff316f3e"
+     "approvalId": "ap-edbad1b3"
     }
    ],
    "queue": [
     {
-     "id": "ap-a8397269",
+     "id": "ap-bcc54d72",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -351,7 +351,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-ff316f3e",
+     "id": "ap-edbad1b3",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -378,8 +378,8 @@
    "isError": true,
    "audit": [
     {
-     "ts": "2026-10-31T09:20:38.934Z",
-     "connId": "cn-1120d05c",
+     "ts": "2026-10-31T09:29:24.237Z",
+     "connId": "cn-1de8d472",
      "seq": 5,
      "server": "demo",
      "tool": "run_command",
@@ -392,7 +392,7 @@
    ],
    "queue": [
     {
-     "id": "ap-a8397269",
+     "id": "ap-bcc54d72",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -401,7 +401,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-ff316f3e",
+     "id": "ap-edbad1b3",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -429,8 +429,8 @@
    "isError": false,
    "audit": [
     {
-     "ts": "2026-10-31T09:20:38.939Z",
-     "connId": "cn-1120d05c",
+     "ts": "2026-10-31T09:29:24.243Z",
+     "connId": "cn-1de8d472",
      "seq": 6,
      "server": "demo",
      "tool": "echo",
@@ -441,9 +441,9 @@
      "forwarded": true
     },
     {
-     "ts": "2026-10-31T09:20:38.940Z",
+     "ts": "2026-10-31T09:29:24.244Z",
      "event": "call-result",
-     "connId": "cn-1120d05c",
+     "connId": "cn-1de8d472",
      "seq": 6,
      "server": "demo",
      "tool": "echo",
@@ -456,7 +456,7 @@
    ],
    "queue": [
     {
-     "id": "ap-a8397269",
+     "id": "ap-bcc54d72",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -465,7 +465,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-ff316f3e",
+     "id": "ap-edbad1b3",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -490,8 +490,8 @@
    "isError": true,
    "audit": [
     {
-     "ts": "2026-10-31T09:20:38.943Z",
-     "connId": "cn-1120d05c",
+     "ts": "2026-10-31T09:29:24.254Z",
+     "connId": "cn-1de8d472",
      "seq": 7,
      "server": "demo",
      "tool": "run_command",
@@ -504,7 +504,7 @@
    ],
    "queue": [
     {
-     "id": "ap-a8397269",
+     "id": "ap-bcc54d72",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -513,7 +513,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-ff316f3e",
+     "id": "ap-edbad1b3",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -535,7 +535,7 @@
    "audit": [],
    "queue": [
     {
-     "id": "ap-a8397269",
+     "id": "ap-bcc54d72",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -544,7 +544,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-ff316f3e",
+     "id": "ap-edbad1b3",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -570,7 +570,7 @@
   "decide": {
    "id": "decide",
    "file": "src/gateway/server.ts",
-   "line": 311,
+   "line": 338,
    "text": "      switch (verdict.decision) {\n        case \"allow\":\n          record(true);\n          return run();\n        case \"warn\":\n          record(true);\n          log(`WARN ${call.server}${SEPARATOR}${call.tool}: ${verdict.why} (rule ${verdict.rule})`);\n          return run();\n        case \"block\":\n          record(false);\n          return refuse(errorResult(blockedText(verdict)));\n        case \"ask\": {\n          const files = config.fileBinding ? bindFiles(args, config.fileBinding) : undefined;\n          const outcome = approvals.resolveCall({\n            ...call,\n            args,\n            argsHash,\n            rule: verdict.rule,\n            why: verdict.why,\n            ...(verdict.ttlMs !== undefined ? { ttlMs: verdict.ttlMs } : {}),\n            ...(files ? { files } : {}),\n            ...(verdict.standing ? { standing: true } : {}),\n            ...(context.agentPath ? { agentPath: context.agentPath } : {}),\n            ...(verdict.alsoMatched ? { alsoMatched: verdict.alsoMatched } : {}),\n            ...(verdict.rewrittenBy ? { rewrittenBy: verdict.rewrittenBy } : {}),\n            ...(spec.agent !== undefined ? { agent: spec.agent } : {}),\n          });\n          if (outcome.kind === \"approved\" || outcome.kind === \"standing\") {\n            // the audit line names the approval, or the standing approval, that let it through\n            record(true, outcome.kind === \"approved\" ? outcome.approval.id : outcome.grant.id);\n            if (repeats && limited) repeats.record(limits, call.server, call.tool, argsHash);\n            return run();\n          }\n          record(false, outcome.approval.id);"
   },
   "resolveCall": {
