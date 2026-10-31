@@ -67,6 +67,9 @@ export interface GatewayKey {
   maxCallsPerMinute?: number;
   runMaxCalls?: number;
   runMaxUsd?: number;
+  /** The same request let through at most repeatMax times in any repeatWindowMs (src/llm/repeats.ts). */
+  repeatMax?: number;
+  repeatWindowMs?: number;
 }
 
 /** Who may read GET /metrics (src/llm/metrics.ts). Absent: nobody, it is not served. */
@@ -314,7 +317,8 @@ function globs(value: unknown, at: string): (candidate: string) => boolean {
 
 function parseKey(raw: unknown, at: string): GatewayKey {
   const k = object(raw, at);
-  onlyKeys(k, ["name", "sha256", "dailyUsd", "monthlyUsd", "maxCallsPerMinute", "runMaxCalls", "runMaxUsd"], at);
+  onlyKeys(k, ["name", "sha256", "dailyUsd", "monthlyUsd", "maxCallsPerMinute", "runMaxCalls", "runMaxUsd", "repeatMax", "repeatWindowSeconds"], at);
+  if ((k.repeatMax === undefined) !== (k.repeatWindowSeconds === undefined)) fail(`${at}: repeatMax and repeatWindowSeconds go together; set both or neither`);
   const name = text(k.name, `${at}.name`);
   if (!NAME.test(name)) fail(`${at}.name must be 1 to 64 letters, digits, ".", "_" or "-", starting with a letter or digit`);
   const sha256 = text(k.sha256, `${at}.sha256`);
@@ -327,6 +331,9 @@ function parseKey(raw: unknown, at: string): GatewayKey {
     ...(k.maxCallsPerMinute === undefined ? {} : { maxCallsPerMinute: integerIn(k.maxCallsPerMinute, `${at}.maxCallsPerMinute`, 1, 100_000) }),
     ...(k.runMaxCalls === undefined ? {} : { runMaxCalls: integerIn(k.runMaxCalls, `${at}.runMaxCalls`, 1, 1_000_000) }),
     ...(k.runMaxUsd === undefined ? {} : { runMaxUsd: positiveNumber(k.runMaxUsd, `${at}.runMaxUsd`) }),
+    ...(k.repeatMax === undefined
+      ? {}
+      : { repeatMax: integerIn(k.repeatMax, `${at}.repeatMax`, 1, 10_000), repeatWindowMs: integerIn(k.repeatWindowSeconds, `${at}.repeatWindowSeconds`, 1, 86_400) * 1000 }),
   };
 }
 

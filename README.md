@@ -1125,8 +1125,8 @@ read from `$GATEWAY_KEY`. This is the example config:
 - `routes` are explained under [Routing](#routing).
 - `keys` has one entry per team or agent. `sha256` is the SHA-256 of the gateway key, not the key,
   so the config can be read without handing out access. `dailyUsd` and `monthlyUsd` are the caps;
-  both are required. `maxCallsPerMinute`, `runMaxCalls` and `runMaxUsd` are optional stop rules
-  (see [Budgets](#budgets)).
+  both are required. `maxCallsPerMinute`, `runMaxCalls`, `runMaxUsd`, and `repeatMax` with
+  `repeatWindowSeconds`, are optional stop rules (see [Budgets](#budgets)).
 - `policy` is the leak guard's rule file. It and `stateDir` are resolved against the config file's
   directory.
 - Optional, with their defaults: `listen` (`127.0.0.1`, port 8787), `defaultMaxTokens` (1024),
@@ -1270,14 +1270,23 @@ retry-after: 63272
 room, and one second when calls in flight are what is in the way.
 
 **Stop rules.** Caps bound what a key spends in a day or a month. An agent stuck in a loop spends it
-fast, and a run that should have stopped after ten calls can make a thousand. A key can set three more
-limits, checked in this order before the caps, under the same lock:
+fast, and a run that should have stopped after ten calls can make a thousand. A key can set more
+limits. The first is checked before anything is reserved; the other three are checked in this order
+before the caps, under the ledger's lock:
 
 | Field | What it bounds | Refused with |
 | --- | --- | --- |
+| `repeatMax` with `repeatWindowSeconds` | the same request let through in any window of that many seconds | 429 `loop_suspected`, `Retry-After` until the oldest copy leaves the window |
 | `maxCallsPerMinute` | calls let through in any 60 seconds | 429 `rate_limited`, `Retry-After` until the oldest of them is a minute old |
 | `runMaxCalls` | calls in one run | 429 `run_limit_reached`, no `Retry-After`: waiting does not help |
 | `runMaxUsd` | a run's settled dollars, plus what its calls in flight hold, plus this call's estimate | 429 `run_limit_reached`, no `Retry-After` |
+
+"The same request" means the same `model`, `messages`, `tools`, `tool_choice` and `n`, in any key
+order, compared by the SHA-256 of their canonical JSON; only copies that went through count. It is
+the loop that resends one failed call unchanged, which is cut at once. An agent that is getting
+somewhere sends different messages each time, so this limit leaves it alone. Its counts live in the
+gateway's memory, not in the ledger: one gateway process serves a state directory
+([ADR 0003](docs/adr/0003-single-writer-state.md)), and a restart forgets at most one window.
 
 A run is what the client names in its `x-run-id` header (a plain id, see [Tracing](#tracing)); the
 ledger forgets a run a day after its last call. The run caps are a stop rule for a loop that keeps its
@@ -1285,7 +1294,9 @@ run id, not a security boundary: a client that sends no `x-run-id`, or a new one
 held only to `maxCallsPerMinute` and the caps. Each refusal is a usage line with `error`, the limit
 as `rule`, and `runId`. `test/llm/limits.test.ts` runs a loop against a live gateway and checks
 that it is cut at the sixth call of a minute, that a run is cut at its third call and before it can
-pass its dollars, and that another run is not.
+pass its dollars, and that another run is not; and that with `repeatMax` 5 in 60 seconds the sixth
+copy of a request is refused, other requests and other keys are not, and the copy goes through again
+once the window has moved on.
 
 **Booked once.** A reservation is settled at most once. A second settle of the same id books
 nothing, and a settle whose reservation had already expired (a call that outlived its reservation)
@@ -1595,8 +1606,8 @@ provider key appears in any response, in the state files or in the gateway's log
 - Secrets the leak guard does not know. It is a list of regexes, on the request and the answer, so a
   secret in a format it does not know, split across messages, or encoded (base64, for example) gets
   through. A held stream is put back together before it is read; a relayed one is not read at all.
-- Token rate limits, and budgets per route or per model. Budgets, calls per minute and run caps are
-  per key.
+- Token rate limits, and budgets per route or per model. Budgets, calls per minute, run caps and
+  repeats are per key.
 - Prices are config values. Keep them in step with the providers' price lists.
 - More than one host. The ledger is a file on one machine (see the ADR).
 - TLS. The gateway speaks plain HTTP: bind it to localhost, as the example does, or put it behind a
@@ -1821,7 +1832,7 @@ obeys, and the gateway blocks the call before it reaches the server. Another den
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 257 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 260 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file, a settle that comes
 twice or after its reservation expired, calls per minute and run caps); a leak-guard table
@@ -1842,7 +1853,8 @@ dropped), `usage --by task`, 401 for an unknown key, and that no provider key ev
 response or a log. A metrics suite checks the Prometheus text, who may read `/metrics` (its own
 key on the gateway's port, or a loopback listener with none) and the config rules behind that. A
 stop-rule suite runs loops against a live gateway: cut at the sixth call of a minute, a run cut at its
-third call and before it passes its dollars, each cut in the usage log; the end-to-end run also
+third call and before it passes its dollars, the sixth copy of the same request cut and let through
+again once its window moves on, each cut in the usage log; the end-to-end run also
 checks that `usage --verify` finds the usage log and the ledger in agreement. A response-guard
 suite runs every block rule on a request and on an answer, and a live gateway against providers
 whose answers carry a secret (withheld, booked) or a key assignment (redacted). A failure suite
@@ -1881,7 +1893,7 @@ audit log; the end-to-end test scores its own run that way. It checks which call
 the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 257/257 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 260/260 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1912,6 +1924,7 @@ src/llm/routing.ts                            routing (pure): route(config, requ
 src/llm/upstream.ts                           calls the upstreams: retries, backoff, fallback
 src/llm/stream.ts                             streamed answers: reads the events, puts messages back together
 src/llm/budget.ts                             the cost estimate and the ledger in <stateDir>/ledger.json
+src/llm/repeats.ts                            repeatMax: the same request let through at most so often, in memory
 src/llm/leak-guard.ts                         the leak guard (pure): block or redact secrets in messages
 src/llm/usage-log.ts                          the usage log, <stateDir>/usage.jsonl
 src/llm/usage-report.ts                       reads the usage log back: agent-gate usage --by

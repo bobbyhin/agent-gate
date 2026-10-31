@@ -121,5 +121,99 @@ describe("stop rules: calls per minute, and calls and dollars per run", () => {
     assert.throws(() => parseLlmConfig(config({ runMaxCalls: 2.5 }), "/"), /runMaxCalls must be a whole number/);
     assert.throws(() => parseLlmConfig(config({ runMaxUsd: -1 }), "/"), /runMaxUsd must be a positive number/);
     assert.throws(() => parseLlmConfig(config({ maxTokensPerMinute: 10 }), "/"), /unknown field "maxTokensPerMinute"/);
+    assert.throws(() => parseLlmConfig(config({ repeatMax: 5 }), "/"), /repeatMax and repeatWindowSeconds go together/);
+    assert.throws(() => parseLlmConfig(config({ repeatWindowSeconds: 60 }), "/"), /repeatMax and repeatWindowSeconds go together/);
+    assert.throws(() => parseLlmConfig(config({ repeatMax: 0, repeatWindowSeconds: 60 }), "/"), /repeatMax must be a whole number from 1/);
+    assert.throws(() => parseLlmConfig(config({ repeatMax: 5, repeatWindowSeconds: 0.5 }), "/"), /repeatWindowSeconds must be a whole number from 1/);
+  });
+});
+
+describe("stop rules: the same request again and again (repeatMax)", () => {
+  let fake: FakeUpstream;
+  let tmp: string;
+  let gateway: LlmGateway;
+  let clock = Date.parse("2026-10-31T12:00:00.000Z");
+
+  before(async () => {
+    fake = await startFakeUpstream({ mode: "ok", usage: { prompt_tokens: 100, completion_tokens: 10 } });
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-repeats-"));
+    const config = parseLlmConfig(
+      {
+        listen: { port: 0 },
+        stateDir: "state",
+        policy: "p.json",
+        upstreams: [{ name: "up", baseUrl: `${fake.url}/v1`, apiKeyEnv: "UP_KEY", models: { small: "s", large: "l" }, pricePerMTok: { input: 1, output: 1 } }],
+        routes: [{ id: "all", use: { upstream: "up" } }],
+        keys: [
+          { name: "looper", sha256: hashKey(KEY_A), dailyUsd: 1, monthlyUsd: 10, repeatMax: 5, repeatWindowSeconds: 60 },
+          { name: "free", sha256: hashKey(KEY_B), dailyUsd: 1, monthlyUsd: 10 },
+        ],
+      },
+      tmp,
+    );
+    gateway = await startLlmGateway(config, parseLeakPolicy({ leakGuard: [] }), { env: { UP_KEY: "fake-upstream-key-repeats" }, log: () => undefined, now: () => clock });
+  });
+  after(async () => {
+    await gateway?.close();
+    await fake?.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const chat = async (key: string, content: string, extra: Record<string, unknown> = {}) => {
+    const res = await fetch(`${gateway.url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "small", messages: [{ role: "user", content }], max_tokens: 10, ...extra }),
+    });
+    return { status: res.status, retryAfter: res.headers.get("retry-after"), json: (await res.json()) as { error?: { code: string; message: string; cap: string } } };
+  };
+
+  it("lets the same request through repeatMax times in the window, then refuses it as a loop", async () => {
+    const calls = fake.requests.length;
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      statuses.push((await chat(KEY_A, "check the build again")).status);
+      clock += 1000;
+    }
+    assert.deepEqual(statuses, [200, 200, 200, 200, 200, 429]);
+    assert.equal(fake.requests.length, calls + 5, "the sixth never reached the upstream");
+    const refused = await chat(KEY_A, "check the build again");
+    assert.equal(refused.status, 429);
+    assert.equal(refused.json.error?.code, "loop_suspected");
+    assert.match(refused.json.error?.message ?? "", /has sent this same request 5 times in the last 60 s, its limit \(repeatMax\); that looks like a loop/);
+    // The oldest of the five went through 6 s ago, so it leaves the window in 54 s.
+    assert.equal(refused.retryAfter, "54");
+  });
+
+  it("counts only the same request: other messages, another model or key order changes", async () => {
+    assert.equal((await chat(KEY_A, "check the tests instead")).status, 200);
+    assert.equal((await chat(KEY_A, "check the build again", { model: "large" })).status, 200);
+    // The same fields in another order are the same request.
+    const reordered = await fetch(`${gateway.url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${KEY_A}`, "content-type": "application/json" },
+      body: JSON.stringify({ max_tokens: 10, messages: [{ content: "check the build again", role: "user" }], model: "small" }),
+    });
+    assert.equal(reordered.status, 429);
+    // A key without the rule is not held to it.
+    for (let i = 0; i < 6; i++) assert.equal((await chat(KEY_B, "check the build again")).status, 200);
+  });
+
+  it("lets it through again once the oldest copies leave the window, and logs each refusal", async () => {
+    clock += 60_000;
+    assert.equal((await chat(KEY_A, "check the build again")).status, 200);
+    const lines = fs
+      .readFileSync(path.join(tmp, "state", "usage.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    assert.deepEqual(
+      lines.filter((l) => l.status === 429).map((l) => [l.key, l.error, l.rule, l.costUsd]),
+      [
+        ["looper", "loop_suspected", "repeatMax", 0],
+        ["looper", "loop_suspected", "repeatMax", 0],
+        ["looper", "loop_suspected", "repeatMax", 0],
+      ],
+    );
   });
 });

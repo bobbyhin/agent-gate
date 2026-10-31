@@ -37,6 +37,7 @@ import { costUsd, estimateInputTokens, formatUsd, Ledger, roundUsd, type Reserve
 import { hashKey, type GatewayKey, type LlmConfig } from "./config.js";
 import { guardMessages, guardResponse, messageTexts, type LeakPolicy } from "./leak-guard.js";
 import { CONTENT_TYPE, Metrics } from "./metrics.js";
+import { RepeatWindow, requestHash } from "./repeats.js";
 import { route, type ResolvedTarget } from "./routing.js";
 import { isUsageOnly, rebuildEvents, SseParser, StreamAssembler } from "./stream.js";
 import { backoffCeiling, callUpstreams } from "./upstream.js";
@@ -93,6 +94,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
   const usageLog = new UsageLog(path.join(config.stateDir, "usage.jsonl"));
   const keysByHash = new Map(config.keys.map((key) => [key.sha256, key]));
   const metrics = new Metrics();
+  const repeats = new RepeatWindow();
 
   /** GET /metrics. On the gateway's port it needs the metrics key; on its own loopback listener it does not. */
   function serveMetrics(req: http.IncomingMessage, res: http.ServerResponse, withKey: boolean): void {
@@ -282,11 +284,31 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     const targets = chosen.fallback ? [chosen.primary, chosen.fallback] : [chosen.primary];
     const estimate = Math.max(...targets.map((t) => costUsd(t.upstream.pricePerMTok, inputTokens, outputTokens)));
 
+    // The same request again and again (repeatMax): refused before anything is reserved. The check,
+    // the reservation and the count happen in one synchronous step, so concurrent copies cannot slip past.
+    const sameRequest = key.repeatMax !== undefined && key.repeatWindowMs !== undefined ? requestHash(body) : undefined;
+    if (sameRequest !== undefined) {
+      const repeated = repeats.check(key.name, sameRequest, key.repeatMax as number, key.repeatWindowMs as number, now());
+      if (!repeated.ok) {
+        return finish(
+          429,
+          apiError(
+            "loop_suspected",
+            `agent-gate: key "${key.name}" has sent this same request ${repeated.count} times in the last ${(key.repeatWindowMs as number) / 1000} s, its limit (repeatMax); that looks like a loop. Change the request, or try again in ${repeated.retryAfterSeconds} s.`,
+            { type: "rate_limit_error", cap: "repeatMax" },
+          ),
+          { error: "loop_suspected", rule: "repeatMax" },
+          { "retry-after": repeated.retryAfterSeconds },
+        );
+      }
+    }
+
     const reservation = ledger.reserve(key, estimate, runId);
     if (!reservation.ok) {
       const refused = refusal(reservation, key.name);
       return finish(429, refused.body, refused.outcome, refused.headers);
     }
+    if (sameRequest !== undefined) repeats.admit(key.name, sameRequest, key.repeatWindowMs as number, now());
 
     // 6. Call. Without a limit from the client, the default is sent, so the reservation covers the answer.
     const forward: Record<string, unknown> = { ...body, messages: guarded.messages };
