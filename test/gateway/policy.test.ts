@@ -198,7 +198,7 @@ describe("rule matching", () => {
       { id: "json-arg", tool: "configure", args: { options: { regex: "\"force\":true" } }, decision: "ask", why: "non-strings match as JSON" },
       { id: "inherited", tool: "probe", args: { constructor: "*" }, decision: "block", why: "own properties only" },
       { id: "first", tool: "twice", decision: "ask", why: "first match wins" },
-      { id: "second", tool: "twice", decision: "block", why: "never reached" },
+      { id: "second", tool: "twice", decision: "block", why: "matches too, decides nothing" },
     ],
   });
 
@@ -232,8 +232,13 @@ describe("rule matching", () => {
     assert.equal(check(policy, "probe", {}).rule, "default");
   });
 
-  it("lets the first matching rule decide, and falls back to the default", () => {
-    assert.deepEqual(check(policy, "twice"), { decision: "ask", rule: "first", why: "first match wins" });
+  it("lets the first matching rule decide, lists the later ones that match too, and falls back to the default", () => {
+    assert.deepEqual(check(policy, "twice"), {
+      decision: "ask",
+      rule: "first",
+      why: "first match wins",
+      alsoMatched: [{ rule: "second", decision: "block", why: "matches too, decides nothing" }],
+    });
     assert.deepEqual(check(policy, "anything_else"), { decision: "warn", rule: "default", why: "no rule matched; the policy default is warn" });
   });
 
@@ -307,4 +312,119 @@ describe("standing: which rules a standing approval may answer", () => {
     for (const tool of ["create_payment", "merge_pull_request", "delete_file", "send_email", "add_memory"]) assert.equal(check(example, tool).standing, undefined, tool);
     assert.equal(check(example, "run_command", { command: "git push" }).standing, undefined);
   });
+});
+
+/** The engine before alsoMatched and rewrite: the first matching rule decides, and nothing more. */
+function firstMatch(policy: Policy, call: { server: string; tool: string; args: Record<string, unknown> }): Verdict {
+  for (const rule of policy.rules) {
+    if (!rule.verdict) continue;
+    const matched = evaluate({ default: "allow", rules: [rule] }, call);
+    if (matched.rule === rule.id) return rule.verdict(call);
+  }
+  return { decision: policy.default, rule: "default", why: `no rule matched; the policy default is ${policy.default}` };
+}
+
+describe("alsoMatched: every rule that matched, while the first one still decides", () => {
+  it("decides exactly as first match did, for the red-line tools, the SQL samples and every shell case", () => {
+    const calls: Array<{ server: string; tool: string; args: Record<string, unknown> }> = [];
+    for (const tool of ["pay_invoice", "create_rag_corpus", "post_message", "push_files", "delete_file", "remember_fact", "read_file", "browser_click", "browser_navigate", "deploy_and_delete", "send_and_pay"]) calls.push({ server: "demo", tool, args: {} });
+    for (const sql of ["SELECT 1", "DELETE FROM t", "SELECT 1; DROP TABLE t"]) calls.push({ server: "demo", tool: "execute_sql", args: { sql } });
+    for (const c of cases) calls.push({ server: "demo", tool: "run_command", args: { command: c.cmd } });
+    calls.push({ server: "demo", tool: "bash", args: { command: "node bin/agent-gate.js approvals approve ap-12345678" } });
+    calls.push({ server: "demo", tool: "write_note", args: { path: "/srv/.agent-gate/approvals.json" } });
+    for (const call of calls) {
+      const { alsoMatched: _also, ...decided } = evaluate(example, call);
+      assert.deepEqual(decided, firstMatch(example, call), JSON.stringify(call).slice(0, 120));
+    }
+    assert.ok(calls.length > 250);
+  });
+
+  it("lists each later matching rule in policy order, with its own decision and why", () => {
+    const verdict = check(example, "delete_and_publish_post");
+    assert.deepEqual([verdict.decision, verdict.rule], ["ask", "red-line-2-public"]);
+    assert.deepEqual(verdict.alsoMatched, [{ rule: "red-line-4-delete", decision: "ask", why: "Red line 4: this tool looks like it deletes or overwrites data." }]);
+    const shell = check(example, "bash", { command: "git push --force origin main", path: "/srv/.agent-gate/x" });
+    assert.deepEqual([shell.decision, shell.rule], ["block", "protect-gateway-state"]);
+    assert.deepEqual(shell.alsoMatched?.map((m) => [m.rule, m.decision, m.why]), [["shell-guard", "block", "shell guard: force push"]]);
+    assert.equal(check(example, "read_file").alsoMatched, undefined, "nothing else matched: no field");
+  });
+
+  it("reordering the rules changes which one decides, not which ones matched", () => {
+    const rules = [
+      { id: "a", toolWords: ["delete"], decision: "ask", why: "a" },
+      { id: "b", toolWords: ["publish"], decision: "block", why: "b" },
+      { id: "c", tool: "*", decision: "warn", why: "c" },
+    ];
+    const forward = evaluate(parsePolicy({ default: "allow", rules }), { server: "s", tool: "delete_publish", args: {} });
+    const backward = evaluate(parsePolicy({ default: "allow", rules: [...rules].reverse() }), { server: "s", tool: "delete_publish", args: {} });
+    assert.deepEqual([forward.rule, backward.rule], ["a", "c"]);
+    const all = (v: Verdict) => [v.rule, ...(v.alsoMatched ?? []).map((m) => m.rule)].sort();
+    assert.deepEqual(all(forward), all(backward));
+  });
+});
+
+describe("rewrite rules: edit the arguments, then the next rules decide on the edited call", () => {
+  const policy = parsePolicy({
+    default: "allow",
+    rules: [
+      { id: "no-debug", tool: "search_*", decision: "rewrite", rewrite: { drop: ["debug"] }, why: "debug output can carry internals" },
+      { id: "cap-limit", tool: "search_*", decision: "rewrite", rewrite: { clamp: { limit: { min: 1, max: 100 } } }, why: "at most 100 rows" },
+      { id: "dry-run-deploys", toolWords: ["deploy"], decision: "rewrite", rewrite: { set: { dryRun: true } }, why: "deploys run as a dry run first" },
+      { id: "hide-tokens", decision: "rewrite", rewrite: { redact: [{ regex: "tok_[a-z0-9]{8,}" }] }, why: "tokens never leave" },
+      { id: "ask-deploys", toolWords: ["deploy"], decision: "ask", why: "a human looks at every deploy" },
+    ],
+  });
+  const call = (tool: string, args: Record<string, unknown>) => evaluate(policy, { server: "demo", tool, args });
+
+  it("drops, clamps, sets and redacts, in rule order, and names the rules that changed something", () => {
+    const v = call("search_notes", { query: "q tok_abcdef123456", limit: 5000, debug: true, nested: { list: ["tok_00000000aa", 3] } });
+    assert.deepEqual([v.decision, v.rule], ["allow", "default"]);
+    assert.deepEqual(v.args, { query: "q [REDACTED:hide-tokens]", limit: 100, nested: { list: ["[REDACTED:hide-tokens]", 3] } });
+    assert.deepEqual(v.rewrittenBy, ["no-debug", "cap-limit", "hide-tokens"]);
+  });
+
+  it("leaves the call alone, and says nothing, when no edit changes anything", () => {
+    const v = call("search_notes", { query: "q", limit: 50 });
+    assert.deepEqual([v.args, v.rewrittenBy], [undefined, undefined]);
+    assert.equal(call("search_notes", { query: "q" }).args, undefined, "an absent limit is not invented");
+  });
+
+  it("a later ask decides on the edited call, so an approval binds to what will run", () => {
+    const v = call("deploy_site", { site: "web", dryRun: false });
+    assert.deepEqual([v.decision, v.rule, v.args, v.rewrittenBy], ["ask", "ask-deploys", { site: "web", dryRun: true }, ["dry-run-deploys"]]);
+  });
+
+  it("asks when a value cannot be made safe: a clamp on something that is not a number", () => {
+    const v = call("search_notes", { query: "q", limit: "5000" });
+    assert.deepEqual([v.decision, v.rule], ["ask", "cap-limit"]);
+    assert.match(v.why, /keeps "limit" within bounds, and this value is not a number/);
+  });
+
+  it("a rewrite after the deciding rule is listed, not applied", () => {
+    const late = parsePolicy({
+      default: "allow",
+      rules: [
+        { id: "ask-first", tool: "search_notes", decision: "ask", why: "decides first" },
+        { id: "cap-late", tool: "search_notes", decision: "rewrite", rewrite: { clamp: { limit: { max: 10 } } }, why: "too late" },
+      ],
+    });
+    const v = evaluate(late, { server: "demo", tool: "search_notes", args: { limit: 99 } });
+    assert.deepEqual([v.decision, v.args, v.alsoMatched], ["ask", undefined, [{ rule: "cap-late", decision: "rewrite", why: "too late" }]]);
+  });
+
+  const bad: Array<[string, unknown, RegExp]> = [
+    ["a rewrite rule without edits", { id: "r", decision: "rewrite", why: "w" }, /policy\.rules\[0\] is a rewrite rule, so it needs "rewrite"/],
+    ["an empty rewrite", { id: "r", decision: "rewrite", rewrite: {}, why: "w" }, /needs at least one of set, clamp, drop and redact/],
+    ["edits on a rule that decides", { id: "r", decision: "allow", rewrite: { drop: ["x"] }, why: "w" }, /rewrite only applies to a rule whose decision is rewrite/],
+    ["set and drop of one argument", { id: "r", decision: "rewrite", rewrite: { set: { x: 1 }, drop: ["x"] }, why: "w" }, /both sets and drops "x"/],
+    ["a clamp with min above max", { id: "r", decision: "rewrite", rewrite: { clamp: { n: { min: 5, max: 1 } } }, why: "w" }, /min is more than its max/],
+    ["a clamp without bounds", { id: "r", decision: "rewrite", rewrite: { clamp: { n: {} } }, why: "w" }, /needs "min", "max" or both/],
+    ["a redact regex that matches nothing at all", { id: "r", decision: "rewrite", rewrite: { redact: [{ regex: "x*" }] }, why: "w" }, /matches empty text/],
+    ["a redact with the g flag", { id: "r", decision: "rewrite", rewrite: { redact: [{ regex: "x", flags: "g" }] }, why: "w" }, /flags may only contain i, m, s and u/],
+    ["ttlMinutes on a rewrite rule", { id: "r", decision: "rewrite", rewrite: { drop: ["x"] }, why: "w", ttlMinutes: 5 }, /ttlMinutes does not apply to a rewrite rule/],
+    ["a shell rule with edits", { id: "r", type: "shell", tool: "bash", rewrite: { drop: ["x"] } }, /unknown field "rewrite"/],
+  ];
+  for (const [name, rule, message] of bad) {
+    it(`refuses ${name}`, () => assert.throws(() => parsePolicy({ default: "allow", rules: [rule] }), (err: unknown) => err instanceof ConfigError && message.test(err.message)));
+  }
 });

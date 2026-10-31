@@ -16,7 +16,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { sameFiles, type BoundFile } from "./files.js";
-import { globToRegExp } from "./policy.js";
+import { globToRegExp, type AlsoMatched } from "./policy.js";
 import { readIfExists, withLock, writeAtomic } from "./state-file.js";
 
 /** "stale": approved, but a file the call names changed before the call came back. It allows nothing. */
@@ -42,6 +42,10 @@ export interface Approval {
    * that created the request. The gateway checked its format, not its truth.
    */
   agentPath?: string;
+  /** Rules after the deciding one that matched too, so the human sees every reason, not only the first. */
+  alsoMatched?: AlsoMatched[];
+  /** Rewrite rules that edited the arguments; `args` are the edited ones, the call that will run. */
+  rewrittenBy?: string[];
   status: ApprovalStatus;
   createdAt: string;
   /** createdAt + TTL. After this, the record cannot be approved and cannot allow a call. */
@@ -84,6 +88,8 @@ export interface AskRequest {
   standing?: boolean;
   /** The client's agent path for this call (see Approval.agentPath). */
   agentPath?: string;
+  alsoMatched?: AlsoMatched[];
+  rewrittenBy?: string[];
 }
 
 /**
@@ -333,6 +339,8 @@ export class ApprovalStore {
         rule: request.rule,
         why: request.why,
         ...(request.agentPath ? { agentPath: request.agentPath } : {}),
+        ...(request.alsoMatched ? { alsoMatched: request.alsoMatched } : {}),
+        ...(request.rewrittenBy ? { rewrittenBy: request.rewrittenBy } : {}),
         status: "pending",
         createdAt: new Date(now).toISOString(),
         expiresAt: new Date(now + (request.ttlMs ?? this.ttlMs)).toISOString(),

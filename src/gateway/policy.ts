@@ -1,9 +1,16 @@
 // The policy engine: decides allow / warn / ask / block for one MCP tool call.
 //
 // A policy is JSON: a default decision and an ordered list of rules. The first rule that matches
-// a call decides; when none matches, the default decides. parsePolicy() checks the JSON once and
-// compiles its patterns. evaluate() is a pure function (no I/O, no clock, no randomness): the same
-// policy and the same call always get the same verdict, which is what makes it table-testable.
+// a call decides; when none matches, the default decides. Rules after it that also match are listed
+// in the verdict (alsoMatched) for the human and the audit log; they decide nothing. parsePolicy()
+// checks the JSON once and compiles its patterns. evaluate() is a pure function (no I/O, no clock,
+// no randomness): the same policy and the same call always get the same verdict, which is what makes
+// it table-testable.
+//
+// A rule with "decision": "rewrite" does not decide. It edits the call's arguments ("rewrite": set,
+// clamp, drop, redact) and evaluation goes on with the next rule, on the edited arguments: the call
+// that runs, and any approval it needs, is the edited one. A rewrite that cannot make the call safe
+// (a clamp on a value that is not a number) asks instead.
 //
 // A rule matches on any combination of these, all of which must match:
 //   server     the downstream server's name             glob or regex, or a list of them
@@ -19,6 +26,15 @@ import { array, fail, object, onlyKeys, text } from "./validate.js";
 
 export type Decision = "allow" | "warn" | "ask" | "block";
 export const DECISIONS: readonly Decision[] = ["allow", "warn", "ask", "block"];
+/** What a rule can say: one of the four decisions, or "rewrite" (edit the arguments, then go on). */
+export type RuleDecision = Decision | "rewrite";
+
+/** A rule after the deciding one that matched the call too. */
+export interface AlsoMatched {
+  rule: string;
+  decision: RuleDecision;
+  why: string;
+}
 
 export interface ToolCall {
   /** The downstream server's name from the gateway config. */
@@ -38,6 +54,11 @@ export interface Verdict {
   ttlMs?: number;
   /** For an ask: a standing approval (a bounded grant, ADR 0006) may answer it. Only rules that say so. */
   standing?: true;
+  /** Every later rule that matched the call too, in policy order. Information for the human; it changes nothing. */
+  alsoMatched?: AlsoMatched[];
+  /** With rewrite rules that changed something: the arguments the call runs with, and those rules in order. */
+  args?: Record<string, unknown>;
+  rewrittenBy?: string[];
 }
 
 type Test = (value: string) => boolean;
@@ -48,8 +69,13 @@ export interface CompiledRule {
   readonly tool?: Test;
   readonly toolWords?: readonly string[][];
   readonly args: ReadonlyArray<{ name: string; test: Test }>;
-  readonly verdict: (call: ToolCall) => Verdict;
+  /** A rule that decides. */
+  readonly verdict?: (call: ToolCall) => Verdict;
+  /** A rule that rewrites the arguments instead. */
+  readonly rewrite?: { why: string; apply: (args: Record<string, unknown>) => RewriteResult };
 }
+
+export type RewriteResult = { ok: true; args: Record<string, unknown>; changed: boolean } | { ok: false; why: string };
 
 export interface Policy {
   readonly default: Decision;
@@ -65,10 +91,35 @@ export const SHELL_TO_DECISION: Readonly<Record<GuardAction, Decision>> = {
 };
 
 export function evaluate(policy: Policy, call: ToolCall): Verdict {
+  let current = call;
+  let decided: Verdict | undefined;
+  const also: AlsoMatched[] = [];
+  const rewrittenBy: string[] = [];
   for (const rule of policy.rules) {
-    if (matches(rule, call)) return rule.verdict(call);
+    if (!matches(rule, current)) continue;
+    if (rule.rewrite) {
+      // A rewrite after the deciding rule changes nothing: the decision was made on the call as it was.
+      if (decided) {
+        also.push({ rule: rule.id, decision: "rewrite", why: rule.rewrite.why });
+        continue;
+      }
+      const result = rule.rewrite.apply(current.args);
+      if (!result.ok) decided = { decision: "ask", rule: rule.id, why: result.why };
+      else if (result.changed) {
+        current = { ...current, args: result.args };
+        rewrittenBy.push(rule.id);
+      }
+      continue;
+    }
+    const verdict = (rule.verdict as (call: ToolCall) => Verdict)(current);
+    if (decided) also.push({ rule: rule.id, decision: verdict.decision, why: verdict.why });
+    else decided = verdict;
   }
-  return { decision: policy.default, rule: "default", why: `no rule matched; the policy default is ${policy.default}` };
+  return {
+    ...(decided ?? { decision: policy.default, rule: "default", why: `no rule matched; the policy default is ${policy.default}` }),
+    ...(also.length > 0 ? { alsoMatched: also } : {}),
+    ...(rewrittenBy.length > 0 ? { args: current.args, rewrittenBy } : {}),
+  };
 }
 
 function matches(rule: CompiledRule, call: ToolCall): boolean {
@@ -147,7 +198,7 @@ function shellVerdict(rule: string, argument: string, call: ToolCall): Verdict {
 
 // ── parsing ─────────────────────────────────────────────────────────────────────────────────
 
-const MATCH_KEYS = ["id", "server", "tool", "toolWords", "args", "decision", "why", "ttlMinutes", "standing"] as const;
+const MATCH_KEYS = ["id", "server", "tool", "toolWords", "args", "decision", "why", "ttlMinutes", "standing", "rewrite"] as const;
 const SHELL_KEYS = ["id", "type", "server", "tool", "toolWords", "args", "argument", "ttlMinutes"] as const;
 
 /** Checks policy JSON and compiles it. Throws ConfigError naming the bad field. */
@@ -188,6 +239,13 @@ function compileRule(raw: unknown, at: string, ids: Set<string>): CompiledRule {
     const argument = rule.argument === undefined ? "command" : text(rule.argument, `${at}.argument`);
     return { ...match, verdict: (call) => withTtl(shellVerdict(id, argument, call)) };
   }
+  if (rule.decision === "rewrite") {
+    for (const key of ["ttlMinutes", "standing"] as const) if (rule[key] !== undefined) fail(`${at}.${key} does not apply to a rewrite rule, which decides nothing`);
+    if (rule.rewrite === undefined) fail(`${at} is a rewrite rule, so it needs "rewrite"`);
+    const why = text(rule.why, `${at}.why`);
+    return { ...match, rewrite: { why, apply: compileRewrite(rule.rewrite, `${at}.rewrite`, id) } };
+  }
+  if (rule.rewrite !== undefined) fail(`${at}.rewrite only applies to a rule whose decision is rewrite`);
   const fixed: Verdict = { decision: decision(rule.decision, `${at}.decision`), rule: id, why: text(rule.why, `${at}.why`) };
   if (ttlMs !== undefined && fixed.decision !== "ask") fail(`${at}.ttlMinutes only applies to a rule whose decision is ask`);
   if (rule.standing !== undefined) {
@@ -196,6 +254,110 @@ function compileRule(raw: unknown, at: string, ids: Set<string>): CompiledRule {
     if (rule.standing) fixed.standing = true;
   }
   return { ...match, verdict: () => withTtl({ ...fixed }) };
+}
+
+// ── rewrite rules ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * The edits of a rewrite rule, applied in this order: drop (remove arguments), set (give arguments a
+ * value), clamp (bring a number into [min, max]), redact (replace what a regex matches in the strings
+ * of the listed arguments, or of all of them, with [REDACTED:<rule id>]).
+ */
+function compileRewrite(raw: unknown, at: string, id: string): (args: Record<string, unknown>) => RewriteResult {
+  const spec = object(raw, at);
+  onlyKeys(spec, ["set", "clamp", "drop", "redact"], at);
+  if (spec.set === undefined && spec.clamp === undefined && spec.drop === undefined && spec.redact === undefined) {
+    fail(`${at} needs at least one of set, clamp, drop and redact`);
+  }
+  const set = spec.set === undefined ? [] : Object.entries(object(spec.set, `${at}.set`));
+  if (spec.set !== undefined && set.length === 0) fail(`${at}.set must name at least one argument`);
+  const clamp = spec.clamp === undefined ? [] : Object.entries(object(spec.clamp, `${at}.clamp`)).map(([name, raw]) => bounds(raw, `${at}.clamp.${name}`, name));
+  if (spec.clamp !== undefined && clamp.length === 0) fail(`${at}.clamp must name at least one argument`);
+  const drop = spec.drop === undefined ? [] : array(spec.drop, `${at}.drop`).map((name, i) => text(name, `${at}.drop[${i}]`));
+  for (const [name] of set) if (drop.includes(name)) fail(`${at} both sets and drops "${name}"`);
+  const redact = spec.redact === undefined ? [] : array(spec.redact, `${at}.redact`).map((raw, i) => redaction(raw, `${at}.redact[${i}]`));
+  const marker = `[REDACTED:${id}]`;
+
+  return (input) => {
+    const args: Record<string, unknown> = JSON.parse(JSON.stringify(input));
+    let changed = false;
+    for (const name of drop) {
+      if (Object.prototype.hasOwnProperty.call(args, name)) {
+        delete args[name];
+        changed = true;
+      }
+    }
+    for (const [name, value] of set) {
+      if (!Object.prototype.hasOwnProperty.call(args, name) || JSON.stringify(args[name]) !== JSON.stringify(value)) changed = true;
+      args[name] = JSON.parse(JSON.stringify(value));
+    }
+    for (const { name, min, max } of clamp) {
+      if (!Object.prototype.hasOwnProperty.call(args, name)) continue;
+      const value = args[name];
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        return { ok: false, why: `rule ${id} keeps "${name}" within bounds, and this value is not a number, so it cannot be made safe` };
+      }
+      const kept = Math.min(max ?? value, Math.max(min ?? value, value));
+      if (kept !== value) {
+        args[name] = kept;
+        changed = true;
+      }
+    }
+    for (const { re, names } of redact) {
+      for (const name of Object.keys(args)) {
+        if (names && !names.includes(name)) continue;
+        const next = redactDeep(args[name], re, marker);
+        if (JSON.stringify(next) !== JSON.stringify(args[name])) {
+          args[name] = next;
+          changed = true;
+        }
+      }
+    }
+    return { ok: true, args, changed };
+  };
+}
+
+function bounds(raw: unknown, at: string, name: string): { name: string; min?: number; max?: number } {
+  const b = object(raw, at);
+  onlyKeys(b, ["min", "max"], at);
+  const number = (value: unknown, field: string): number | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value !== "number" || !Number.isFinite(value)) fail(`${at}.${field} must be a number`);
+    return value;
+  };
+  const min = number(b.min, "min");
+  const max = number(b.max, "max");
+  if (min === undefined && max === undefined) fail(`${at} needs "min", "max" or both`);
+  if (min !== undefined && max !== undefined && min > max) fail(`${at}.min is more than its max`);
+  return { name, ...(min === undefined ? {} : { min }), ...(max === undefined ? {} : { max }) };
+}
+
+function redaction(raw: unknown, at: string): { re: RegExp; names?: string[] } {
+  const r = object(raw, at);
+  onlyKeys(r, ["regex", "flags", "arguments"], at);
+  const flags = r.flags === undefined ? "" : r.flags;
+  if (typeof flags !== "string" || !/^[imsu]*$/.test(flags)) fail(`${at}.flags may only contain i, m, s and u`);
+  let re: RegExp;
+  try {
+    re = new RegExp(text(r.regex, `${at}.regex`), `${flags}g`);
+  } catch (err) {
+    fail(`${at}.regex is not a valid regular expression: ${(err as Error).message}`);
+  }
+  if (new RegExp(re.source, flags).test("")) fail(`${at}.regex matches empty text, so it would match every value`);
+  if (r.arguments === undefined) return { re };
+  const names = array(r.arguments, `${at}.arguments`).map((name, i) => text(name, `${at}.arguments[${i}]`));
+  if (names.length === 0) fail(`${at}.arguments must name at least one argument`);
+  return { re, names };
+}
+
+/** Replaces every match in every string inside `value` (arrays and objects included) with `marker`. */
+function redactDeep(value: unknown, re: RegExp, marker: string): unknown {
+  if (typeof value === "string") return value.replace(re, marker);
+  if (Array.isArray(value)) return value.map((item) => redactDeep(item, re, marker));
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, redactDeep(item, re, marker)]));
+  }
+  return value;
 }
 
 function minutes(value: unknown, at: string): number {

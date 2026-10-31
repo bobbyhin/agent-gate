@@ -67,6 +67,18 @@ server.registerTool(
 );
 
 server.registerTool(
+  "search_notes",
+  {
+    description: "Pretends to search notes; returns the arguments it got.",
+    inputSchema: { query: z.string(), limit: z.number().optional(), dryRun: z.boolean().optional(), debug: z.boolean().optional() },
+  },
+  async (args) => {
+    received("search_notes", args);
+    return { content: [{ type: "text", text: `searched with ${JSON.stringify(args)}` }] };
+  },
+);
+
+server.registerTool(
   "fail",
   { description: "Pretends to fail: answers with an error result.", inputSchema: { reason: z.string() } },
   async ({ reason }) => {

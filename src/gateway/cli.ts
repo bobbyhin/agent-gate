@@ -343,6 +343,8 @@ function list(store: ApprovalStore, all: boolean, json: boolean, io: Io): number
       [
         `${a.id}  ${state}  ${a.server}${SEPARATOR}${a.tool}`,
         `  why:     ${a.why} (rule ${a.rule})`,
+        ...(a.alsoMatched ?? []).map((m) => `  also:    ${m.rule} (${m.decision}: ${m.why})`),
+        ...(a.rewrittenBy ? [`  edited:  by ${a.rewrittenBy.join(", ")}; the args below are what will run`] : []),
         ...(a.agentPath ? [`  agents:  ${a.agentPath}`] : []),
         `  args:    ${preview(canonicalJson(a.args))}`,
         ...(a.files ?? []).map((f) => `  file:    ${f.path} ${f.sha256 ?? "(did not exist)"}`),
@@ -445,6 +447,8 @@ export function readBack(a: Approval, config: Pick<GatewayConfig, "fileBinding">
     `  args:     ${args[0]}`,
     ...args.slice(1).map((line) => `            ${line}`),
     `  rule:     ${a.rule}: ${a.why}`,
+    ...(a.alsoMatched ?? []).map((m) => `  also:     ${m.rule} (${m.decision}: ${m.why})`),
+    ...(a.rewrittenBy ? [`  edited:   by ${a.rewrittenBy.join(", ")}; these args are what will run, not what the agent sent`] : []),
     ...files,
     `  expires:  ${a.expiresAt} (in ${duration(Math.max(0, Date.parse(a.expiresAt) - now))})`,
     "",

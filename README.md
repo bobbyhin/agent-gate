@@ -350,7 +350,8 @@ forwarded, a policy decides one of four things:
 | ask | The call is not forwarded. A pending approval is recorded, and the agent gets an error result that names its id. A human answers it with the CLI. |
 | block | The call is not forwarded and not queued. The agent gets an error result. |
 
-Every decision is written to an audit log. The gateway is written in TypeScript on the official
+A rule can also rewrite a call's arguments (cap a limit, force a dry run, drop or redact a field)
+before one of these decides; see [Policy](#policy). Every decision is written to an audit log. The gateway is written in TypeScript on the official
 MCP SDK (`@modelcontextprotocol/sdk`), which is its only runtime dependency besides `zod`.
 
 Status: new. It is covered by the tests in [Run the tests](#run-the-tests), but unlike the shell
@@ -617,7 +618,12 @@ cross it if the state directory or the CLI is within its reach. Keep them out of
 A policy is JSON: a default decision and an ordered list of rules. The first rule that matches a
 call decides; when none matches, the default decides. The engine (`src/gateway/policy.ts`) is a
 pure function with no I/O, so the same policy and call always get the same verdict, and every
-verdict carries the id of the rule that decided and a `why`.
+verdict carries the id of the rule that decided and a `why`. Rules after it that match the call too
+are listed as well (`alsoMatched`): on the approval card (`also:`, with each one's decision and
+reason, so the human sees every reason and not only the first) and as ids in the audit line, where
+they also show which rules overlap and which never get to decide. They change nothing: a test runs
+over 250 calls (the red lines, SQL, every shell case) and checks that every decision is the one that
+first match alone gives.
 
 `policy.example.json` maps the red lines, with examples for SQL and browser tools:
 
@@ -674,6 +680,29 @@ A rule whose decision is `ask` may set `"standing": true`, so that a standing ap
 `approvalTtlHours` (see Stale plans under [Approval rules](#approval-rules)). A rule whose fixed
 decision is not `ask` cannot set it.
 
+**Rewrite rules.** A rule with `"decision": "rewrite"` does not decide. It edits the call's
+arguments, and evaluation goes on with the next rule, on the edited arguments:
+
+```json
+{ "id": "cap-limit", "tool": "search_*", "decision": "rewrite",
+  "rewrite": { "clamp": { "limit": { "min": 1, "max": 100 } }, "drop": ["debug"] },
+  "why": "At most 100 rows per search, and no debug output." }
+```
+
+The edits are applied in this order: `drop` (remove arguments), `set` (give arguments a value, such
+as `"dryRun": true`), `clamp` (bring a number into `min`..`max`; an absent argument stays absent) and
+`redact` (`[{ "regex": "...", "flags": "i", "arguments": ["query"] }]`: every match in the strings of
+the listed arguments, or of all of them, becomes `[REDACTED:<rule id>]`). What runs is the edited
+call, and so is what a later `ask` puts in front of a human: the approval is bound to the edited
+arguments' hash, the card says `edited: by cap-limit`, and when the agent repeats its own call, the
+same edit gives the same hash, so the approval matches it. A rewrite cannot skip an approval this way,
+because the rules after it decide on what it produced. A value that an edit cannot make safe (a
+`clamp` on something that is not a number) is asked about instead. A rewrite rule that comes after
+the deciding rule changes nothing; it is listed in `alsoMatched`. The agent learns of an edit in the
+result's `_meta` (`"agent-gate/rewritten-by": ["cap-limit"]`), and the audit line keeps the edited
+call's hash in `argsHash`, the agent's in `originalArgsHash`, and the rules in `rewrittenBy`.
+`policy.example.json` has no rewrite rule, because the right bounds depend on the tools.
+
 A rule with `"type": "shell"` has no fixed decision. It runs the shell guard's `analyze()` on one
 string argument (`"argument"`, default `command`) and maps pass, warn, ask and block to allow,
 warn, ask and block. A missing or non-string argument is asked about. If the analyzer itself fails,
@@ -704,6 +733,9 @@ context and an agent path, plus a blocked shell call; the user name is changed:
   client) and `seq` numbers its calls 1, 2, 3 in the order they came in. Together they tie a call
   line to its result line, and they order the calls of one session.
 - `forwarded` says whether the call reached the downstream server.
+- `alsoMatched` names the rules after the deciding one that matched too. `originalArgsHash` and
+  `rewrittenBy` appear when rewrite rules edited the arguments (see [Policy](#policy)); `argsHash`
+  is then the hash of the edited call, the one that ran or waits for a human.
 - A `"call-result"` line is written when a forwarded call comes back: `durationMs` from forwarding
   to the answer (a call held for a human is answered at once and made again later, so waiting for a
   human is never in it), `isError`, and the SHA-256 and size of the result the agent got
@@ -1424,13 +1456,15 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 292 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 314 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
 controls, standing approvals and their bounds, the escalate-only rule of a second reviewer, the CLI's exit codes, its read-back before an approval, and what a decision leaves behind
 (the record, the `approval-decided` line, `stats`), the correlation ids a client may send (and what
-is dropped), `audit stats`, and an end-to-end test. That test starts `agent-gate serve`
+is dropped), `audit stats`, every rule that matched next to the one that decided (and a check that
+the decisions are first match's), rewrite rules on their own and through a running gateway, and an
+end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log,
 including a call-result line, with the hash of what came back, for every forwarded call.
@@ -1489,7 +1523,7 @@ the decision, with no model judging and no tolerance band. And it is evaluated o
 there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 292/292 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 314/314 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
 the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).

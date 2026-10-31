@@ -1,7 +1,8 @@
 // The MCP gateway: one MCP server for the agent, in front of one or more downstream MCP servers.
 //
 // It lists every downstream tool as "<server>__<tool>", decides every call with the policy, and
-// forwards the calls that may run. Forwarded calls get the downstream result back unchanged.
+// forwards the calls that may run. Forwarded calls get the downstream result back unchanged, except
+// that a call whose arguments a rewrite rule edited says so in the result's _meta.
 // Every call is written to the audit log before anything is forwarded; a forwarded call gets a
 // second line when it comes back, with its duration and a hash of its result (audit.ts).
 //
@@ -81,23 +82,35 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
     const n = ++seq;
     const context = contextFromMeta(request.params._meta);
     const call: ToolCall = { server: route.server, tool: route.tool, args: rawArgs ?? {} };
-    const argsHash = hashArguments(call.args);
-    let refusal: CallToolResult | undefined;
+    let decided: Decided;
     try {
-      refusal = decide(call, n, argsHash, context);
+      decided = decide(call, n, context);
     } catch (err) {
       // The policy, the approval file or the audit log failed: the call is not run.
       // ponytail: such a failure goes to stderr only; the audit log may be what failed.
       log(`could not check or record a call to ${name}: ${errorText(err)}`);
       return errorResult(`agent-gate could not check or record this call, so it was not run: ${errorText(err)}`);
     }
-    if (refusal) return refusal;
-    return forwardAndRecord(client, call, n, argsHash, rawArgs, extra.signal);
+    if (decided.refusal) return decided.refusal;
+    // A rewritten call goes on with its edited arguments; any other exactly as the agent sent it.
+    const forwardArgs = decided.rewrittenBy ? decided.args : rawArgs;
+    return forwardAndRecord(client, { ...call, args: decided.args }, n, decided.argsHash, forwardArgs, extra.signal, decided.rewrittenBy);
   });
 
-  /** Returns an error result when the call must not run, or undefined when it may be forwarded. */
-  function decide(call: ToolCall, n: number, argsHash: string, context: CallContext): CallToolResult | undefined {
+  /** What decide() found: an error result when the call must not run, and the arguments it runs with. */
+  interface Decided {
+    refusal?: CallToolResult;
+    args: Record<string, unknown>;
+    argsHash: string;
+    rewrittenBy?: string[];
+  }
+
+  function decide(call: ToolCall, n: number, context: CallContext): Decided {
     const verdict = evaluate(policy, call);
+    // Rewrite rules may have edited the arguments: what runs, what is hashed and what a human approves is the edited call.
+    const args = verdict.args ?? call.args;
+    const argsHash = hashArguments(args);
+    const rewritten = verdict.rewrittenBy ? { originalArgsHash: hashArguments(call.args), rewrittenBy: verdict.rewrittenBy } : {};
     const record = (forwarded: boolean, approvalId?: string) =>
       audit.write(
         {
@@ -111,26 +124,32 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
           argsHash,
           forwarded,
           ...(approvalId ? { approvalId } : {}),
+          ...rewritten,
+          ...(verdict.alsoMatched ? { alsoMatched: verdict.alsoMatched.map((m) => m.rule) } : {}),
           ...context,
         },
-        call.args,
+        args,
       );
+    const run = (): Decided => ({ args, argsHash, ...(verdict.rewrittenBy ? { rewrittenBy: verdict.rewrittenBy } : {}) });
+    const refuse = (refusal: CallToolResult): Decided => ({ refusal, args, argsHash });
+    if (verdict.rewrittenBy) log(`REWRITE ${call.server}${SEPARATOR}${call.tool}: arguments edited by ${verdict.rewrittenBy.join(", ")}`);
 
     switch (verdict.decision) {
       case "allow":
         record(true);
-        return undefined;
+        return run();
       case "warn":
         record(true);
         log(`WARN ${call.server}${SEPARATOR}${call.tool}: ${verdict.why} (rule ${verdict.rule})`);
-        return undefined;
+        return run();
       case "block":
         record(false);
-        return errorResult(blockedText(verdict));
+        return refuse(errorResult(blockedText(verdict)));
       case "ask": {
-        const files = config.fileBinding ? bindFiles(call.args, config.fileBinding) : undefined;
+        const files = config.fileBinding ? bindFiles(args, config.fileBinding) : undefined;
         const outcome = approvals.resolveCall({
           ...call,
+          args,
           argsHash,
           rule: verdict.rule,
           why: verdict.why,
@@ -138,17 +157,19 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
           ...(files ? { files } : {}),
           ...(verdict.standing ? { standing: true } : {}),
           ...(context.agentPath ? { agentPath: context.agentPath } : {}),
+          ...(verdict.alsoMatched ? { alsoMatched: verdict.alsoMatched } : {}),
+          ...(verdict.rewrittenBy ? { rewrittenBy: verdict.rewrittenBy } : {}),
         });
         if (outcome.kind === "approved") {
           record(true, outcome.approval.id);
-          return undefined;
+          return run();
         }
         if (outcome.kind === "standing") {
           record(true, outcome.grant.id); // the audit line names the standing approval that let it through
-          return undefined;
+          return run();
         }
         record(false, outcome.approval.id);
-        return errorResult(outcome.kind === "denied" ? deniedText(outcome.approval) : pendingText(outcome.approval, outcome.created, outcome.replaced));
+        return refuse(errorResult(outcome.kind === "denied" ? deniedText(outcome.approval) : pendingText(outcome.approval, outcome.created, outcome.replaced)));
       }
     }
   }
@@ -161,6 +182,7 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
     argsHash: string,
     rawArgs: Record<string, unknown> | undefined,
     signal: AbortSignal,
+    rewrittenBy?: string[],
   ): Promise<CallToolResult> {
     const started = performance.now();
     const record = (outcome: { isError: boolean; resultHash?: string; resultBytes?: number; errorCode?: number }): void => {
@@ -179,6 +201,8 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
       record({ isError: true, errorCode: err instanceof McpError ? err.code : ErrorCode.InternalError });
       throw err;
     }
+    // The agent learns that its arguments were edited, in the result's _meta, not in its content.
+    if (rewrittenBy) result = { ...result, _meta: { ...(result._meta ?? {}), "agent-gate/rewritten-by": rewrittenBy } };
     const { hash, bytes } = hashJson(result);
     record({ isError: result.isError === true, resultHash: hash, resultBytes: bytes });
     return result;

@@ -110,7 +110,7 @@ describe("gateway end to end", () => {
       viaGateway.tools,
       unproxied.tools.map((tool) => ({ ...tool, name: `demo__${tool.name}` })),
     );
-    assert.deepEqual(viaGateway.tools.map((t) => t.name).sort(), ["demo__delete_file", "demo__deploy", "demo__echo", "demo__execute_sql", "demo__fail", "demo__run_command"]);
+    assert.deepEqual(viaGateway.tools.map((t) => t.name).sort(), ["demo__delete_file", "demo__deploy", "demo__echo", "demo__execute_sql", "demo__fail", "demo__run_command", "demo__search_notes"]);
   });
 
   it("forwards an allowed call and returns the downstream result unchanged", async () => {
@@ -329,7 +329,7 @@ describe("gateway end to end", () => {
       ],
     );
     assert.equal(lines.length, toolCalls);
-    const callKeys = ["ts", "connId", "seq", "server", "tool", "decision", "rule", "why", "argsHash", "forwarded", "approvalId", "traceId", "parentSpanId", "session", "runId", "agentPath", "contextDropped"];
+    const callKeys = ["ts", "connId", "seq", "server", "tool", "decision", "rule", "why", "argsHash", "forwarded", "approvalId", "originalArgsHash", "rewrittenBy", "alsoMatched", "traceId", "parentSpanId", "session", "runId", "agentPath", "contextDropped"];
     for (const line of lines) {
       assert.deepEqual(Object.keys(line).filter((k) => !callKeys.includes(k)), []);
       assert.match(line.argsHash, /^sha256:[0-9a-f]{64}$/);

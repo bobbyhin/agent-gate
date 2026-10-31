@@ -64,6 +64,11 @@ export interface AuditEntry extends CallContext {
   /** True when the call was sent on to the downstream server. */
   forwarded: boolean;
   approvalId?: string;
+  /** Set when rewrite rules edited the arguments: argsHash is then the edited call's, this the agent's. */
+  originalArgsHash?: string;
+  rewrittenBy?: string[];
+  /** Rules after the deciding one that matched too (policy.ts); they decided nothing. */
+  alsoMatched?: string[];
   /** Only present when "auditArguments" is true in the gateway config. */
   args?: Record<string, unknown>;
 }
