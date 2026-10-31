@@ -54,6 +54,12 @@
       "why": "Red line 4: this tool looks like it deletes or overwrites data."
     },
     {
+      "id": "red-line-4-overwrite",
+      "toolWords": ["write", "edit", "move", "rename", "replace", "patch", "update file", "put object"],
+      "decision": "ask",
+      "why": "Red line 4: this tool looks like it writes over, edits, moves or renames a file or other data."
+    },
+    {
       "id": "red-line-5-memory",
       "toolWords": [
         "remember", "memorize", "add memory", "save memory", "store memory", "update memory", "memory insert", "memory append",

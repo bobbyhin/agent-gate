@@ -708,6 +708,7 @@ first match alone gives.
 | `red-line-2-public` | post, publish, send, tweet, retweet, reply, comment, email, share; and what puts an event or an invitation in front of other people: create event, create calendar event, add event, add calendar event, update event, update calendar, move event, create meeting, update meeting, schedule, reschedule, invite, rsvp, respond to event | ask |
 | `red-line-3-ship` | push, merge, deploy, create pull request, create pr, create release | ask; a request lives 30 minutes |
 | `red-line-4-delete` | delete, remove, drop, destroy, overwrite, purge, erase, wipe, truncate | ask |
+| `red-line-4-overwrite` | write, edit, move, rename, replace, patch, update file, put object | ask |
 | `red-line-5-memory` | remember, memorize, add memory, save memory, store memory, update memory, memory insert, memory append, memory replace, add observations, create entities, create relations, set preference, update profile | ask |
 | `sql-write` | an `sql` argument with a write keyword (insert, update, delete, merge, upsert, into, drop, alter, truncate, create, grant, revoke, copy, call, exec, execute) anywhere, or more text after a `;` | ask; standing approvals allowed |
 | `browser-input` | `browser_*`, `puppeteer_*` and `playwright_*` tools with click, type, press, fill, submit, select, drag, upload, evaluate, run code, dialog | ask; standing approvals allowed |
@@ -724,6 +725,18 @@ Notes on the newer rules:
   each labelled with the decision it should get: before, 9 of the 12 that should ask ran unattended;
   now all 12 ask, reads such as `list_events`, `get_calendar` and `get_invitations` stay allowed, and
   two reads ask because of one word in their names, `get_post` and `get_schedule`.
+- **Writes, edits and moves (red line 4).** A delete has other ways: empty the file with
+  `write_file`, cut its text out with `edit_file`, move it to `/dev/null` with `move_file`.
+  `test/gateway/workarounds.json` tries 20 of them after `delete_file` on one file was asked about or
+  denied: another tool (10), a shell command (7), or the same path written another way (3). Before
+  `red-line-4-overwrite`, 17 of the 20 ran unattended; now 7 do, and all 7 are shell commands (`rm` of
+  one file, `truncate`, `: >`, `mv` to `/dev/null` and the like), because the shell guard asks about
+  recursive deletes, not single files (its [held-out score](#held-out-score) on single-file deletes and
+  overwrites is 0 of 34). The same path written
+  another way (with `..`, `//`, or relative) asks again, as a new request: a denial binds the exact
+  call. An agent that writes files all day would be asked about every write; give it an allow rule
+  for its own workspace, before the red lines, with the `under` matcher (see Paths below). A name
+  without these words, such as `save_file`, still gets the default.
 - **Red line 5, long-term memory.** A memory write outlives the session: what an injected
   instruction gets saved today, a later session reads as its own knowledge. That makes it
   different from writing a file in the workspace, so the example asks. The audit line of each
@@ -1044,9 +1057,15 @@ data:
   called `sync` that pushes, or `get_report` that also sends an email, gets the default decision.
   Pinning (see [Tool lists](#tool-lists)) notices when a tool's definition changes; it cannot tell
   whether the first definition was honest.
-  The filesystem reference server's `write_file` replaces a file's content, but its name has no
-  red-line word, so the example policy allows it. For an unfamiliar server, consider
-  `"default": "ask"` with allow rules for the tools you know only read.
+  The filesystem reference server's `write_file`, `edit_file` and `move_file` ask (red line 4, by
+  their names), but a tool whose name has none of a rule's words, such as `save_file`, gets the
+  default. For an unfamiliar server, consider `"default": "ask"` with allow rules for the tools you
+  know only read.
+- A denial binds the exact call. The same file named another way (`notes/../notes/old.md`) is a new
+  request: it asks again rather than running, but a human has to see that it is the same file. And a
+  shell tool is still a way round a denied `delete_file`: the shell guard does not ask about deleting
+  or emptying a single file (`rm notes/old.md`, `truncate -s 0`), as `test/gateway/workarounds.json`
+  records.
 - Word matching has false positives too: `get_email` and `get_comment` are asked about. Put an
   allow rule for them before the red-line rules.
 - It does not use MCP tool annotations such as `destructiveHint`. They come from the same server
@@ -1958,12 +1977,13 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 395 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 398 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
 lists with each tool labelled with the decision it should get (`test/gateway/tool-lists/`), and the
-README's table of example rules checked against `policy.example.json`; which
+README's table of example rules checked against `policy.example.json`; a red team of 20 ways to get a
+denied delete done another way (other tools, shell commands, the path written another way); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
 controls, standing approvals and their bounds, the escalate-only rule of a second reviewer, the CLI's exit codes, its read-back before an approval, and what a decision leaves behind
@@ -2056,7 +2076,7 @@ audit log; the end-to-end test scores its own run that way. It checks which call
 the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 395/395 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 398/398 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
