@@ -1248,6 +1248,18 @@ data:
   see the results of tools that the agent reaches some other way. The flags are a short list of
   phrases, so an injection written another way is not flagged.
 
+How far the flags reach is measured, not assumed. `test/gateway/result-injections.json` holds 15 tool
+results as a downstream server could send them: instructions in a hidden part of a web page, a
+database row, an email, a code comment, an embedded document, next to a token or a key assignment,
+and the same instructions disguised. Of the 13 results that carry an injection, the guard flags or
+withholds 7 and misses 6: an instruction in base64, one with a Cyrillic letter that looks like a Latin
+one, one with spaces between its letters, one split across two text items of a result, one in words
+the phrase list does not have, and a request to put an image in the answer whose address would carry
+the conversation out. And of the 2 ordinary documents, it flags 1: a README whose install line pipes a
+download into a shell, which is an ordinary install step and a known injection at the same time.
+`test/gateway/result-injections.test.ts` checks every case, so a change that catches one more, or one
+fewer, has to update the file and these numbers.
+
 ### When a server goes away
 
 A downstream server can crash, or be missing when the gateway starts. The gateway keeps the others
@@ -2236,7 +2248,8 @@ limits (their counts with a clock the test controls, and a loop through a runnin
 lists (the pin store on its own: a change to each field the model reads, a tool that disappears and
 comes back, a change undone, a damaged file; a server that changes a tool's description mid-session,
 `expose`, profiles, tools the policy always blocks), the result guard (secrets withheld or redacted in text, resources and
-structured content, instruction-like text flagged, ordinary text left alone), `audit verify` (a log
+structured content, instruction-like text flagged, ordinary text left alone; 15 indirect injections
+in tool results, with the 6 it misses and its false alarm recorded), `audit verify` (a log
 the gateway wrote passes; each of ten hand edits fails it) and `audit trajectory` (the three modes,
 precision and recall), a remote server over Streamable HTTP on 127.0.0.1 (its header from the
 environment, a timeout, a 401 at startup whose quoted header value stays out of the log, a server
