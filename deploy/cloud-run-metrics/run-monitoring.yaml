@@ -1,0 +1,14 @@
+# A sample, not applied anywhere. The Managed Service for Prometheus sidecar for Cloud Run reads this
+# file to scrape the LLM gateway's metrics listener inside the same instance. The gateway's config
+# needs "metrics": { "listen": { "host": "127.0.0.1", "port": 9464 } } for this port to exist.
+# deploy/README.md, "Metrics on Cloud Run", says how it would be wired, and what it costs.
+apiVersion: monitoring.googleapis.com/v1beta
+kind: RunMonitoring
+metadata:
+  name: agent-gate-llm
+spec:
+  endpoints:
+    - port: 9464
+      path: /metrics
+      # Ingested samples are billed; once a minute is plenty for spend and error rates.
+      interval: 60s

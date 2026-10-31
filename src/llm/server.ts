@@ -2,6 +2,8 @@
 //
 //   POST /v1/chat/completions   Authorization: Bearer <gateway key>, optional x-agent-task header
 //   GET  /healthz
+//   GET  /metrics               only with "metrics" in the config (metrics.ts): behind a key of its
+//                               own here, or without one on a loopback listener of its own
 //
 // Every chat completion goes through these steps, in this order:
 //   1. authenticate the gateway key                        401 if it is missing or unknown
@@ -32,6 +34,7 @@ import { ConfigError } from "../gateway/validate.js";
 import { costUsd, estimateInputTokens, formatUsd, Ledger, roundUsd } from "./budget.js";
 import { hashKey, type GatewayKey, type LlmConfig } from "./config.js";
 import { guardMessages, messageTexts, type LeakPolicy } from "./leak-guard.js";
+import { CONTENT_TYPE, Metrics } from "./metrics.js";
 import { route } from "./routing.js";
 import { callUpstreams } from "./upstream.js";
 import { UsageLog, type UsageEntry } from "./usage-log.js";
@@ -48,6 +51,8 @@ export interface LlmGatewayOptions {
 export interface LlmGateway {
   /** For example http://127.0.0.1:8787 */
   url: string;
+  /** The keyless metrics listener (config metrics.listen), for example http://127.0.0.1:9464 */
+  metricsUrl?: string;
   close(): Promise<void>;
 }
 
@@ -81,6 +86,30 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
   const ledger = openLedger(config, now);
   const usageLog = new UsageLog(path.join(config.stateDir, "usage.jsonl"));
   const keysByHash = new Map(config.keys.map((key) => [key.sha256, key]));
+  const metrics = new Metrics();
+
+  /** GET /metrics. On the gateway's port it needs the metrics key; on its own loopback listener it does not. */
+  function serveMetrics(req: http.IncomingMessage, res: http.ServerResponse, withKey: boolean): void {
+    if (withKey && config.metrics?.sha256 === undefined) return send(res, 404, apiError("not_found", "agent-gate serves POST /v1/chat/completions and GET /healthz"));
+    if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, apiError("method_not_allowed", "use GET /metrics"), { allow: "GET, HEAD" });
+    if (withKey) {
+      const match = /^Bearer[ \t]+(\S+)[ \t]*$/i.exec(req.headers.authorization ?? "");
+      if (match?.[1] === undefined || hashKey(match[1]) !== config.metrics?.sha256) {
+        return send(res, 401, apiError("invalid_api_key", "agent-gate: GET /metrics needs the metrics key, as Authorization: Bearer <key>"), {
+          "www-authenticate": 'Bearer realm="agent-gate-metrics"',
+        });
+      }
+    }
+    let text: string;
+    try {
+      text = metrics.render(ledger.usage(config.keys));
+    } catch (err) {
+      log(`could not read the ledger for /metrics: ${errorText(err)}`);
+      return send(res, 500, apiError("gateway_error", "agent-gate could not read the budget ledger, so it has no metrics to give"));
+    }
+    res.writeHead(200, { "content-type": CONTENT_TYPE, "content-length": Buffer.byteLength(text) });
+    res.end(req.method === "HEAD" ? undefined : text);
+  }
 
   /**
    * Looking a key up by its SHA-256 also means secrets are never compared byte by byte: timing
@@ -102,6 +131,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
       if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, apiError("method_not_allowed", "use GET /healthz"), { allow: "GET, HEAD" });
       return send(res, 200, { status: "ok" });
     }
+    if (pathname === "/metrics") return serveMetrics(req, res, true);
     if (pathname !== "/v1/chat/completions") return send(res, 404, apiError("not_found", "agent-gate serves POST /v1/chat/completions and GET /healthz"));
     if (req.method !== "POST") return send(res, 405, apiError("method_not_allowed", "use POST /v1/chat/completions"), { allow: "POST" });
 
@@ -147,6 +177,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         ...(context.runId ? { runId: context.runId } : {}),
         ...(context.contextDropped ? { contextDropped: context.contextDropped } : {}),
       };
+      metrics.record(entry);
       try {
         usageLog.write(entry, new Date(now()));
       } catch (err) {
@@ -340,24 +371,49 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
       else res.destroy();
     });
   });
+  const url = await listen(server, config.port, config.host);
+  let metricsServer: http.Server | undefined;
+  let metricsUrl: string | undefined;
+  if (config.metrics?.listen) {
+    metricsServer = http.createServer((req, res) => {
+      if ((req.url ?? "/").split("?")[0] !== "/metrics") return send(res, 404, apiError("not_found", "this listener serves GET /metrics only"));
+      serveMetrics(req, res, false);
+    });
+    try {
+      metricsUrl = await listen(metricsServer, config.metrics.listen.port, config.metrics.listen.host);
+    } catch (err) {
+      await closeServer(server);
+      throw err;
+    }
+    log(`metrics on ${metricsUrl}/metrics (no key: a loopback address only)`);
+  }
+  log(`listening on ${url}: ${config.upstreams.size} upstreams, ${config.routes.length} routes, ${config.keys.length} keys, state in ${config.stateDir}`);
+  return {
+    url,
+    ...(metricsUrl ? { metricsUrl } : {}),
+    close: async () => {
+      await Promise.all([closeServer(server), metricsServer ? closeServer(metricsServer) : Promise.resolve()]);
+    },
+  };
+}
+
+async function listen(server: http.Server, port: number, host: string): Promise<string> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(config.port, config.host, () => {
+    server.listen(port, host, () => {
       server.off("error", reject);
       resolve();
     });
   });
   const address = server.address() as AddressInfo;
-  const url = `http://${address.family === "IPv6" ? `[${address.address}]` : address.address}:${address.port}`;
-  log(`listening on ${url}: ${config.upstreams.size} upstreams, ${config.routes.length} routes, ${config.keys.length} keys, state in ${config.stateDir}`);
-  return {
-    url,
-    close: () =>
-      new Promise<void>((resolve) => {
-        server.close(() => resolve());
-        server.closeAllConnections();
-      }),
-  };
+  return `http://${address.family === "IPv6" ? `[${address.address}]` : address.address}:${address.port}`;
+}
+
+function closeServer(server: http.Server): Promise<void> {
+  return new Promise<void>((resolve) => {
+    server.close(() => resolve());
+    server.closeAllConnections();
+  });
 }
 
 /** The ledger in the config's stateDir. A reservation outlives the longest possible call by a minute. */

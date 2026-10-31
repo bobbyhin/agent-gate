@@ -42,7 +42,8 @@ run next to the agent, on its machine.
 | Audit | Done: a usage log without prompt text; the MCP gateway's audit log | `src/llm/usage-log.ts`, `src/gateway/audit.ts` |
 | Tests as a gate | Done for the guards: table tests, a held-out set with a baseline, a differential hash, crash tests | `test/`, `npm test` |
 | Trace context | Done for the ids: the LLM gateway joins the client's W3C trace or starts one, sends its own span upstream and logs the ids; the MCP gateway logs the trace, session, run and agent path a client sends in `_meta`. No spans are exported to a tracing backend | `src/gateway/context.ts`, `src/llm/server.ts`, `src/gateway/audit.ts` |
-| Metrics and dashboards | Not built: `agent-gate usage` and `approvals stats` print totals; nothing is exported | `src/gateway/cli.ts` |
+| Metrics | Done: `GET /metrics` in the Prometheus text format (calls, tokens, cost, a latency histogram, budget left per key), behind a key of its own or on a loopback-only listener; a sample sidecar config for Cloud Run, not applied | `src/llm/metrics.ts`, `deploy/cloud-run-metrics/` |
+| Dashboards and alerts | Not built: nothing ships to read the metrics | |
 | Running in a real project | Not done: checked, never deployed (a deploy costs money and waits for its owner) | `deploy/README.md`, "What was checked" |
 | Sessions, memory, the agent's loop, evaluation of the agent's answers | Not this project's job | |
 
@@ -59,14 +60,14 @@ run next to the agent, on its machine.
 - **Tracing.** The trace ids are in the logs already. Exporting one span per call (with the decision,
   the rule, the upstream and the cost) through OpenTelemetry would show a slow or refused call in the
   same trace viewer as the agent's own spans.
-- **Metrics.** Calls, refusals, spend against the caps and approval waits, exported for a dashboard
-  instead of printed by the CLI.
+- **Dashboards and alerts.** The LLM gateway's metrics exist; alert rules on spend and refusals, and
+  metrics for the MCP gateway's approval waits (today `approvals stats` prints them), do not.
 
 ## Consequences
 
 - A team that runs agents on a managed runtime keeps it for hosting, sessions and evaluation, and puts
   agent-gate in front of the calls those agents make. The two do not overlap.
-- Until spans and metrics are exported, the only views are the logs and the CLI; the trace ids in the
-  logs are what joins them to the agent's traces.
+- Until spans are exported, the views are the logs, the CLI and `/metrics`; the trace ids in the logs
+  are what joins them to the agent's traces.
 - The production pieces that exist have been validated without credentials (Terraform tests with a
   mocked provider, kubeconform, image checks in CI), not run in a real project.

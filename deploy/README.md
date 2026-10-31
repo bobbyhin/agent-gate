@@ -19,6 +19,7 @@ Paths are from the repository root, and so are the commands below unless they sa
 | `docker-compose.yml`, `deploy/compose/llm-gateway.config.json` | The local demo: the gateway in front of the fake provider from the tests. |
 | `deploy/k8s/` | Kustomize: a Namespace (Pod Security `restricted`), a ServiceAccount, a PersistentVolumeClaim, the Deployment, a Service, a NetworkPolicy, and a ConfigMap generated from `llm-gateway.config.json` and `llm-policy.json`. |
 | `deploy/terraform/` | Google Cloud: an Artifact Registry repository, a service account, Secret Manager secrets, a state bucket, the Cloud Run service and an optional budget alert. `deploy/terraform/tests/` has plan-only tests that use a mocked provider. |
+| `deploy/cloud-run-metrics/run-monitoring.yaml` | A sample config for the Prometheus sidecar on Cloud Run, which would scrape the gateway's metrics. Not wired into the Terraform, never applied. See [Metrics](#metrics). |
 | [`docs/adr/0003-single-writer-state.md`](../docs/adr/0003-single-writer-state.md) | Why one replica, and what it takes to run more. |
 
 ### Inside the container
@@ -254,6 +255,40 @@ one instance" can be exceeded briefly, Cloud Storage FUSE has no file locking, e
 costs several object operations, and the usage log is uploaded again on each append while it is
 small. ADR 0003 has the details and the way out.
 
+## Metrics
+
+The gateway serves Prometheus metrics ([README: Metrics](../README.md#metrics)) only when its config
+says who may read them. The two ways fit the two platforms:
+
+- **Kubernetes.** A Prometheus server outside the pod scrapes the gateway's own port. Give the metrics
+  a key of their own, `"metrics": { "sha256": "<SHA-256 of the metrics key>" }`, and put the key in
+  the scrape config (Prometheus's `authorization` with a `credentials_file`). The NetworkPolicy in
+  `deploy/k8s/` admits only namespaces labelled `agent-gate/llm-client=true`, so the Prometheus
+  namespace needs that label or a rule of its own.
+- **Cloud Run.** Google's [Managed Service for Prometheus sidecar for Cloud Run](https://docs.cloud.google.com/stackdriver/docs/managed-prometheus/cloudrun-sidecar)
+  scrapes a port inside the same instance, and it cannot send an `Authorization` header: its
+  `RunMonitoring` config has no field for one (the [sidecar's source](https://github.com/GoogleCloudPlatform/run-gmp-sidecar),
+  checked on 2026-10-31). So the gateway opens a listener of its own for `GET /metrics` only, with no
+  key, which its config allows only on a loopback address:
+  `"metrics": { "listen": { "host": "127.0.0.1", "port": 9464 } }`. The sidecar's source scrapes
+  `0.0.0.0:<port>` inside the instance, which Linux routes to the loopback interface; nothing outside
+  the instance can reach the listener. `deploy/cloud-run-metrics/run-monitoring.yaml` points the
+  sidecar at that port, once a minute.
+
+How the sidecar would be added, per the page above: a second container in the service, image
+`us-docker.pkg.dev/cloud-ops-agents-artifacts/cloud-run-gmp-sidecar/cloud-run-gmp-sidecar` at a
+version you have checked (the page shows 1.2.0; the repository's latest release on 2026-10-31 was
+1.9.6), started after the gateway (`run.googleapis.com/container-dependencies`); the `RunMonitoring`
+file stored in Secret Manager and mounted at `/etc/rungmp/config.yaml`; and the roles
+`roles/monitoring.metricWriter` and `roles/logging.logWriter` for the service account. None of this
+is in `deploy/terraform/`, and it has never run.
+
+It costs money. Metrics the sidecar sends are billed per sample ingested, with no free allotment
+($0.06 per million samples for the first 50 billion on
+[the pricing page](https://cloud.google.com/products/observability/pricing) on 2026-10-31; check
+before turning it on). The scrape in the README has 24 samples, so one scrape a minute is about a
+million samples a month for each instance, and more as routes and status codes add series.
+
 ## Shortcuts that labs take, and what this setup does instead
 
 Codelabs and workshop scripts get a service running in minutes by skipping things. Each row is one
@@ -315,7 +350,8 @@ cluster, `docker push`, a Cloud Run deployment, or a call to a real provider.
 - Secrets on Kubernetes beyond `kubectl create secret`.
 - Supply chain: the base images are pinned by digest, but nothing updates them, and CI does not sign
   the image, make an SBOM or scan it.
-- Monitoring and alerting beyond the optional budget: the platforms' own metrics and logs only, and
+- Alerting and dashboards. `GET /metrics` exists (see [Metrics](#metrics)), but no alert rules or
+  dashboards come with it, the Cloud Run sidecar is a sample that the Terraform does not add, and
   `usage.jsonl` is not shipped anywhere.
 - The MCP gateway. It is a stdio process that an agent starts on its own machine, not a network
   service, so it is not packaged here.

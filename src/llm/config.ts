@@ -65,6 +65,14 @@ export interface GatewayKey {
   monthlyUsd: number;
 }
 
+/** Who may read GET /metrics (src/llm/metrics.ts). Absent: nobody, it is not served. */
+export interface MetricsConfig {
+  /** SHA-256 of a key of its own: GET /metrics on the gateway's port, with Authorization: Bearer <key>. */
+  sha256?: string;
+  /** A listener of its own that serves only GET /metrics, without a key. Its host must be a loopback address. */
+  listen?: { host: string; port: number };
+}
+
 export interface LlmConfig {
   host: string;
   port: number;
@@ -82,6 +90,7 @@ export interface LlmConfig {
   /** Wait before retry n: backoffMs * 2^(n-1). */
   backoffMs: number;
   maxBodyBytes: number;
+  metrics?: MetricsConfig;
 }
 
 export const DEFAULTS = {
@@ -120,7 +129,7 @@ export function parseLlmConfig(json: unknown, baseDir: string): LlmConfig {
   const config = object(json, "config");
   onlyKeys(
     config,
-    ["listen", "stateDir", "policy", "upstreams", "routes", "keys", "defaultMaxTokens", "timeoutMs", "retries", "backoffMs", "maxBodyBytes"],
+    ["listen", "stateDir", "policy", "upstreams", "routes", "keys", "defaultMaxTokens", "timeoutMs", "retries", "backoffMs", "maxBodyBytes", "metrics"],
     "config",
   );
 
@@ -164,7 +173,38 @@ export function parseLlmConfig(json: unknown, baseDir: string): LlmConfig {
     retries: optionalInteger(config.retries, "config.retries", 0, MAX_RETRIES, DEFAULTS.retries),
     backoffMs: optionalInteger(config.backoffMs, "config.backoffMs", 0, 60_000, DEFAULTS.backoffMs),
     maxBodyBytes: optionalInteger(config.maxBodyBytes, "config.maxBodyBytes", 1024, 32 * 1024 * 1024, DEFAULTS.maxBodyBytes),
+    ...(config.metrics === undefined ? {} : { metrics: parseMetrics(config.metrics, keyHashes) }),
   };
+}
+
+/** A loopback IP address: 127.0.0.0/8 or ::1. Names are not accepted, because a name can resolve elsewhere. */
+export function isLoopback(host: string): boolean {
+  return host === "::1" || /^127\.(?:\d{1,3})\.(?:\d{1,3})\.(?:\d{1,3})$/.test(host);
+}
+
+function parseMetrics(raw: unknown, keyHashes: ReadonlySet<string>): MetricsConfig {
+  const at = "config.metrics";
+  const m = object(raw, at);
+  onlyKeys(m, ["sha256", "listen"], at);
+  if (m.sha256 === undefined && m.listen === undefined) {
+    fail(`${at} needs "sha256" (a key for GET /metrics on the gateway's port), "listen" (a listener of its own on a loopback address), or both`);
+  }
+  const metrics: MetricsConfig = {};
+  if (m.sha256 !== undefined) {
+    const sha256 = text(m.sha256, `${at}.sha256`);
+    if (!SHA256_HEX.test(sha256)) fail(`${at}.sha256 must be 64 lowercase hex characters (the SHA-256 of the metrics key, not the key)`);
+    // An agent's key must not also read every key's spend.
+    if (keyHashes.has(sha256)) fail(`${at}.sha256 is the hash of a gateway key; the metrics key must be a key of its own`);
+    metrics.sha256 = sha256;
+  }
+  if (m.listen !== undefined) {
+    const listen = object(m.listen, `${at}.listen`);
+    onlyKeys(listen, ["host", "port"], `${at}.listen`);
+    const host = listen.host === undefined ? "127.0.0.1" : text(listen.host, `${at}.listen.host`);
+    if (!isLoopback(host)) fail(`${at}.listen.host must be a loopback address (127.0.0.1 or ::1): this listener has no key`);
+    metrics.listen = { host, port: integerIn(listen.port, `${at}.listen.port`, 0, 65535) };
+  }
+  return metrics;
 }
 
 function parseUpstream(raw: unknown, at: string): Upstream {

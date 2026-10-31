@@ -1182,6 +1182,66 @@ usage line can be joined with the agent's own trace and with the provider's logs
 The gateway records ids; it does not export spans to a tracing backend. The MCP gateway reads the
 same ids from a tool call's `_meta` (see [Audit log](#audit-log)).
 
+### Metrics
+
+`GET /metrics` gives the usage log's running totals in the Prometheus text format, for a dashboard
+and alerts: calls by route, upstream and status, tokens and dollars booked, a histogram of how long
+calls take, and what each key may still spend today and this month. The counters start at zero when
+the gateway starts; the budget figures are read from the ledger at each scrape.
+
+It is not served unless the config says who may read it, because it names every key and its spend:
+
+- `"metrics": { "sha256": "<SHA-256 of a metrics key>" }` serves it on the gateway's port to a client
+  that sends that key as `Authorization: Bearer`. It must not be a gateway key: an agent's key does
+  not read every key's spend.
+- `"metrics": { "listen": { "host": "127.0.0.1", "port": 9464 } }` opens a listener of its own that
+  serves `GET /metrics` only, with no key. Its host must be a loopback address (`127.0.0.1` or `::1`);
+  anything else stops the gateway at startup. This is for a scraper next to the gateway, such as a
+  sidecar in the same Cloud Run instance, which cannot send a key
+  ([deploy/README.md](deploy/README.md#metrics)).
+
+A scrape after a run of the steps above, with the second form added to the example config:
+
+```
+$ curl -s http://127.0.0.1:9464/metrics
+# HELP agent_gate_llm_requests_total Authenticated chat completion requests, by route, upstream and HTTP status.
+# TYPE agent_gate_llm_requests_total counter
+agent_gate_llm_requests_total{route="",upstream="",status="400"} 1
+agent_gate_llm_requests_total{route="cheap-models",upstream="cheap",status="200"} 1
+agent_gate_llm_requests_total{route="cheap-models",upstream="cheap",status="400"} 1
+agent_gate_llm_requests_total{route="classify-is-cheap",upstream="cheap",status="200"} 1
+agent_gate_llm_requests_total{route="strong-models",upstream="strong",status="200"} 1
+agent_gate_llm_requests_total{route="strong-models",upstream="strong",status="429"} 1
+# HELP agent_gate_llm_tokens_total Tokens booked: input and output.
+# TYPE agent_gate_llm_tokens_total counter
+agent_gate_llm_tokens_total{direction="input"} 79
+agent_gate_llm_tokens_total{direction="output"} 27
+# HELP agent_gate_llm_cost_usd_total US dollars booked against the gateway keys.
+# TYPE agent_gate_llm_cost_usd_total counter
+agent_gate_llm_cost_usd_total 0.00022605
+# HELP agent_gate_llm_request_duration_seconds Time from receiving a request to answering it.
+# TYPE agent_gate_llm_request_duration_seconds histogram
+agent_gate_llm_request_duration_seconds_bucket{le="0.05"} 3
+agent_gate_llm_request_duration_seconds_bucket{le="0.1"} 4
+agent_gate_llm_request_duration_seconds_bucket{le="0.25"} 5
+agent_gate_llm_request_duration_seconds_bucket{le="0.5"} 5
+agent_gate_llm_request_duration_seconds_bucket{le="1"} 5
+agent_gate_llm_request_duration_seconds_bucket{le="2.5"} 6
+agent_gate_llm_request_duration_seconds_bucket{le="5"} 6
+agent_gate_llm_request_duration_seconds_bucket{le="10"} 6
+agent_gate_llm_request_duration_seconds_bucket{le="30"} 6
+agent_gate_llm_request_duration_seconds_bucket{le="60"} 6
+agent_gate_llm_request_duration_seconds_bucket{le="+Inf"} 6
+agent_gate_llm_request_duration_seconds_sum 1.796
+agent_gate_llm_request_duration_seconds_count 6
+# HELP agent_gate_llm_budget_remaining_usd What a key may still spend: its cap minus settled spend minus what calls in flight hold.
+# TYPE agent_gate_llm_budget_remaining_usd gauge
+agent_gate_llm_budget_remaining_usd{key="demo-agent",cap="daily"} 0.00977395
+agent_gate_llm_budget_remaining_usd{key="demo-agent",cap="monthly"} 0.99977395
+```
+
+The first `requests_total` line is the streaming request: refused before routing, so it has no route.
+
 ### Keys
 
 - Gateway keys are stored only as SHA-256 hashes, and looked up by their hash.
@@ -1326,7 +1386,7 @@ obeys, and the gateway blocks the call before it reaches the server. Another den
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 178 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 193 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file); a leak-guard table
 for every shipped rule, with 29 samples of prose and code that must pass untouched; retries and
@@ -1337,7 +1397,8 @@ costs settled from the upstream's `usage`, a 429 with no upstream call once a ca
 secrets blocked before any upstream call, redaction, a usage log without prompt text, the trace
 context (the client's trace kept, a new one started, the gateway's own span sent upstream, bad values
 dropped), `usage --by task`, 401 for an unknown key, and that no provider key ever appears in a
-response or a log. Five more check the
+response or a log. A metrics suite checks the Prometheus text, who may read `/metrics` (its own
+key on the gateway's port, or a loopback listener with none) and the config rules behind that. Five more check the
 gateway configs under `deploy/`: they load, they use the container's paths, the deployable one
 refuses the demo key, and the Kubernetes copy of the leak-guard policy matches the example. Every
 fake secret the tests use is in `test/llm/fake-secrets.ts`, assembled from pieces at run time, so
@@ -1362,7 +1423,7 @@ the decision, with no model judging and no tolerance band. And it is evaluated o
 there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 292/292 MCP gateway tests, 178/178 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 292/292 MCP gateway tests, 193/193 LLM gateway tests, 7/7 for
 the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1391,6 +1452,8 @@ src/llm/upstream.ts                           calls the upstreams: retries, back
 src/llm/budget.ts                             the cost estimate and the ledger in <stateDir>/ledger.json
 src/llm/leak-guard.ts                         the leak guard (pure): block or redact secrets in messages
 src/llm/usage-log.ts                          the usage log, <stateDir>/usage.jsonl
+src/llm/usage-report.ts                       reads the usage log back: agent-gate usage --by
+src/llm/metrics.ts                            GET /metrics: running totals in the Prometheus text format
 src/llm/config.ts                             loads and checks the LLM gateway config
 bin/agent-gate.js                             the CLI entry point (runs the build in dist/)
 policy.example.json                           the red lines as a gateway policy
@@ -1406,6 +1469,7 @@ deploy/k8s/                                   kustomize: Deployment, Service, PV
 deploy/k8s/llm-gateway.config.json            the config template for Kubernetes and Cloud Run
 deploy/terraform/                             Cloud Run, Artifact Registry, Secret Manager, state bucket
 deploy/terraform/tests/                       plan-only Terraform tests with a mocked provider
+deploy/cloud-run-metrics/run-monitoring.yaml  a sample config for the Prometheus sidecar on Cloud Run (not applied)
 test/cases.json                               239 cases: id, category, expect, cmd
 test/cases-exfil.json                         suite G: 73 uploads of local files, same fields
 test/cases-heldout.json                       163 held-out commands from a later red team (test/HELDOUT.md)
