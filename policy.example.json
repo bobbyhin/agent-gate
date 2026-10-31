@@ -32,9 +32,13 @@
     },
     {
       "id": "red-line-2-public",
-      "toolWords": ["post", "publish", "send", "tweet", "retweet", "reply", "comment", "email", "share"],
+      "toolWords": [
+        "post", "publish", "send", "tweet", "retweet", "reply", "comment", "email", "share",
+        "create event", "create calendar event", "add event", "add calendar event", "update event", "update calendar", "move event",
+        "create meeting", "update meeting", "schedule", "reschedule", "invite", "rsvp", "respond to event"
+      ],
       "decision": "ask",
-      "why": "Red line 2: this tool looks like it posts or sends something from a real account."
+      "why": "Red line 2: this tool looks like it posts or sends something from a real account, or puts an event or an invitation in front of other people."
     },
     {
       "id": "red-line-3-ship",

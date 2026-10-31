@@ -1,0 +1,31 @@
+{
+  "about": "A small social app's tools, after the InstaVibe demo in a talk on Google's ADK and MCP: the two tools the demo exposed (create_post, create_event), calendar-style variants of the same actions, and the reads such an app has. The names are ours, written for this test; no code was copied.",
+  "source": "the demo's two tool names as shown on screen; the other names are made up for this list",
+  "server": "social",
+  "tools": [
+    { "name": "create_post", "label": "ask", "why": "posts to a feed that other people read", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "create_event", "label": "ask", "why": "creates an event that other people see and are invited to", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "create_calendar_event", "label": "ask", "why": "the same in a shared calendar", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "addEvent", "label": "ask", "why": "the same, in camelCase", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "update_event", "label": "ask", "why": "changes an event that people have planned around", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "reschedule_event", "label": "ask", "why": "moves an event; the attendees are told", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "schedule_meeting", "label": "ask", "why": "puts a meeting in other people's calendars", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "update_calendar", "label": "ask", "why": "changes a calendar that others share", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "send_invite", "label": "ask", "why": "sends an invitation", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "invite_friend", "label": "ask", "why": "sends an invitation", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "rsvp_event", "label": "ask", "why": "answers an invitation; the organizer sees the answer", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "delete_event", "label": "ask", "why": "deletes an event", "policy": "ask", "rule": "red-line-4-delete" },
+    { "name": "get_post", "label": "allow", "why": "reads, but post is one of red line 2's words, so the example asks: a false positive, like get_email", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "list_posts", "label": "allow", "why": "reads", "policy": "allow", "rule": "default" },
+    { "name": "get_event", "label": "allow", "why": "reads", "policy": "allow", "rule": "default" },
+    { "name": "get_events", "label": "allow", "why": "reads", "policy": "allow", "rule": "default" },
+    { "name": "list_events", "label": "allow", "why": "reads", "policy": "allow", "rule": "default" },
+    { "name": "search_events", "label": "allow", "why": "reads", "policy": "allow", "rule": "default" },
+    { "name": "get_calendar", "label": "allow", "why": "reads", "policy": "allow", "rule": "default" },
+    { "name": "list_calendars", "label": "allow", "why": "reads", "policy": "allow", "rule": "default" },
+    { "name": "list_friends", "label": "allow", "why": "reads", "policy": "allow", "rule": "default" },
+    { "name": "get_invitations", "label": "allow", "why": "reads; whole words, so invitations is not invite", "policy": "allow", "rule": "default" },
+    { "name": "get_schedule", "label": "allow", "why": "reads, but schedule is one of red line 2's words, so the example asks: a false positive", "policy": "ask", "rule": "red-line-2-public" }
+  ],
+  "summary": { "tools": 23, "agree": 21, "stricter": 2, "looser": 0 }
+}

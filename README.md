@@ -705,7 +705,7 @@ first match alone gives.
 | `protect-gateway-state` | any tool whose `path` argument points into `.agent-gate` | block |
 | `shell-guard` | a shell tool (`run_command`, `exec`, `bash` and others): its `command` goes through the shell guard | the guard's decision |
 | `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order; and cloud resources that start a bill: provision, create instance, create cluster, create corpus, create rag corpus, create bucket, enable api, enable service, scale up, create key | ask; a request lives 15 minutes |
-| `red-line-2-public` | post, publish, send, tweet, retweet, reply, comment, email, share | ask |
+| `red-line-2-public` | post, publish, send, tweet, retweet, reply, comment, email, share; and what puts an event or an invitation in front of other people: create event, create calendar event, add event, add calendar event, update event, update calendar, move event, create meeting, update meeting, schedule, reschedule, invite, rsvp, respond to event | ask |
 | `red-line-3-ship` | push, merge, deploy, create pull request, create pr, create release | ask; a request lives 30 minutes |
 | `red-line-4-delete` | delete, remove, drop, destroy, overwrite, purge, erase, wipe, truncate | ask |
 | `red-line-5-memory` | remember, memorize, add memory, save memory, store memory, update memory, memory insert, memory append, memory replace, add observations, create entities, create relations, set preference, update profile | ask |
@@ -717,6 +717,13 @@ first match alone gives.
 
 Notes on the newer rules:
 
+- **Events and invitations (red line 2).** In the tools of a small social app (after a demo app in a
+  talk on Google's ADK and MCP), `create_post` asked but `create_event` ran unattended, although an
+  event lands in other people's calendars. Red line 2 now also names what creates, changes, schedules
+  or answers an event or an invitation. `test/gateway/tool-lists/instavibe.json` lists 23 such tools,
+  each labelled with the decision it should get: before, 9 of the 12 that should ask ran unattended;
+  now all 12 ask, reads such as `list_events`, `get_calendar` and `get_invitations` stay allowed, and
+  two reads ask because of one word in their names, `get_post` and `get_schedule`.
 - **Red line 5, long-term memory.** A memory write outlives the session: what an injected
   instruction gets saved today, a later session reads as its own knowledge. That makes it
   different from writing a file in the workspace, so the example asks. The audit line of each
@@ -1951,10 +1958,12 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 388 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 395 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
-team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); which
+team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
+lists with each tool labelled with the decision it should get (`test/gateway/tool-lists/`), and the
+README's table of example rules checked against `policy.example.json`; which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
 controls, standing approvals and their bounds, the escalate-only rule of a second reviewer, the CLI's exit codes, its read-back before an approval, and what a decision leaves behind
@@ -2047,7 +2056,7 @@ audit log; the end-to-end test scores its own run that way. It checks which call
 the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 388/388 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 395/395 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
