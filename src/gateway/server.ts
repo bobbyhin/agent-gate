@@ -2,7 +2,8 @@
 //
 // It lists every downstream tool as "<server>__<tool>", decides every call with the policy, and
 // forwards the calls that may run. Forwarded calls get the downstream result back unchanged, except
-// that a call whose arguments a rewrite rule edited says so in the result's _meta.
+// that the optional result guard may withhold or redact it (result-guard.ts), and a call whose
+// arguments a rewrite rule edited says so in the result's _meta.
 // Every call is written to the audit log before anything is forwarded; a forwarded call gets a
 // second line when it comes back, with its duration and a hash of its result (audit.ts).
 //

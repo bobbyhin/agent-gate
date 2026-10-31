@@ -126,8 +126,8 @@
    "isError": false,
    "audit": [
     {
-     "ts": "2026-10-31T05:00:36.560Z",
-     "connId": "cn-99052090",
+     "ts": "2026-10-31T05:04:05.395Z",
+     "connId": "cn-e1e7c934",
      "seq": 1,
      "server": "demo",
      "tool": "echo",
@@ -138,9 +138,9 @@
      "forwarded": true
     },
     {
-     "ts": "2026-10-31T05:00:36.562Z",
+     "ts": "2026-10-31T05:04:05.397Z",
      "event": "call-result",
-     "connId": "cn-99052090",
+     "connId": "cn-e1e7c934",
      "seq": 1,
      "server": "demo",
      "tool": "echo",
@@ -168,12 +168,12 @@
      "path": "notes/old.md"
     }
    },
-   "answer": "agent-gate: this call needs a human decision, so it was not run.\nReason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\nApproval id: ap-bcc9eaae (expires 2026-11-01T05:00:36.563Z)\nA human can approve it with: agent-gate approvals approve ap-bcc9eaae\nOnce it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.\nDo not try to get the same result another way.",
+   "answer": "agent-gate: this call needs a human decision, so it was not run.\nReason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\nApproval id: ap-440b54f6 (expires 2026-11-01T05:04:05.398Z)\nA human can approve it with: agent-gate approvals approve ap-440b54f6\nOnce it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.\nDo not try to get the same result another way.",
    "isError": true,
    "audit": [
     {
-     "ts": "2026-10-31T05:00:36.569Z",
-     "connId": "cn-99052090",
+     "ts": "2026-10-31T05:04:05.403Z",
+     "connId": "cn-e1e7c934",
      "seq": 2,
      "server": "demo",
      "tool": "delete_file",
@@ -182,12 +182,12 @@
      "why": "Red line 4: this tool looks like it deletes or overwrites data.",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
      "forwarded": false,
-     "approvalId": "ap-bcc9eaae"
+     "approvalId": "ap-440b54f6"
     }
    ],
    "queue": [
     {
-     "id": "ap-bcc9eaae",
+     "id": "ap-440b54f6",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -206,11 +206,11 @@
   {
    "actor": "human",
    "command": "$ agent-gate approvals list",
-   "answer": "ap-bcc9eaae  pending  demo__delete_file\n  why:     Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\n  args:    {\"path\":\"notes/old.md\"}\n  created: 2026-10-31T05:00:36.563Z  expires: 2026-11-01T05:00:36.563Z",
+   "answer": "ap-440b54f6  pending  demo__delete_file\n  why:     Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\n  args:    {\"path\":\"notes/old.md\"}\n  created: 2026-10-31T05:04:05.398Z  expires: 2026-11-01T05:04:05.398Z",
    "audit": [],
    "queue": [
     {
-     "id": "ap-bcc9eaae",
+     "id": "ap-440b54f6",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -225,26 +225,26 @@
   },
   {
    "actor": "human",
-   "command": "$ agent-gate approvals approve ap-bcc9eaae --yes",
-   "answer": "approved ap-bcc9eaae: demo__delete_file {\"path\":\"notes/old.md\"}\nThe agent can now make this exact call once, until 2026-11-01T05:00:36.563Z.",
+   "command": "$ agent-gate approvals approve ap-440b54f6 --yes",
+   "answer": "approved ap-440b54f6: demo__delete_file {\"path\":\"notes/old.md\"}\nThe agent can now make this exact call once, until 2026-11-01T05:04:05.398Z.",
    "audit": [
     {
-     "ts": "2026-10-31T05:00:36.726Z",
+     "ts": "2026-10-31T05:04:05.565Z",
      "event": "approval-decided",
-     "approvalId": "ap-bcc9eaae",
+     "approvalId": "ap-440b54f6",
      "server": "demo",
      "tool": "delete_file",
      "rule": "red-line-4-delete",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
      "decision": "approved",
-     "waitMs": 158,
+     "waitMs": 161,
      "decidedBy": "alice",
      "confirmation": "--yes"
     }
    ],
    "queue": [
     {
-     "id": "ap-bcc9eaae",
+     "id": "ap-440b54f6",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -271,8 +271,8 @@
    "isError": false,
    "audit": [
     {
-     "ts": "2026-10-31T05:00:36.737Z",
-     "connId": "cn-99052090",
+     "ts": "2026-10-31T05:04:05.575Z",
+     "connId": "cn-e1e7c934",
      "seq": 3,
      "server": "demo",
      "tool": "delete_file",
@@ -281,12 +281,12 @@
      "why": "Red line 4: this tool looks like it deletes or overwrites data.",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
      "forwarded": true,
-     "approvalId": "ap-bcc9eaae"
+     "approvalId": "ap-440b54f6"
     },
     {
-     "ts": "2026-10-31T05:00:36.738Z",
+     "ts": "2026-10-31T05:04:05.576Z",
      "event": "call-result",
-     "connId": "cn-99052090",
+     "connId": "cn-e1e7c934",
      "seq": 3,
      "server": "demo",
      "tool": "delete_file",
@@ -299,7 +299,7 @@
    ],
    "queue": [
     {
-     "id": "ap-bcc9eaae",
+     "id": "ap-440b54f6",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -323,12 +323,12 @@
      "path": "notes/old.md"
     }
    },
-   "answer": "agent-gate: this call needs a human decision, so it was not run.\nReason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\nApproval id: ap-9548c742 (expires 2026-11-01T05:00:36.738Z)\nA human can approve it with: agent-gate approvals approve ap-9548c742\nOnce it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.\nDo not try to get the same result another way.",
+   "answer": "agent-gate: this call needs a human decision, so it was not run.\nReason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)\nApproval id: ap-b8d7ce56 (expires 2026-11-01T05:04:05.577Z)\nA human can approve it with: agent-gate approvals approve ap-b8d7ce56\nOnce it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.\nDo not try to get the same result another way.",
    "isError": true,
    "audit": [
     {
-     "ts": "2026-10-31T05:00:36.743Z",
-     "connId": "cn-99052090",
+     "ts": "2026-10-31T05:04:05.581Z",
+     "connId": "cn-e1e7c934",
      "seq": 4,
      "server": "demo",
      "tool": "delete_file",
@@ -337,12 +337,12 @@
      "why": "Red line 4: this tool looks like it deletes or overwrites data.",
      "argsHash": "sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb",
      "forwarded": false,
-     "approvalId": "ap-9548c742"
+     "approvalId": "ap-b8d7ce56"
     }
    ],
    "queue": [
     {
-     "id": "ap-bcc9eaae",
+     "id": "ap-440b54f6",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -351,7 +351,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-9548c742",
+     "id": "ap-b8d7ce56",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -378,8 +378,8 @@
    "isError": true,
    "audit": [
     {
-     "ts": "2026-10-31T05:00:36.745Z",
-     "connId": "cn-99052090",
+     "ts": "2026-10-31T05:04:05.583Z",
+     "connId": "cn-e1e7c934",
      "seq": 5,
      "server": "demo",
      "tool": "run_command",
@@ -392,7 +392,7 @@
    ],
    "queue": [
     {
-     "id": "ap-bcc9eaae",
+     "id": "ap-440b54f6",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -401,7 +401,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-9548c742",
+     "id": "ap-b8d7ce56",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -429,8 +429,8 @@
    "isError": false,
    "audit": [
     {
-     "ts": "2026-10-31T05:00:36.750Z",
-     "connId": "cn-99052090",
+     "ts": "2026-10-31T05:04:05.587Z",
+     "connId": "cn-e1e7c934",
      "seq": 6,
      "server": "demo",
      "tool": "echo",
@@ -441,14 +441,14 @@
      "forwarded": true
     },
     {
-     "ts": "2026-10-31T05:00:36.750Z",
+     "ts": "2026-10-31T05:04:05.588Z",
      "event": "call-result",
-     "connId": "cn-99052090",
+     "connId": "cn-e1e7c934",
      "seq": 6,
      "server": "demo",
      "tool": "echo",
      "argsHash": "sha256:2be1ec49aec7b4441c9b0be83b50372b65247faffe8d857902b12422d3abfb2c",
-     "durationMs": 0,
+     "durationMs": 1,
      "isError": false,
      "resultHash": "sha256:59b599e99b44ee17c01e4a8706b7f55a054f9d4ff151dcf9667280b8ddce1f8e",
      "resultBytes": 271
@@ -456,7 +456,7 @@
    ],
    "queue": [
     {
-     "id": "ap-bcc9eaae",
+     "id": "ap-440b54f6",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -465,7 +465,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-9548c742",
+     "id": "ap-b8d7ce56",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -490,8 +490,8 @@
    "isError": true,
    "audit": [
     {
-     "ts": "2026-10-31T05:00:36.753Z",
-     "connId": "cn-99052090",
+     "ts": "2026-10-31T05:04:05.592Z",
+     "connId": "cn-e1e7c934",
      "seq": 7,
      "server": "demo",
      "tool": "run_command",
@@ -504,7 +504,7 @@
    ],
    "queue": [
     {
-     "id": "ap-bcc9eaae",
+     "id": "ap-440b54f6",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -513,7 +513,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-9548c742",
+     "id": "ap-b8d7ce56",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -535,7 +535,7 @@
    "audit": [],
    "queue": [
     {
-     "id": "ap-bcc9eaae",
+     "id": "ap-440b54f6",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -544,7 +544,7 @@
      "rule": "red-line-4-delete"
     },
     {
-     "id": "ap-9548c742",
+     "id": "ap-b8d7ce56",
      "tool": "demo__delete_file",
      "args": {
       "path": "notes/old.md"
@@ -570,7 +570,7 @@
   "decide": {
    "id": "decide",
    "file": "src/gateway/server.ts",
-   "line": 229,
+   "line": 230,
    "text": "    switch (verdict.decision) {\n      case \"allow\":\n        record(true);\n        return run();\n      case \"warn\":\n        record(true);\n        log(`WARN ${call.server}${SEPARATOR}${call.tool}: ${verdict.why} (rule ${verdict.rule})`);\n        return run();\n      case \"block\":\n        record(false);\n        return refuse(errorResult(blockedText(verdict)));\n      case \"ask\": {\n        const files = config.fileBinding ? bindFiles(args, config.fileBinding) : undefined;\n        const outcome = approvals.resolveCall({\n          ...call,\n          args,\n          argsHash,\n          rule: verdict.rule,\n          why: verdict.why,\n          ...(verdict.ttlMs !== undefined ? { ttlMs: verdict.ttlMs } : {}),\n          ...(files ? { files } : {}),\n          ...(verdict.standing ? { standing: true } : {}),\n          ...(context.agentPath ? { agentPath: context.agentPath } : {}),\n          ...(verdict.alsoMatched ? { alsoMatched: verdict.alsoMatched } : {}),\n          ...(verdict.rewrittenBy ? { rewrittenBy: verdict.rewrittenBy } : {}),\n        });\n        if (outcome.kind === \"approved\" || outcome.kind === \"standing\") {\n          // the audit line names the approval, or the standing approval, that let it through\n          record(true, outcome.kind === \"approved\" ? outcome.approval.id : outcome.grant.id);\n          if (repeats && limited) repeats.record(limits, call.server, call.tool, argsHash);\n          return run();\n        }\n        record(false, outcome.approval.id);\n        return refuse(errorResult(outcome.kind === \"denied\" ? deniedText(outcome.approval) : pendingText(outcome.approval, outcome.created, outcome.replaced)));"
   },
   "resolveCall": {

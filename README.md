@@ -346,7 +346,7 @@ policy decides one of four things:
 
 | Decision | What happens |
 | --- | --- |
-| allow | The call is forwarded. The downstream result comes back unchanged. |
+| allow | The call is forwarded. The downstream result comes back as it is, unless the optional result guard withholds or redacts it (see [Tool results are untrusted data](#tool-results-are-untrusted-data)). |
 | warn | The same as allow, plus a note on the gateway's stderr. |
 | ask | The call is not forwarded. A pending approval is recorded, and the agent gets an error result that names its id. A human answers it with the CLI. |
 | block | The call is not forwarded and not queued. The agent gets an error result. |
@@ -1172,7 +1172,8 @@ x-agent-gate-cost-usd: 0.00000885
 {"id":"chatcmpl-fake-1","object":"chat.completion","created":1760400000,"model":"fake-small-1","choices":[{"index":0,"message":{"role":"assistant","content":"fake answer 1 from fake-small-1"},"finish_reason":"stop"}],"usage":{"prompt_tokens":23,"completion_tokens":9,"total_tokens":32}}
 ```
 
-The body is the upstream's answer, unchanged. The `x-agent-gate-*` headers say which trace the call
+The body is the upstream's answer, unchanged: the leak guard found nothing in it (see
+[Leak guard](#leak-guard)). The `x-agent-gate-*` headers say which trace the call
 belongs to (see [Tracing](#tracing)), which route and upstream served it and what it cost: 23 input
 tokens at $0.15 and 9 output tokens at $0.60 per million, from the upstream's own `usage`. The
 gateway's log has one line per call:
