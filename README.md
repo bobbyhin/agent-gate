@@ -358,6 +358,13 @@ MCP SDK (`@modelcontextprotocol/sdk`), which is its only runtime dependency besi
 Status: new. It is covered by the tests in [Run the tests](#run-the-tests), but unlike the shell
 guard it has not been used day to day yet.
 
+To see it work without installing anything, open [docs/demo/index.html](docs/demo/index.html) in a
+browser: a replay of a real run, step by step (a call that runs, a call held for a human and
+approved, a block, a prompt injection, the audit log checked), with the lines of code that decided
+each step. `npm run demo` records it again from a live run; `test/demo.test.js` fails when a line it
+quotes no longer matches the code. It is a static file with no server behind it, so it could be
+published with GitHub Pages; this repository does not set that up.
+
 ### Set it up
 
 ```
@@ -1793,7 +1800,7 @@ the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
 stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 235/235 LLM gateway tests, 7/7 for
-the change-review example, 6/6 for the status-mcp example), on Node 22. CI runs `npm ci` and `npm test` on
+the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
 
@@ -1864,11 +1871,14 @@ examples/status-mcp/policy.json               its policy: reads allowed, a write
 examples/status-mcp/gateway.config.json       the gateway in front of it
 examples/status-mcp/sample-status/            the status folder it reads by default
 test/status-mcp.test.js                       the example through a running gateway
+test/demo.test.js                             the demo page: quoted code still matches, its log verifies, it steps through
 test/SANITIZED.md                             what was changed in the cases before publication
 test/HELDOUT.md                               where the held-out cases come from, and their score
 docs/red-team.md                              the case categories, with counts
 docs/exploring-the-codebase.md                trace a decision: one line to reproduce it per guard, and its code and tests
 docs/related-work.md                          Docker MCP Gateway, LiteLLM, and how other tools bind a human's yes
+docs/demo/index.html                          a step-through replay of a real gateway run, with the code that decided
+scripts/demo-transcript.js                    npm run demo: records that run and writes it into the page
 docs/adr/0001-non-blocking-approvals.md       why "ask" answers with an error instead of waiting
 docs/adr/0002-reserve-then-settle-budgets.md  why budgets reserve an estimate and settle after
 docs/adr/0003-single-writer-state.md          why the gateway runs as one replica, and the way to more
