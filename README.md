@@ -2198,19 +2198,30 @@ records written after a call has already happened; those fail loudly instead, on
 
 agent-gate is small next to the gateways it is usually compared with, and it does a different job:
 
-| | agent-gate | [Docker MCP Gateway](https://github.com/docker/mcp-gateway) | [LiteLLM](https://github.com/BerriAI/litellm) |
-| --- | --- | --- | --- |
-| Main job | decide each call: a policy, a human, a record | run MCP servers safely: containers, a catalog, signed images | one API in front of many model providers |
-| How calls are decided | a JSON policy on tool names and arguments; approvals bound to the arguments' hash, used once | interceptors: your own code before or after a call | budgets, rate limits, guardrails |
-| A human in the loop | an approval queue answered at a CLI | not described in its documentation | no approval queue in the proxy |
-| Record | an audit line before each call (no line, no call), hashes instead of values, `audit verify` | logs of tool names and argument shapes; OpenTelemetry | spend in its database; OpenTelemetry; audit logs in its Enterprise tier |
+| | agent-gate | [Docker MCP Gateway](https://github.com/docker/mcp-gateway) | [LiteLLM](https://github.com/BerriAI/litellm) | [Google's Agent Gateway](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/agent-gateway-overview) |
+| --- | --- | --- | --- | --- |
+| Main job | decide each call: a policy, a human, a record | run MCP servers safely: containers, a catalog, signed images | one API in front of many model providers | a managed entry and exit point for an agent's traffic (tools, other agents, its model) on Gemini Enterprise Agent Platform |
+| How calls are decided | a JSON policy on tool names and arguments; approvals bound to the arguments' hash, used once | interceptors: your own code before or after a call | budgets, rate limits, guardrails | IAM allow and deny rules on the agent's identity and the tool's name; Model Armor filters; plain-language rules that an LLM checks (Preview) |
+| A human in the loop | an approval queue answered at a CLI | not described in its documentation | no approval queue in the proxy | not described in its governance documentation |
+| Record | an audit line before each call (no line, no call), hashes instead of values, `audit verify` | logs of tool names and argument shapes; OpenTelemetry | spend in its database; OpenTelemetry; audit logs in its Enterprise tier | allow and deny decisions in Cloud Logging, with the tool's name; access decisions in Cloud Audit Logs |
+| Streamed answers | held until the leak guard has read them (the default) | (tool calls only) | depends on the guardrail: some hold the stream, some read it after the client has it | Model Armor does not screen streaming chat completions; the LLM-checked rules do not support streamed responses |
 
 What agent-gate does not do: run servers in containers, keep a catalog of servers, verify image
 signatures, or translate between provider APIs. Isolation belongs to whatever runs the servers, and
 Docker's gateway does that well; agent-gate decides which calls may run and who said yes, and keeps a
-record that can be checked. [docs/related-work.md](docs/related-work.md) has the details, with a source
-for every claim about the other tools, and compares how Claude Code, the OpenAI Agents SDK, Antigravity
-and agent-gate bind a human's yes.
+record that can be checked.
+
+**Where this fits.** On Google Cloud, for agents hosted on its platform, the managed gateway is where
+identity, network rules and content filters belong, and agent-gate does not replace it. What its
+governance documentation does not describe, and agent-gate does, is a human's yes for one exact call,
+spent once; budgets that hold every call in flight against a cap (Google's token budgets are announced
+as coming soon, and its page says requests admitted together can exceed them); and streamed answers
+held until they are read. Where no managed gateway reaches, as with a coding agent on a laptop, or
+where a team wants its own, agent-gate covers the same points on one host, with its state in files
+([ADR 0003](docs/adr/0003-single-writer-state.md)): a gateway for one team's agents, not for a whole
+company. [docs/related-work.md](docs/related-work.md) has the details, with a source for every claim
+about the other tools, and compares how Claude Code, the OpenAI Agents SDK, ADK, Antigravity and
+agent-gate bind a human's yes.
 
 ## Deploy
 

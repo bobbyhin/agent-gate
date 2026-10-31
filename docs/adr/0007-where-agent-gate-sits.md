@@ -6,11 +6,12 @@ Date: 2026-10-31
 ## Context
 
 Cloud platforms offer two things an agent project might reach for. A container platform such as
-Cloud Run runs a service. A managed agent runtime (Google Cloud has one in Vertex AI) runs the agent
-itself: it hosts the agent's loop, keeps its sessions and long-term memory, scales it, and adds
-tracing and evaluation around it. The usual comparison: an agent deployed on a container platform,
-where you build the HTTP wrapper, the container, the infrastructure code, CI, health checks, tracing
-and dashboards yourself, and one on a managed runtime, which gives you most of that.
+Cloud Run runs a service. A managed agent runtime (Google Cloud's is Agent Runtime, formerly Agent
+Engine, in Gemini Enterprise Agent Platform, which Vertex AI became part of in April 2026) runs the
+agent itself: it hosts the agent's loop, keeps its sessions and long-term memory, scales it, and
+adds tracing and evaluation around it. The usual comparison: an agent deployed on a container
+platform, where you build the HTTP wrapper, the container, the infrastructure code, CI, health
+checks, tracing and dashboards yourself, and one on a managed runtime, which gives you most of that.
 
 agent-gate is none of those. It is the layer the calls pass through on their way out of an agent,
 wherever the agent runs: the shell guard in front of the agent's shell, the MCP gateway in front of
