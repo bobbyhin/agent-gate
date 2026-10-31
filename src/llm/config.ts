@@ -96,6 +96,8 @@ export interface LlmConfig {
   /** After a 429 on the last upstream: the longest the gateway waits (Retry-After, capped) before its one retry. 0: never. */
   rateLimitWaitMs: number;
   maxBodyBytes: number;
+  /** Run the leak guard over the answers too (default true). */
+  scanResponses: boolean;
   metrics?: MetricsConfig;
 }
 
@@ -136,7 +138,7 @@ export function parseLlmConfig(json: unknown, baseDir: string): LlmConfig {
   const config = object(json, "config");
   onlyKeys(
     config,
-    ["listen", "stateDir", "policy", "upstreams", "routes", "keys", "defaultMaxTokens", "timeoutMs", "retries", "backoffMs", "rateLimitWaitMs", "maxBodyBytes", "metrics"],
+    ["listen", "stateDir", "policy", "upstreams", "routes", "keys", "defaultMaxTokens", "timeoutMs", "retries", "backoffMs", "rateLimitWaitMs", "maxBodyBytes", "scanResponses", "metrics"],
     "config",
   );
 
@@ -181,6 +183,7 @@ export function parseLlmConfig(json: unknown, baseDir: string): LlmConfig {
     backoffMs: optionalInteger(config.backoffMs, "config.backoffMs", 0, 60_000, DEFAULTS.backoffMs),
     rateLimitWaitMs: optionalInteger(config.rateLimitWaitMs, "config.rateLimitWaitMs", 0, 60_000, DEFAULTS.rateLimitWaitMs),
     maxBodyBytes: optionalInteger(config.maxBodyBytes, "config.maxBodyBytes", 1024, 32 * 1024 * 1024, DEFAULTS.maxBodyBytes),
+    scanResponses: config.scanResponses === undefined ? true : config.scanResponses === true ? true : config.scanResponses === false ? false : fail("config.scanResponses must be true or false"),
     ...(config.metrics === undefined ? {} : { metrics: parseMetrics(config.metrics, keyHashes) }),
   };
 }

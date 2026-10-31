@@ -850,7 +850,8 @@ until steps 1 to 5 have passed.
 | 5. Reserve | The call's estimated cost is reserved against the key's daily and monthly caps. | 429 |
 | 6. Call | The upstream is called, with retries and then the fallback on a 5xx, a timeout or a 429. | 502, 504; 429 if the upstreams keep rate limiting |
 | 7. Settle | The reservation is settled with the real cost from the answer's `usage`, or released if the call failed. | |
-| 8. Record | One line goes to the usage log, with no prompt or completion text. | |
+| 8. Check the answer | The answer's text goes through the same leak guard. A block rule withholds it; a redact rule edits it. | 502 |
+| 9. Record | One line goes to the usage log, with no prompt or completion text. | |
 
 It is written in TypeScript on Node's own `http` module and global `fetch`, with no runtime
 dependencies.
@@ -944,7 +945,8 @@ read from `$GATEWAY_KEY`. This is the example config:
 - Optional, with their defaults: `listen` (`127.0.0.1`, port 8787), `defaultMaxTokens` (1024),
   `timeoutMs` per attempt (60000), `retries` per upstream (1, at most 3), `backoffMs` (250),
   `rateLimitWaitMs` (2000: the longest wait after a 429, see [Routing](#routing)), `maxBodyBytes`
-  (1 MiB) and `metrics` (off, see [Metrics](#metrics)).
+  (1 MiB), `scanResponses` (true, see [Leak guard](#leak-guard)) and `metrics` (off, see
+  [Metrics](#metrics)).
 
 To make a gateway key and the hash for the config:
 
@@ -972,8 +974,8 @@ $ curl -s -i http://127.0.0.1:8787/v1/chat/completions \
     -H "x-agent-task: classify" \
     -d '{"model":"large","messages":[{"role":"user","content":"Label this ticket: printer on fire"}],"max_tokens":20}'
 HTTP/1.1 200 OK
-x-agent-gate-request-id: req-43e3c7c2
-x-agent-gate-trace-id: dcfc88e3a89e0d989577c068734ee920
+x-agent-gate-request-id: req-2d45a2b3
+x-agent-gate-trace-id: 35aac179a6f00f79d746d0d5f49a7d26
 content-type: application/json
 content-length: 286
 x-agent-gate-route: classify-is-cheap
@@ -989,7 +991,7 @@ tokens at $0.15 and 9 output tokens at $0.60 per million, from the upstream's ow
 gateway's log has one line per call:
 
 ```
-[agent-gate] 200 req-43e3c7c2 key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 261ms
+[agent-gate] 200 req-2d45a2b3 key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 30ms
 ```
 
 ### Routing
@@ -1060,7 +1062,7 @@ though the key has spent almost nothing (headers shortened):
 
 ```
 HTTP/1.1 429 Too Many Requests
-retry-after: 74404
+retry-after: 71253
 
 {"error":{"message":"agent-gate: this call could cost up to $0.015015, and key \"demo-agent\" has $0.00977395 left of its daily budget of $0.01 ($0.00022605 spent, $0 held by calls in flight). Try again later, or with a lower max_tokens.","type":"insufficient_quota","param":null,"code":"budget_exceeded","cap":"daily"}}
 ```
@@ -1165,10 +1167,21 @@ x-agent-gate-redacted: api-key-assignment
 The upstream received `Is this config line right? api_key = "[REDACTED:api-key-assignment]"`.
 
 The guard scans message `content` (a string, or the `text` of text parts) and the `arguments` of
-assistant tool calls. It does not scan image, audio or file parts, tool definitions, other request
-fields, or responses. A rule is `{ "id", "regex", "flags", "action", "description" }`; `flags` may
-use `i`, `m`, `s` and `u`, as in the MCP policy, and a regex that matches empty text is refused at
-startup.
+assistant tool calls. It does not scan image, audio or file parts, tool definitions or other request
+fields. A rule is `{ "id", "regex", "flags", "action", "description" }`; `flags` may use `i`, `m`,
+`s` and `u`, as in the MCP policy, and a regex that matches empty text is refused at startup.
+
+**The answer goes through the same rules.** A model can write a secret it was never sent in the
+text the guard read: one it read off an image or a file part, one it repeats from earlier in a long
+context, or one it makes up in a known shape. So after a call is settled, the message of every
+choice in the answer (its `content` and the `arguments` of its tool calls) is scanned like a
+request. A block rule withholds the answer: the client gets 502 `response_blocked` with the rule's
+name and never the text, and the call stays booked, because the provider was paid. A redact rule
+edits the answer, and `x-agent-gate-response-redacted` names the rules. The usage line says which
+side a block was on (`"side": "prompt"` or `"response"`) and lists redactions in the answer as
+`responseRedacted`. `"scanResponses": false` turns this off; the cost of leaving it on is that a
+model that writes an example key in a known shape gets it refused or edited, exactly as a prompt
+with that key would be. `test/llm/response-guard.test.ts` checks every block rule on both sides.
 
 ### Usage log
 
@@ -1176,12 +1189,12 @@ Every authenticated call appends one JSON line to `<stateDir>/usage.jsonl` (mode
 the lines from the run above:
 
 ```json
-{"ts":"2026-10-31T03:19:56.527Z","id":"req-43e3c7c2","key":"demo-agent","task":"classify","route":"classify-is-cheap","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":23,"outputTokens":9,"costUsd":0.00000885,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":261,"traceId":"dcfc88e3a89e0d989577c068734ee920","spanId":"d5636fdb34257c2b"}
-{"ts":"2026-10-31T03:19:56.602Z","id":"req-cd440393","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":200,"inputTokens":24,"outputTokens":9,"costUsd":0.000207,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":55,"traceId":"cbba63d73999a99742875feed164bf8a","spanId":"fd6cedee73ee35ad"}
-{"ts":"2026-10-31T03:19:56.615Z","id":"req-6f1aa09a","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":400,"error":"secret_detected","rule":"private-key","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":2,"traceId":"e128a0a9e348b42bb716cae2acfe1623","spanId":"d8dcc869f28c5d03"}
-{"ts":"2026-10-31T03:19:56.678Z","id":"req-b80e1819","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":32,"outputTokens":9,"costUsd":0.0000102,"usage":"upstream","attempts":1,"fallback":false,"redacted":["api-key-assignment"],"latencyMs":53,"traceId":"ca1dc16c90337805192daf02cc821766","spanId":"79be2ac851145ea4"}
-{"ts":"2026-10-31T03:19:56.702Z","id":"req-a3cc8182","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":429,"error":"budget_exceeded","rule":"daily","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":17,"traceId":"ca7fd7bc30c61e3c1db715a2418d7966","spanId":"9c6c527825928c06"}
-{"ts":"2026-10-31T03:19:56.712Z","id":"req-112b11f6","key":"demo-agent","status":400,"error":"stream_not_supported","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":2,"traceId":"b50db9a734a48f94e0ee6495b961c630","spanId":"db443832b00a5865"}
+{"ts":"2026-10-31T04:12:27.886Z","id":"req-2d45a2b3","key":"demo-agent","task":"classify","route":"classify-is-cheap","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":23,"outputTokens":9,"costUsd":0.00000885,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":30,"traceId":"35aac179a6f00f79d746d0d5f49a7d26","spanId":"f1062de8f96d8ecf"}
+{"ts":"2026-10-31T04:12:27.900Z","id":"req-0b25f5a2","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":200,"inputTokens":24,"outputTokens":9,"costUsd":0.000207,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":13,"traceId":"516b31cda97e0fad26e91a682a10de97","spanId":"859ae43a69765dfd"}
+{"ts":"2026-10-31T04:12:27.901Z","id":"req-11796913","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":400,"error":"secret_detected","rule":"private-key","side":"prompt","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":0,"traceId":"87dfb18421a8d40424f5691bc640f647","spanId":"5f6fecef640c00e2"}
+{"ts":"2026-10-31T04:12:27.913Z","id":"req-6e4fef5a","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":32,"outputTokens":9,"costUsd":0.0000102,"usage":"upstream","attempts":1,"fallback":false,"redacted":["api-key-assignment"],"latencyMs":11,"traceId":"9cf2901e1d1fd6f7edbabe06b9c7bea7","spanId":"aaa511ee0c0540ab"}
+{"ts":"2026-10-31T04:12:27.918Z","id":"req-05212835","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":429,"error":"budget_exceeded","rule":"daily","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":5,"traceId":"c36756fbda3f07fb2791108c04c655a6","spanId":"a64756d9bb24cca5"}
+{"ts":"2026-10-31T04:12:27.918Z","id":"req-025dd171","key":"demo-agent","status":400,"error":"stream_not_supported","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":0,"traceId":"c13a4d7e144a10cd7d67a456d53e27f3","spanId":"4515ac717591144d"}
 ```
 
 There is no prompt or completion text in it, on purpose. Prompts carry whatever the agent read or
@@ -1242,7 +1255,7 @@ It is not served unless the config says who may read it, because it names every 
   sidecar in the same Cloud Run instance, which cannot send a key
   ([deploy/README.md](deploy/README.md#metrics)).
 
-A scrape after a run of the steps above, with the second form added to the example config:
+A scrape at the end of the run above, which had the second form added to its config:
 
 ```
 $ curl -s http://127.0.0.1:9464/metrics
@@ -1263,18 +1276,18 @@ agent_gate_llm_tokens_total{direction="output"} 27
 agent_gate_llm_cost_usd_total 0.00022605
 # HELP agent_gate_llm_request_duration_seconds Time from receiving a request to answering it.
 # TYPE agent_gate_llm_request_duration_seconds histogram
-agent_gate_llm_request_duration_seconds_bucket{le="0.05"} 3
-agent_gate_llm_request_duration_seconds_bucket{le="0.1"} 4
-agent_gate_llm_request_duration_seconds_bucket{le="0.25"} 5
-agent_gate_llm_request_duration_seconds_bucket{le="0.5"} 5
-agent_gate_llm_request_duration_seconds_bucket{le="1"} 5
+agent_gate_llm_request_duration_seconds_bucket{le="0.05"} 6
+agent_gate_llm_request_duration_seconds_bucket{le="0.1"} 6
+agent_gate_llm_request_duration_seconds_bucket{le="0.25"} 6
+agent_gate_llm_request_duration_seconds_bucket{le="0.5"} 6
+agent_gate_llm_request_duration_seconds_bucket{le="1"} 6
 agent_gate_llm_request_duration_seconds_bucket{le="2.5"} 6
 agent_gate_llm_request_duration_seconds_bucket{le="5"} 6
 agent_gate_llm_request_duration_seconds_bucket{le="10"} 6
 agent_gate_llm_request_duration_seconds_bucket{le="30"} 6
 agent_gate_llm_request_duration_seconds_bucket{le="60"} 6
 agent_gate_llm_request_duration_seconds_bucket{le="+Inf"} 6
-agent_gate_llm_request_duration_seconds_sum 1.796
+agent_gate_llm_request_duration_seconds_sum 0.059
 agent_gate_llm_request_duration_seconds_count 6
 # HELP agent_gate_llm_budget_remaining_usd What a key may still spend: its cap minus settled spend minus what calls in flight hold.
 # TYPE agent_gate_llm_budget_remaining_usd gauge
@@ -1314,9 +1327,9 @@ provider key appears in any response, in the state files or in the gateway's log
 - Exact token counting. Before a call, input tokens are characters / 4, and image or audio parts
   count for nothing; after it, the upstream's own `usage` is booked. The ADR says what that means
   for the caps.
-- Responses are not scanned; the leak guard looks at requests only. It is a list of regexes, so a
-  secret in a format it does not know, split across messages, or encoded (base64, for example)
-  gets through.
+- Secrets the leak guard does not know. It is a list of regexes, on the request and the answer, so a
+  secret in a format it does not know, split across messages or chunks of an answer, or encoded
+  (base64, for example) gets through.
 - Token rate limits, and budgets per route or per model. Budgets, calls per minute and run caps are
   per key.
 - Prices are config values. Keep them in step with the providers' price lists.
@@ -1428,7 +1441,7 @@ obeys, and the gateway blocks the call before it reaches the server. Another den
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 218 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 232 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file, a settle that comes
 twice or after its reservation expired, calls per minute and run caps); a leak-guard table
@@ -1448,7 +1461,9 @@ response or a log. A metrics suite checks the Prometheus text, who may read `/me
 key on the gateway's port, or a loopback listener with none) and the config rules behind that. A
 stop-rule suite runs loops against a live gateway: cut at the sixth call of a minute, a run cut at its
 third call and before it passes its dollars, each cut in the usage log; the end-to-end run also
-checks that `usage --verify` finds the usage log and the ledger in agreement. Six more check the
+checks that `usage --verify` finds the usage log and the ledger in agreement. A response-guard
+suite runs every block rule on a request and on an answer, and a live gateway against providers
+whose answers carry a secret (withheld, booked) or a key assignment (redacted). Six more check the
 gateway configs under `deploy/`: they load, they use the container's paths, the deployable one
 refuses the demo key, the Kubernetes copy of the leak-guard policy matches the example, and Cloud
 Run's request timeout is longer than the gateway's longest call. Every
@@ -1474,7 +1489,7 @@ the decision, with no model judging and no tolerance band. And it is evaluated o
 there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 292/292 MCP gateway tests, 218/218 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 292/292 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
 the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).

@@ -20,6 +20,10 @@ export interface FakeUpstreamOptions {
   mode: "ok" | "fail" | "limited";
   /** Mode "limited": the Retry-After header, in seconds (default "1"). */
   retryAfter?: string;
+  /** Mode "ok": answer with this text instead of "fake answer <n> from <model>". */
+  content?: string;
+  /** Mode "ok": also answer with one tool call whose arguments are this string. */
+  toolCallArguments?: string;
   /** Accepted bearer keys; any other key gets a 401. Left out or empty: any non-empty key. */
   keys?: string[];
   /** The usage block to report. Left out: derived from the request (characters / 4 + 7, and 9). */
@@ -87,7 +91,17 @@ export async function startFakeUpstream(options: FakeUpstreamOptions): Promise<F
         object: "chat.completion",
         created: 1760400000,
         model,
-        choices: [{ index: 0, message: { role: "assistant", content: `fake answer ${served} from ${model}` }, finish_reason: "stop" }],
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: options.content ?? `fake answer ${served} from ${model}`,
+              ...(options.toolCallArguments === undefined ? {} : { tool_calls: [{ id: "call_1", type: "function", function: { name: "save_note", arguments: options.toolCallArguments } }] }),
+            },
+            finish_reason: options.toolCallArguments === undefined ? "stop" : "tool_calls",
+          },
+        ],
         usage: { ...usage, total_tokens: usage.prompt_tokens + usage.completion_tokens },
       });
     });

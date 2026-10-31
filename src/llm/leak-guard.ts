@@ -11,7 +11,8 @@
 //
 // Scanned: message "content" (a string, or the "text" of text parts) and the "arguments" string of
 // assistant tool calls. Not scanned: images, audio and file parts, tool definitions, and any other
-// request field.
+// request field. guardResponse() runs the same rules over an answer: the message of every choice,
+// read the same way, so one rule catches a secret on either side.
 // ponytail: the rules run on JavaScript's backtracking regex engine. The request body size limit
 // (maxBodyBytes) bounds the work, but a badly written rule can still be slow; keep rules anchored
 // on a literal prefix, as the shipped ones are.
@@ -77,6 +78,24 @@ export function guardMessages(policy: LeakPolicy, messages: readonly unknown[]):
     return t;
   });
   return { action: "pass", messages: result, redactions: [...counts].map(([rule, count]) => ({ rule, count })) };
+}
+
+export type ResponseGuardResult =
+  | { action: "block"; rule: string }
+  | { action: "pass"; body: Record<string, unknown>; redactions: Array<{ rule: string; count: number }> };
+
+/**
+ * The leak guard on an OpenAI-style answer: `choices[].message`, scanned like a request's messages.
+ * With redactions, `body` is a copy with those messages replaced; otherwise it is `answer` itself.
+ */
+export function guardResponse(policy: LeakPolicy, answer: Record<string, unknown>): ResponseGuardResult {
+  const choices = Array.isArray(answer.choices) ? answer.choices : [];
+  const messages = choices.map((choice) => (isRecord(choice) ? choice.message : undefined));
+  const guarded = guardMessages(policy, messages);
+  if (guarded.action === "block") return guarded;
+  if (guarded.redactions.length === 0) return { action: "pass", body: answer, redactions: [] };
+  const redacted = choices.map((choice, i) => (isRecord(choice) && guarded.messages[i] !== messages[i] ? { ...choice, message: guarded.messages[i] } : choice));
+  return { action: "pass", body: { ...answer, choices: redacted }, redactions: guarded.redactions };
 }
 
 /**

@@ -343,7 +343,7 @@ describe("LLM gateway end to end", () => {
     assert.equal(lines.length, authenticated);
     assert.equal(content.includes("prompt-marker-"), false, "a prompt reached the usage log");
     assert.equal(content.includes("fake answer"), false, "a completion reached the usage log");
-    const allowed = ["ts", "id", "key", "task", "route", "upstream", "model", "status", "error", "rule", "inputTokens", "outputTokens", "costUsd", "usage", "attempts", "fallback", "upstream429", "settle", "redacted", "latencyMs", "traceId", "spanId", "parentSpanId", "session", "runId", "contextDropped"];
+    const allowed = ["ts", "id", "key", "task", "route", "upstream", "model", "status", "error", "rule", "inputTokens", "outputTokens", "costUsd", "usage", "attempts", "fallback", "upstream429", "settle", "redacted", "responseRedacted", "side", "latencyMs", "traceId", "spanId", "parentSpanId", "session", "runId", "contextDropped"];
     for (const line of lines) {
       assert.deepEqual(Object.keys(line).filter((k) => !allowed.includes(k)), [], JSON.stringify(line));
       assert.match(line.traceId, /^[0-9a-f]{32}$/);
@@ -361,8 +361,11 @@ describe("LLM gateway end to end", () => {
     const refused = lines.find((l) => l.error === "budget_exceeded");
     assert.deepEqual(refused && [refused.key, refused.error, refused.rule, refused.costUsd], ["team-b", "budget_exceeded", "daily", 0]);
     assert.deepEqual(
-      lines.filter((l) => l.error === "secret_detected").map((l) => l.rule),
-      ["aws-access-key-id", "private-key"],
+      lines.filter((l) => l.error === "secret_detected").map((l) => [l.rule, l.side]),
+      [
+        ["aws-access-key-id", "prompt"],
+        ["private-key", "prompt"],
+      ],
     );
     assert.deepEqual(lines.find((l) => l.redacted)?.redacted, ["api-key-assignment"]);
     const failed = lines.find((l) => l.route === "flaky-only");

@@ -42,8 +42,12 @@ export interface UsageEntry {
   fallback?: boolean;
   /** 429 answers from the upstreams on the way (rate limits or quota), when there were any. */
   upstream429?: number;
-  /** Leak-guard rules that redacted text in this call. */
+  /** Leak-guard rules that redacted text in this call's messages. */
   redacted?: string[];
+  /** Leak-guard rules that redacted text in the answer. */
+  responseRedacted?: string[];
+  /** For a leak-guard block: which side the secret was on, the request ("prompt") or the answer ("response"). */
+  side?: "prompt" | "response";
   /** How the ledger booked the cost when it was not the usual way: "orphan" (the reservation had expired) or "duplicate". */
   settle?: "orphan" | "duplicate";
   latencyMs: number;

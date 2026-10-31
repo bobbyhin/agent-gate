@@ -25,9 +25,9 @@ export interface UsageGroup {
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
-  /** Calls the leak guard refused. */
+  /** Calls the leak guard refused, on the request or on the answer. */
   leakBlocked: number;
-  /** Calls in which the leak guard redacted something. */
+  /** Calls in which the leak guard redacted something, in the request or the answer. */
   leakRedacted: number;
 }
 
@@ -69,8 +69,8 @@ export function groupUsage(lines: ReadonlyArray<Record<string, unknown>>, by: Gr
     g.inputTokens += number(line.inputTokens);
     g.outputTokens += number(line.outputTokens);
     g.costUsd = roundUsd(g.costUsd + number(line.costUsd));
-    if (line.error === "secret_detected") g.leakBlocked++;
-    if (Array.isArray(line.redacted) && line.redacted.length > 0) g.leakRedacted++;
+    if (line.error === "secret_detected" || line.error === "response_blocked") g.leakBlocked++;
+    if ((Array.isArray(line.redacted) && line.redacted.length > 0) || (Array.isArray(line.responseRedacted) && line.responseRedacted.length > 0)) g.leakRedacted++;
   }
   return [...groups.values()].sort((a, b) => b.costUsd - a.costUsd || a.group.localeCompare(b.group));
 }

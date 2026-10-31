@@ -14,7 +14,8 @@
 //   6. call the upstream; retries, then the fallback       502 or 504 if every attempt fails,
 //                                                          429 if the upstreams are rate limiting
 //   7. settle the real cost from "usage" (or release it)
-//   8. write one usage line, answer
+//   8. leak guard on the answer (scanResponses)             502 if a block rule matches; it was paid for
+//   9. write one usage line, answer
 // Nothing is sent upstream until steps 1 to 5 have passed. Upstream API keys are read from the
 // environment once, at startup; each is sent only to its own upstream and is never logged or
 // returned, and client headers (including the client's Authorization) are never forwarded.
@@ -34,7 +35,7 @@ import { contextFromHeaders, parseTraceparent } from "../gateway/context.js";
 import { ConfigError } from "../gateway/validate.js";
 import { costUsd, estimateInputTokens, formatUsd, Ledger, roundUsd, type ReserveOutcome, type SettleOutcome } from "./budget.js";
 import { hashKey, type GatewayKey, type LlmConfig } from "./config.js";
-import { guardMessages, messageTexts, type LeakPolicy } from "./leak-guard.js";
+import { guardMessages, guardResponse, messageTexts, type LeakPolicy } from "./leak-guard.js";
 import { CONTENT_TYPE, Metrics } from "./metrics.js";
 import { route } from "./routing.js";
 import { callUpstreams } from "./upstream.js";
@@ -58,7 +59,7 @@ export interface LlmGateway {
 }
 
 type ExtraHeaders = Record<string, string | number>;
-type Outcome = Partial<Pick<UsageEntry, "error" | "rule" | "inputTokens" | "outputTokens" | "costUsd" | "usage" | "attempts" | "fallback" | "upstream429" | "settle">>;
+type Outcome = Partial<Pick<UsageEntry, "error" | "rule" | "side" | "inputTokens" | "outputTokens" | "costUsd" | "usage" | "attempts" | "fallback" | "upstream429" | "settle" | "responseRedacted">>;
 
 /** The x-agent-task header is kept in the usage line on one line, at most this long. */
 const TASK_MAX_CHARS = 100;
@@ -164,6 +165,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         status,
         ...(outcome.error === undefined ? {} : { error: outcome.error }),
         ...(outcome.rule === undefined ? {} : { rule: outcome.rule }),
+        ...(outcome.side === undefined ? {} : { side: outcome.side }),
         inputTokens: outcome.inputTokens ?? 0,
         outputTokens: outcome.outputTokens ?? 0,
         costUsd: outcome.costUsd ?? 0,
@@ -172,6 +174,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         ...(outcome.upstream429 ? { upstream429: outcome.upstream429 } : {}),
         ...(outcome.settle === undefined ? {} : { settle: outcome.settle }),
         ...(where.redacted === undefined ? {} : { redacted: where.redacted }),
+        ...(outcome.responseRedacted === undefined ? {} : { responseRedacted: outcome.responseRedacted }),
         latencyMs: Math.round(performance.now() - started),
         traceId,
         spanId,
@@ -253,7 +256,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
           `agent-gate: the messages contain text that looks like a secret (rule ${guarded.rule}), so the request was not sent. Remove it and try again; if it was a real secret, rotate it.`,
           { param: "messages", rule: guarded.rule },
         ),
-        { error: "secret_detected", rule: guarded.rule },
+        { error: "secret_detected", rule: guarded.rule, side: "prompt" },
       );
     }
     if (guarded.redactions.length > 0) where.redacted = guarded.redactions.map((r) => r.rule);
@@ -362,14 +365,37 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         ...via,
         ...(settled === "booked" ? {} : { settle: settled }),
       };
-      if (typeof json !== "object" || json === null) {
+      if (typeof json !== "object" || json === null || Array.isArray(json)) {
         return finish(502, apiError("bad_upstream_response", "agent-gate: the upstream's answer was not JSON", { type: "api_error" }), { ...spent, error: "bad_upstream_response" });
       }
-      return finish(outcome.status, scrub(outcome.body, apiKeys), spent, {
+
+      // 8. The answer goes through the same leak guard. Its text is never echoed, and it is booked either way.
+      let answer = outcome.body;
+      let responseRedacted: string[] | undefined;
+      if (config.scanResponses) {
+        const scanned = guardResponse(policy, json as Record<string, unknown>);
+        if (scanned.action === "block") {
+          return finish(
+            502,
+            apiError(
+              "response_blocked",
+              `agent-gate: the model's answer contains text that looks like a secret (rule ${scanned.rule}), so it was not passed on. The call was paid for; if the secret is real, rotate it.`,
+              { type: "api_error", rule: scanned.rule },
+            ),
+            { ...spent, error: "response_blocked", rule: scanned.rule, side: "response" },
+          );
+        }
+        if (scanned.redactions.length > 0) {
+          responseRedacted = scanned.redactions.map((r) => r.rule);
+          answer = JSON.stringify(scanned.body);
+        }
+      }
+      return finish(outcome.status, scrub(answer, apiKeys), { ...spent, ...(responseRedacted ? { responseRedacted } : {}) }, {
         "x-agent-gate-route": chosen.rule,
         "x-agent-gate-upstream": outcome.target.upstream.name,
         "x-agent-gate-cost-usd": formatUsd(cost),
         ...(where.redacted ? { "x-agent-gate-redacted": where.redacted.join(",") } : {}),
+        ...(responseRedacted ? { "x-agent-gate-response-redacted": responseRedacted.join(",") } : {}),
       });
     } finally {
       if (open) {
