@@ -227,6 +227,20 @@ one instance" can be exceeded briefly, Cloud Storage FUSE has no file locking, e
 costs several object operations, and the usage log is uploaded again on each append while it is
 small. ADR 0003 has the details and the way out.
 
+## Shortcuts that labs take, and what this setup does instead
+
+Codelabs and workshop scripts get a service running in minutes by skipping things. Each row is one
+such shortcut and the choice made here, with the line that shows it. Paths are from the repository
+root. None of it has been applied to a real project yet (see the status at the top).
+
+| Lab shortcut | What it risks | What this setup does | Where |
+| --- | --- | --- | --- |
+| `gcloud run deploy --allow-unauthenticated` | Anyone on the internet can call the service, and spend the provider budget behind it. | `roles/run.invoker` only for the principals in `invoker_members`, which is empty by default: nobody can call the service until you name someone. A caller also needs a gateway key. | `deploy/terraform/variables.tf:34-38`, `deploy/terraform/cloud_run.tf:156-161` |
+| The default compute service account, which often holds broad project roles | A bug, or a tool call steered by a prompt injection, can reach the whole project. | A service account of its own with no project-level role: `secretAccessor` on each of its own secrets and `objectUser` on its own bucket, nothing else. | `deploy/terraform/main.tf:69-74`, `:93`, `:129`, `:148` |
+| Keys and passwords in `--set-env-vars`, or in a text file next to the code | The value shows in the service's configuration, the shell history, the Terraform state or the image. | The provider keys live in Secret Manager and reach the service as environment variables by reference (`secret_key_ref`). Their values are added with `gcloud secrets versions add`, out of band; Terraform creates the secrets, never their values. | `deploy/terraform/cloud_run.tf:48-60`, step 2 above |
+| A check that fails open (`failOpen`, or a callback that lets the call through when it breaks) | When the check is down, so is the guard, and nobody notices. | Fails closed. A call the MCP gateway could not check or record is not run. A damaged approvals file or budget ledger is an error, never an empty one. If the shell analyzer throws, the old rules decide and anything they do not block goes to a human. A missing provider key stops the LLM gateway at startup. | `src/gateway/server.ts:80-81`, `src/gateway/approvals.ts:369-371`, `src/llm/budget.ts:182-184`, `bin/claude-pretooluse-hook.js:12`, `src/llm/server.ts:60-69` |
+| A self-signed certificate and `curl -k` | Clients learn to skip certificate checks. | Cloud Run terminates TLS with a Google-managed certificate. The compose demo listens on 127.0.0.1 only; on Kubernetes the Service is reachable inside the cluster only. | `docker-compose.yml:28-29`, "What is not covered" below |
+
 ## What was checked
 
 On 2026-10-14, on macOS (Apple silicon), with no cloud account and no credentials:
