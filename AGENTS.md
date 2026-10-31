@@ -10,6 +10,7 @@ agent-gate guards an AI agent's actions: a shell command guard, an MCP gateway a
 - `src/command-guard.js`: the shell analyzer, plain CommonJS with no dependencies. `bin/`: the Claude Code hook and the CLI.
 - `src/gateway/`: the MCP gateway (policy, approvals, audit). `src/llm/`: the LLM gateway (routing, budgets, leak guard).
 - `test/cases.json` (239 shell cases) and `test/cases-exfil.json` (suite G) run in `test/command-guard.test.js`; `test/gateway/` and `test/llm/` hold the TypeScript suites.
+- Tracing a decision (why a command, tool call or model request got pass, ask or block): `docs/exploring-the-codebase.md` reproduces each guard's decision in one line and names the code and tests that pin it.
 
 ## Rules
 - `test/cases.json` stays at exactly 239 cases, a number quoted outside this repository. New shell cases go in a suite file of their own (see `docs/red-team.md`).

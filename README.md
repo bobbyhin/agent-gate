@@ -1259,6 +1259,7 @@ test/no-network-preload.js                    makes network modules throw, for t
 test/SANITIZED.md                             what was changed in the cases before publication
 test/HELDOUT.md                               where the held-out cases come from, and their score
 docs/red-team.md                              the case categories, with counts
+docs/exploring-the-codebase.md                trace a decision: one line to reproduce it per guard, and its code and tests
 docs/adr/0001-non-blocking-approvals.md       why "ask" answers with an error instead of waiting
 docs/adr/0002-reserve-then-settle-budgets.md  why budgets reserve an estimate and settle after
 docs/adr/0003-single-writer-state.md          why the gateway runs as one replica, and the way to more
