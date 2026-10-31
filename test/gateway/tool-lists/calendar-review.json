@@ -1,0 +1,26 @@
+{
+  "about": "Names for event and invitation actions that a review of red line 2 wrote to get round its phrases, after the rule was written, plus reads with the same nouns. The phrases added after that review were chosen from these names, so this list shows what the review fixed, not how the rule does on names it has not seen (google-workspace-calendar.json is that).",
+  "source": "a code review of this repository, 31 Oct 2026; the names are the reviewer's",
+  "server": "calendar",
+  "tools": [
+    { "name": "accept_invitation", "label": "ask", "why": "answers an invitation; the organizer sees the answer", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "decline_invitation", "label": "ask", "why": "answers an invitation; the organizer sees the answer", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "cancel_event", "label": "ask", "why": "cancels an event; the attendees are told", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "cancel_meeting", "label": "ask", "why": "cancels a meeting; the attendees are told", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "create_appointment", "label": "ask", "why": "books time with someone else", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "add_attendee", "label": "ask", "why": "puts an event in another person's calendar", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "book_meeting_room", "label": "ask", "why": "books a room other people share", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "new_event", "label": "ask", "why": "creates an event", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "create_calendar_entry", "label": "ask", "why": "creates an event", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "update_event_attendees", "label": "ask", "why": "changes who is invited", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "send_rsvp", "label": "ask", "why": "answers an invitation", "policy": "ask", "rule": "red-line-2-public" },
+    { "name": "set_reminder_for_team", "label": "ask", "why": "notifies other people; nothing in its words says so, so the example lets it run: a miss", "policy": "allow", "rule": "default" },
+    { "name": "list_bookings", "label": "allow", "why": "reads", "policy": "allow", "rule": "default" },
+    { "name": "get_booking", "label": "allow", "why": "reads; booking alone is not a phrase", "policy": "allow", "rule": "default" },
+    { "name": "list_attendees", "label": "allow", "why": "reads", "policy": "allow", "rule": "default" },
+    { "name": "get_appointment", "label": "allow", "why": "reads; appointment alone is not a phrase", "policy": "allow", "rule": "default" },
+    { "name": "find_free_slots", "label": "allow", "why": "reads", "policy": "allow", "rule": "default" },
+    { "name": "get_meeting_room", "label": "allow", "why": "reads; book meeting needs the verb", "policy": "allow", "rule": "default" }
+  ],
+  "summary": { "tools": 18, "agree": 17, "stricter": 0, "looser": 1 }
+}

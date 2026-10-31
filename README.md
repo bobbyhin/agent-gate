@@ -879,7 +879,7 @@ first match alone gives.
 | `protect-gateway-state` | any tool whose `path` argument points into `.agent-gate` | block |
 | `shell-guard` | a shell tool (`run_command`, `exec`, `bash` and others): its `command` goes through the shell guard | the guard's decision |
 | `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order; and cloud resources that start a bill: provision, create instance, create cluster, create corpus, create rag corpus, create bucket, enable api, enable service, scale up, create key | ask; a request lives 15 minutes |
-| `red-line-2-public` | post, publish, send, tweet, retweet, reply, comment, email, share; and what puts an event or an invitation in front of other people: create event, create calendar event, add event, add calendar event, update event, update calendar, move event, create meeting, update meeting, schedule, reschedule, invite, rsvp, respond to event | ask |
+| `red-line-2-public` | post, publish, send, tweet, retweet, reply, comment, email, share; and what puts an event or an invitation in front of other people: create event, create calendar event, add event, add calendar event, update event, update calendar, move event, create meeting, update meeting, schedule, reschedule, invite, rsvp, respond to event, cancel event, cancel meeting, cancel appointment, cancel booking, accept invitation, accept invite, decline invitation, decline invite, create appointment, book appointment, book meeting, book room, create booking, add attendee, add attendees, new event, new meeting, create calendar entry, add calendar entry | ask |
 | `red-line-3-ship` | push, merge, deploy, create pull request, create pr, create release | ask; a request lives 30 minutes |
 | `red-line-4-delete` | delete, remove, drop, destroy, overwrite, purge, erase, wipe, truncate | ask |
 | `red-line-4-overwrite` | write, edit, move, rename, replace, patch, update file, put object | ask |
@@ -898,7 +898,28 @@ Notes on the newer rules:
   or answers an event or an invitation. `test/gateway/tool-lists/instavibe.json` lists 23 such tools,
   each labelled with the decision it should get: before, 9 of the 12 that should ask ran unattended;
   now all 12 ask, reads such as `list_events`, `get_calendar` and `get_invitations` stay allowed, and
-  two reads ask because of one word in their names, `get_post` and `get_schedule`.
+  two reads ask because of one word in their names, `get_post` and `get_schedule`. Those names were
+  written together with the phrases, so they show that the phrases work on names like them, not on
+  names nobody planned for. A review then wrote 12 other names for the same actions, and 10 of them ran
+  unattended (`accept_invitation`, `cancel_event`, `book_meeting_room`, `new_event` and more). The
+  phrases now also name cancelling, accepting, declining, booking, appointments and attendees:
+  `test/gateway/tool-lists/calendar-review.json` has those 12, of which 11 ask now; `set_reminder_for_team`
+  still runs, because nothing in its words says that it reaches other people. On names that neither
+  the phrases nor the review were written from, the calendar tools of a real server
+  ([google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp), recorded at one
+  commit in `test/gateway/tool-lists/google-workspace-calendar.json`), the phrases catch none of its
+  3 calendar writes: it changes a calendar through one tool per kind, `manage_event` with an `action`
+  of `create`, `update`, `delete` or `rsvp`, so the name says nothing. A rule on the argument does; this
+  one lets a `list` through and asks about any other action, including one it does not know:
+
+  ```json
+  [
+    { "id": "calendar-list", "server": "calendar", "tool": "manage_*", "args": { "action": { "regex": "^\\s*list\\s*$", "flags": "i" } },
+      "decision": "allow", "why": "Listing out-of-office or focus-time blocks only reads." },
+    { "id": "calendar-manage", "server": "calendar", "tool": "manage_*", "decision": "ask",
+      "why": "Red line 2: any other action creates, changes, deletes or answers an event that other people see." }
+  ]
+  ```
 - **Writes, edits and moves (red line 4).** A delete has other ways: empty the file with
   `write_file`, cut its text out with `edit_file`, move it to `/dev/null` with `move_file`.
   `test/gateway/workarounds.json` tries 20 of them after `delete_file` on one file was asked about or
@@ -2409,12 +2430,12 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 491 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 495 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
 lists with each tool labelled with the decision it should get (`test/gateway/tool-lists/`: a social
-app's tools, and the 48 tools of a real Gitea MCP server, recorded), and the
+app's tools, names a review wrote to get round red line 2, the calendar tools of a real server held out from it, and the 48 tools of a real Gitea MCP server, recorded), and the
 README's table of example rules checked against `policy.example.json`; a red team of 20 ways to get a
 denied delete done another way (other tools, shell commands, the path written another way); `policy
 suggest` (reads by name, an OpenAPI document, the draft it prints, a server that cannot start, tool names that would be patterns); ten
@@ -2524,7 +2545,7 @@ an evaluation set of whole runs, each replayed and checked step by step. It chec
 not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 491/491 MCP gateway tests, 323/323 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 495/495 MCP gateway tests, 323/323 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for each of the two demo pages, 2/2 for the load
 test), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see

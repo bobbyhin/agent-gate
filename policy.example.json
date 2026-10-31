@@ -35,7 +35,10 @@
       "toolWords": [
         "post", "publish", "send", "tweet", "retweet", "reply", "comment", "email", "share",
         "create event", "create calendar event", "add event", "add calendar event", "update event", "update calendar", "move event",
-        "create meeting", "update meeting", "schedule", "reschedule", "invite", "rsvp", "respond to event"
+        "create meeting", "update meeting", "schedule", "reschedule", "invite", "rsvp", "respond to event",
+        "cancel event", "cancel meeting", "cancel appointment", "cancel booking", "accept invitation", "accept invite", "decline invitation",
+        "decline invite", "create appointment", "book appointment", "book meeting", "book room", "create booking", "add attendee", "add attendees",
+        "new event", "new meeting", "create calendar entry", "add calendar entry"
       ],
       "decision": "ask",
       "why": "Red line 2: this tool looks like it posts or sends something from a real account, or puts an event or an invitation in front of other people."

@@ -94,4 +94,47 @@ describe("tool lists through the example policy", () => {
     assert.deepEqual([shouldAsk.length, ranUnattended.length], [12, 9], ranUnattended.join(", "));
     assert.ok(ranUnattended.includes("create_event") && ranUnattended.includes("schedule_meeting") && ranUnattended.includes("update_calendar"));
   });
+
+  it("calendar-review.json: before the phrases the review led to, 10 of its 12 tools that should ask ran unattended; now 1 does", () => {
+    // The phrases added after the review; without them, the rule is as the review found it.
+    const added = [
+      "cancel event", "cancel meeting", "cancel appointment", "cancel booking", "accept invitation", "accept invite", "decline invitation",
+      "decline invite", "create appointment", "book appointment", "book meeting", "book room", "create booking", "add attendee", "add attendees",
+      "new event", "new meeting", "create calendar entry", "add calendar entry",
+    ];
+    const raw = JSON.parse(fs.readFileSync(path.join(ROOT, "policy.example.json"), "utf8")) as { rules: Array<{ id: string; toolWords?: string[] }> };
+    const rule = raw.rules.find((r) => r.id === "red-line-2-public") as { toolWords: string[] };
+    assert.ok(added.every((phrase) => rule.toolWords.includes(phrase)), "every added phrase is in the rule");
+    rule.toolWords = rule.toolWords.filter((phrase) => !added.includes(phrase));
+    const before = parsePolicy(raw);
+    const list = JSON.parse(fs.readFileSync(path.join(LISTS, "calendar-review.json"), "utf8")) as ToolList;
+    const shouldAsk = list.tools.filter((t) => t.label === "ask");
+    const unattended = (policy: typeof before) => shouldAsk.filter((t) => evaluate(policy, { server: list.server, tool: t.name, args: {} }).decision === "allow").map((t) => t.name);
+    assert.deepEqual([shouldAsk.length, unattended(before).length], [12, 10], unattended(before).join(", "));
+    assert.deepEqual(unattended(POLICY), ["set_reminder_for_team"]);
+  });
+
+  it("google-workspace-calendar.json: names catch none of the 3 calendar writes; the README's two rules on the action argument ask about each one", () => {
+    const list = JSON.parse(fs.readFileSync(path.join(LISTS, "google-workspace-calendar.json"), "utf8")) as ToolList;
+    const writes = list.tools.filter((t) => t.label === "ask").map((t) => t.name);
+    assert.deepEqual(writes, ["manage_event", "manage_out_of_office", "manage_focus_time"]);
+    assert.ok(writes.every((tool) => evaluate(POLICY, { server: list.server, tool, args: {} }).decision === "allow"), "the example policy lets each one run by its name");
+
+    const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+    const snippet = /```json\n *(\[\n *\{ "id": "calendar-list"[\s\S]*?\])\n *```/.exec(readme)?.[1];
+    assert.ok(snippet, "the README shows the two rules");
+    const raw = JSON.parse(fs.readFileSync(path.join(ROOT, "policy.example.json"), "utf8")) as { rules: unknown[] };
+    const withRules = parsePolicy({ ...raw, rules: [...(JSON.parse(snippet) as unknown[]), ...raw.rules] });
+    const decide = (tool: string, args: Record<string, unknown>) => {
+      const verdict = evaluate(withRules, { server: "calendar", tool, args });
+      return `${verdict.decision} ${verdict.rule}`;
+    };
+    // The server lowercases and trims the action, so the rule reads it the same way.
+    for (const action of ["create", "update", "delete", "rsvp", " RSVP ", "archive"]) assert.equal(decide("manage_event", { action }), "ask calendar-manage", action);
+    assert.equal(decide("manage_out_of_office", { action: "list" }), "allow calendar-list");
+    assert.equal(decide("manage_focus_time", { action: " List " }), "allow calendar-list");
+    assert.equal(decide("manage_focus_time", {}), "ask calendar-manage", "no action: asked");
+    assert.equal(decide("manage_focus_time", { action: "list; delete" }), "ask calendar-manage");
+    assert.equal(decide("get_events", {}), "allow default");
+  });
 });
