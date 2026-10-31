@@ -918,6 +918,31 @@ read would be allowed: the draft is where a human starts, not a finished policy.
 must be JSON (convert a YAML one first). A server that cannot be started or listed is named, and the
 command exits 1.
 
+**A real server with many tools.** The Gitea MCP server, gitea-mcp v1.12.0 (built with `go install`
+and started with no token and no Gitea instance: listing its tools needs neither), has 48 tools.
+`test/gateway/tool-lists/gitea-mcp.json` records them from that run, each labelled with the decision
+it should get from its name alone: the reads allow, every write asks. The test replays the recorded
+list through the example policy (it does not start the server, a Go binary):
+
+| Example policy | Tools | Agrees with the label | Asks about a read | Lets a write run unattended |
+| --- | --- | --- | --- | --- |
+| as shipped | 48 | 47 | 0 | 1, `create_organization` |
+| without `red-line-4-overwrite` | 48 | 29 | 0 | 19 |
+
+Neither word of `create_organization` is a red-line word; `"default": "ask"` or a rule of your own
+catches it. The bigger lesson is in the names: most writes are `<thing>_write` tools with a `method`
+argument, so one name covers `create`, `update`, `merge` and `delete`. The policy can ask about every
+`pull_request_write`, but only a rule on `method`, placed before the red lines, can give a merge the
+30-minute life of red line 3:
+
+```json
+{ "id": "gitea-merge", "server": "gitea", "tool": "pull_request_write", "args": { "method": ["merge", "close"] },
+  "decision": "ask", "ttlMinutes": 30, "why": "Red line 3: merging or closing a pull request." }
+```
+
+gitea-mcp can also hide its own tools (`-read-only`, `-tools`); `expose` does the same in the gateway
+for any server, and a call to a hidden tool is blocked and audited.
+
 Mistakes in the policy or the config stop the gateway at startup with the field named, for
 example `policy.rules[2].decision must be one of allow, warn, ask, block`. Unknown fields are
 errors too, so a typo cannot silently turn a rule off.
@@ -2022,11 +2047,12 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 404 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 406 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
-lists with each tool labelled with the decision it should get (`test/gateway/tool-lists/`), and the
+lists with each tool labelled with the decision it should get (`test/gateway/tool-lists/`: a social
+app's tools, and the 48 tools of a real Gitea MCP server, recorded), and the
 README's table of example rules checked against `policy.example.json`; a red team of 20 ways to get a
 denied delete done another way (other tools, shell commands, the path written another way); `policy
 suggest` (reads by name, an OpenAPI document, the draft it prints, a server that cannot start); which
@@ -2122,7 +2148,7 @@ audit log; the end-to-end test scores its own run that way. It checks which call
 the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 404/404 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 406/406 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).

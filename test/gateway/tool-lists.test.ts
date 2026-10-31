@@ -31,6 +31,8 @@ interface ToolList {
   server: string;
   tools: Tool[];
   summary: { tools: number; agree: number; stricter: number; looser: number };
+  /** The summary with these rules taken out of the example policy: what they changed. */
+  without?: { rules: string[]; summary: ToolList["summary"] };
 }
 
 const RANK: Readonly<Record<Decision, number>> = { allow: 0, warn: 1, ask: 2, block: 3 };
@@ -58,8 +60,27 @@ describe("tool lists through the example policy", () => {
         assert.deepEqual([verdict.decision, verdict.rule], [tool.policy, tool.rule], `${file}: ${tool.name}`);
       }
       assert.deepEqual(summarize(list.tools), list.summary);
+      if (list.without) {
+        const raw = JSON.parse(fs.readFileSync(path.join(ROOT, "policy.example.json"), "utf8")) as { rules: Array<{ id: string }> };
+        const removed = list.without.rules;
+        assert.ok(removed.every((id) => raw.rules.some((rule) => rule.id === id)), `${file}: the rules taken out exist`);
+        const smaller = parsePolicy({ ...raw, rules: raw.rules.filter((rule) => !removed.includes(rule.id)) });
+        const decided = list.tools.map((t) => ({ ...t, policy: evaluate(smaller, { server: list.server, tool: t.name, args: {} }).decision }));
+        assert.deepEqual(summarize(decided), list.without.summary, `${file}: without ${removed.join(", ")}`);
+      }
     });
   }
+
+  it("gitea-mcp.json: the README's rule on the method argument gives a merge red line 3's 30 minutes, and leaves other methods to the red lines", () => {
+    const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+    const snippet = /```json\n(\{ "id": "gitea-merge"[\s\S]*?)\n```/.exec(readme)?.[1];
+    assert.ok(snippet, "the README shows the rule");
+    const raw = JSON.parse(fs.readFileSync(path.join(ROOT, "policy.example.json"), "utf8")) as { rules: unknown[] };
+    const withRule = parsePolicy({ ...raw, rules: [JSON.parse(snippet), ...raw.rules] });
+    const merge = evaluate(withRule, { server: "gitea", tool: "pull_request_write", args: { method: "merge", index: 7 } });
+    assert.deepEqual([merge.decision, merge.rule, merge.ttlMs], ["ask", "gitea-merge", 30 * 60 * 1000]);
+    assert.equal(evaluate(withRule, { server: "gitea", tool: "pull_request_write", args: { method: "create" } }).rule, "red-line-4-overwrite");
+  });
 
   it("instavibe.json: before red line 2 named events and invitations, 9 of the 12 tools that should ask ran unattended", () => {
     // The rule's words before that change.
