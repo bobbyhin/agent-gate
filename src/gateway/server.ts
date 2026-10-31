@@ -38,7 +38,8 @@ import { AuditLog, hashJson } from "./audit.js";
 import type { GatewayConfig } from "./config.js";
 import { contextFromMeta, type CallContext } from "./context.js";
 import { bindFiles } from "./files.js";
-import { evaluate, type Policy, type ToolCall, type Verdict } from "./policy.js";
+import { evaluate, repeatLimitsFor, type Policy, type ToolCall, type Verdict } from "./policy.js";
+import { RepeatStore } from "./repeats.js";
 
 export const VERSION = "0.1.0";
 export const SEPARATOR = "__";
@@ -58,6 +59,7 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
   fs.mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
   const approvals = new ApprovalStore(config.stateDir, config.approvalTtlMs);
   const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"), config.auditArguments);
+  const repeats = policy.repeat.length > 0 ? new RepeatStore(config.stateDir, Math.max(...policy.repeat.map((limit) => limit.windowMs))) : undefined;
   // One connection per gateway process: the stdio transport serves exactly one client.
   const connId = `cn-${randomBytes(4).toString("hex")}`;
   let seq = 0;
@@ -106,10 +108,27 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
   }
 
   function decide(call: ToolCall, n: number, context: CallContext): Decided {
-    const verdict = evaluate(policy, call);
+    let verdict = evaluate(policy, call);
     // Rewrite rules may have edited the arguments: what runs, what is hashed and what a human approves is the edited call.
     const args = verdict.args ?? call.args;
     const argsHash = hashArguments(args);
+    // Loop limits apply to calls that would run unattended; past one, a human is asked (or the call is blocked).
+    const limits = repeats ? repeatLimitsFor(policy, { ...call, args }) : [];
+    let limited = false;
+    if (repeats && limits.length > 0 && (verdict.decision === "allow" || verdict.decision === "warn")) {
+      const hit = repeats.admit(limits, call.server, call.tool, argsHash);
+      if (hit) {
+        limited = true;
+        const what = hit.limit.per === "tool" ? "this tool was called" : "this same call ran";
+        verdict = {
+          decision: hit.limit.decision,
+          rule: hit.limit.id,
+          why: hit.limit.why ?? `loop limit: ${what} ${hit.count} times in the last ${hit.limit.windowMs / 1000} s, the most rule ${hit.limit.id} lets through unattended`,
+          alsoMatched: [{ rule: verdict.rule, decision: verdict.decision, why: verdict.why }, ...(verdict.alsoMatched ?? [])],
+          ...(verdict.rewrittenBy ? { args: verdict.args as Record<string, unknown>, rewrittenBy: verdict.rewrittenBy } : {}),
+        };
+      }
+    }
     const rewritten = verdict.rewrittenBy ? { originalArgsHash: hashArguments(call.args), rewrittenBy: verdict.rewrittenBy } : {};
     const record = (forwarded: boolean, approvalId?: string) =>
       audit.write(
@@ -160,12 +179,10 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
           ...(verdict.alsoMatched ? { alsoMatched: verdict.alsoMatched } : {}),
           ...(verdict.rewrittenBy ? { rewrittenBy: verdict.rewrittenBy } : {}),
         });
-        if (outcome.kind === "approved") {
-          record(true, outcome.approval.id);
-          return run();
-        }
-        if (outcome.kind === "standing") {
-          record(true, outcome.grant.id); // the audit line names the standing approval that let it through
+        if (outcome.kind === "approved" || outcome.kind === "standing") {
+          // the audit line names the approval, or the standing approval, that let it through
+          record(true, outcome.kind === "approved" ? outcome.approval.id : outcome.grant.id);
+          if (repeats && limited) repeats.record(limits, call.server, call.tool, argsHash);
           return run();
         }
         record(false, outcome.approval.id);

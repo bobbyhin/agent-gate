@@ -80,5 +80,14 @@
       "decision": "allow",
       "why": "This browser tool only looks at the page."
     }
+  ],
+  "repeat": [
+    {
+      "id": "loop-breaker",
+      "max": 20,
+      "windowSeconds": 60,
+      "decision": "ask",
+      "why": "The same call already ran 20 times in the last minute without a human; an agent stuck in a loop looks like this."
+    }
   ]
 }

@@ -12,6 +12,12 @@
 // that runs, and any approval it needs, is the edited one. A rewrite that cannot make the call safe
 // (a clamp on a value that is not a number) asks instead.
 //
+// "repeat" (optional) is a list of loop limits, a circuit breaker kept apart from the rules: when the
+// same call (or with "per": "tool", any call to the tool) has already run `max` times in the last
+// `windowSeconds`, a call that the rules would let run (allow or warn) is asked about or blocked
+// instead. Counting needs state, so the gateway applies them (src/gateway/repeats.ts); this file only
+// says which limits a call falls under.
+//
 // A rule matches on any combination of these, all of which must match:
 //   server     the downstream server's name             glob or regex, or a list of them
 //   tool       the tool's name on that server            glob or regex, or a list of them
@@ -77,9 +83,30 @@ export interface CompiledRule {
 
 export type RewriteResult = { ok: true; args: Record<string, unknown>; changed: boolean } | { ok: false; why: string };
 
+/** A loop limit: see the comment at the top. */
+export interface RepeatLimit {
+  readonly id: string;
+  readonly server?: Test;
+  readonly tool?: Test;
+  readonly toolWords?: readonly string[][];
+  readonly args: ReadonlyArray<{ name: string; test: Test }>;
+  readonly max: number;
+  readonly windowMs: number;
+  readonly decision: "ask" | "block";
+  readonly why?: string;
+  /** "call": the same server, tool and arguments; "tool": any call to the same tool. */
+  readonly per: "call" | "tool";
+}
+
 export interface Policy {
   readonly default: Decision;
   readonly rules: readonly CompiledRule[];
+  readonly repeat: readonly RepeatLimit[];
+}
+
+/** The loop limits that a call falls under (pure). */
+export function repeatLimitsFor(policy: Policy, call: ToolCall): RepeatLimit[] {
+  return policy.repeat.filter((limit) => matches(limit, call));
 }
 
 /** How the shell analyzer's four answers map onto gateway decisions. */
@@ -122,7 +149,7 @@ export function evaluate(policy: Policy, call: ToolCall): Verdict {
   };
 }
 
-function matches(rule: CompiledRule, call: ToolCall): boolean {
+function matches(rule: Pick<CompiledRule, "server" | "tool" | "toolWords" | "args">, call: ToolCall): boolean {
   if (rule.server && !rule.server(call.server)) return false;
   if (rule.tool && !rule.tool(call.tool)) return false;
   if (rule.toolWords) {
@@ -204,11 +231,40 @@ const SHELL_KEYS = ["id", "type", "server", "tool", "toolWords", "args", "argume
 /** Checks policy JSON and compiles it. Throws ConfigError naming the bad field. */
 export function parsePolicy(json: unknown): Policy {
   const policy = object(json, "policy");
-  onlyKeys(policy, ["default", "rules"], "policy");
+  onlyKeys(policy, ["default", "rules", "repeat"], "policy");
   const fallback = decision(policy.default, "policy.default");
   const ids = new Set<string>();
   const rules = array(policy.rules ?? [], "policy.rules").map((raw, i) => compileRule(raw, `policy.rules[${i}]`, ids));
-  return { default: fallback, rules };
+  const repeat = array(policy.repeat ?? [], "policy.repeat").map((raw, i) => compileRepeat(raw, `policy.repeat[${i}]`, ids));
+  return { default: fallback, rules, repeat };
+}
+
+function compileRepeat(raw: unknown, at: string, ids: Set<string>): RepeatLimit {
+  const limit = object(raw, at);
+  onlyKeys(limit, ["id", "server", "tool", "toolWords", "args", "max", "windowSeconds", "decision", "why", "per"], at);
+  const id = text(limit.id, `${at}.id`);
+  if (id === "default") fail(`${at}.id "default" is reserved for the policy default`);
+  if (ids.has(id)) fail(`${at}.id "${id}" is already used by an earlier rule or limit`);
+  ids.add(id);
+  const max = limit.max;
+  if (typeof max !== "number" || !Number.isInteger(max) || max < 1 || max > 10_000) fail(`${at}.max must be a whole number from 1 to 10000`);
+  const seconds = limit.windowSeconds;
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0 || seconds > 86_400) fail(`${at}.windowSeconds must be more than 0 and at most 86400`);
+  if (limit.decision !== "ask" && limit.decision !== "block") fail(`${at}.decision must be ask or block`);
+  const per = limit.per ?? "call";
+  if (per !== "call" && per !== "tool") fail(`${at}.per must be "call" or "tool"`);
+  return {
+    id,
+    ...(limit.server === undefined ? {} : { server: matcher(limit.server, `${at}.server`) }),
+    ...(limit.tool === undefined ? {} : { tool: matcher(limit.tool, `${at}.tool`) }),
+    ...(limit.toolWords === undefined ? {} : { toolWords: phrases(limit.toolWords, `${at}.toolWords`) }),
+    args: limit.args === undefined ? [] : argumentMatchers(limit.args, `${at}.args`),
+    max,
+    windowMs: Math.round(seconds * 1000),
+    decision: limit.decision,
+    ...(limit.why === undefined ? {} : { why: text(limit.why, `${at}.why`) }),
+    per,
+  };
 }
 
 function compileRule(raw: unknown, at: string, ids: Set<string>): CompiledRule {

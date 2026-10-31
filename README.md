@@ -641,6 +641,7 @@ first match alone gives.
 | `browser-input` | `browser_*`, `puppeteer_*` and `playwright_*` tools with click, type, press, fill, submit, select, drag, upload, evaluate, run code, dialog | ask; standing approvals allowed |
 | `browser-read` | the same tools with screenshot, snapshot, read page, navigate, console messages, network requests, tabs | allow |
 | default | everything else | allow |
+| `loop-breaker` (a loop limit, `repeat`) | the same call (tool and arguments) that already ran 20 times in the last 60 seconds without a human | ask |
 
 Notes on the newer rules:
 
@@ -679,6 +680,28 @@ A rule whose decision is `ask` may set `"standing": true`, so that a standing ap
 (see [Approval rules](#approval-rules)). A rule that can ask may set `ttlMinutes`, the life of its approval requests, in place of the config's
 `approvalTtlHours` (see Stale plans under [Approval rules](#approval-rules)). A rule whose fixed
 decision is not `ask` cannot set it.
+
+**Loop limits.** An agent stuck in a loop calls the same tool again and again, and each call is
+allowed, so no rule catches it. A policy's `repeat` list is a circuit breaker for that, kept apart
+from the rules:
+
+```json
+"repeat": [
+  { "id": "loop-breaker", "max": 20, "windowSeconds": 60, "decision": "ask" },
+  { "id": "no-search-floods", "toolWords": ["search"], "per": "tool", "max": 100, "windowSeconds": 60, "decision": "block" }
+]
+```
+
+A limit matches calls like a rule does (`server`, `tool`, `toolWords`, `args`) and counts the calls
+that ran: the same call (`"per": "call"`, the default: server, tool and arguments) or any call to
+the tool (`"per": "tool"`). When a call that the rules would let run unattended (allow or warn) has
+already run `max` times in the last `windowSeconds`, it is asked about or blocked instead, with a
+`why` that says so and the rule it overruled in `alsoMatched`. A call that already needs a human is
+left alone. An approval lets one more run through, and the next one asks again until the window moves
+on. The counts are kept in `<stateDir>/repeats.json`, with the same lock and atomic write as the
+approval queue, so the check and the count are one step and gateways sharing a state directory count
+together; a damaged file stops the call. The price is one locked, flushed write of that file for each
+call a limit covers. The example policy ships the first limit above.
 
 **Rewrite rules.** A rule with `"decision": "rewrite"` does not decide. It edits the call's
 arguments, and evaluation goes on with the next rule, on the edited arguments:
@@ -1456,14 +1479,15 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 314 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 327 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
 controls, standing approvals and their bounds, the escalate-only rule of a second reviewer, the CLI's exit codes, its read-back before an approval, and what a decision leaves behind
 (the record, the `approval-decided` line, `stats`), the correlation ids a client may send (and what
 is dropped), `audit stats`, every rule that matched next to the one that decided (and a check that
-the decisions are first match's), rewrite rules on their own and through a running gateway, and an
+the decisions are first match's), rewrite rules on their own and through a running gateway, loop
+limits (their counts with a clock the test controls, and a loop through a running gateway), and an
 end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log,
@@ -1523,7 +1547,7 @@ the decision, with no model judging and no tolerance band. And it is evaluated o
 there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 314/314 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 327/327 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
 the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1537,6 +1561,7 @@ bin/claude-pretooluse-hook.js                 the Claude Code PreToolUse hook
 src/gateway/server.ts                         the MCP gateway: lists <server>__<tool>, decides, forwards
 src/gateway/policy.ts                         the policy engine (pure): evaluate(policy, call) -> verdict
 src/gateway/approvals.ts                      the approval queue in <stateDir>/approvals.json
+src/gateway/repeats.ts                        loop limits: recent runs per call in <stateDir>/repeats.json
 src/gateway/files.ts                          binds approvals to the content of the files a call names
 src/gateway/advisor.ts                        the escalate-only rule for a second reviewer (ADR 0008; not wired yet)
 src/gateway/audit.ts                          the audit log, <stateDir>/audit.jsonl

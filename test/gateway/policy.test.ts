@@ -318,7 +318,7 @@ describe("standing: which rules a standing approval may answer", () => {
 function firstMatch(policy: Policy, call: { server: string; tool: string; args: Record<string, unknown> }): Verdict {
   for (const rule of policy.rules) {
     if (!rule.verdict) continue;
-    const matched = evaluate({ default: "allow", rules: [rule] }, call);
+    const matched = evaluate({ default: "allow", rules: [rule], repeat: [] }, call);
     if (matched.rule === rule.id) return rule.verdict(call);
   }
   return { decision: policy.default, rule: "default", why: `no rule matched; the policy default is ${policy.default}` };
