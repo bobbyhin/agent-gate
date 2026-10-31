@@ -69,6 +69,36 @@ describe("the PII rules of llm-policy.example.json", () => {
     }
   });
 
+  it("finds a number next to other digits: an expiry date, a security code, a stray number before it, a second card", () => {
+    for (const [text, expected] of [
+      [`Card ${PII.cardSpaced} 12/27 cvv 123`, "Card [REDACTED:credit-card] 12/27 cvv 123"],
+      [`Card ${PII.card} 123 please`, "Card [REDACTED:credit-card] 123 please"],
+      [`Card ${PII.cardDashed} 12/27`, "Card [REDACTED:credit-card] 12/27"],
+      [`order 3 ${PII.cardSpaced} paid`, "order 3 [REDACTED:credit-card] paid"],
+      [`${PII.cardSpaced} ${PII.cardSpaced}`, "[REDACTED:credit-card] [REDACTED:credit-card]"],
+      [`${PII.card} ${PII.card}`, "[REDACTED:credit-card] [REDACTED:credit-card]"],
+    ] as const) {
+      assert.equal(redacted(text).text, expected, expected);
+    }
+    // The same search finds nothing in a look-alike that fails its check, with the same neighbours.
+    for (const text of [`order ${PII.cardBadCheck} 12/27 shipped`, `order ${PII.cardBadCheck} 123 shipped`]) {
+      assert.deepEqual(redacted(text), { text, rules: [] });
+    }
+    // test(), which block rules and divert use, finds them too.
+    const card = policy.rules.find((r) => r.id === "credit-card")!;
+    assert.deepEqual([`${PII.cardSpaced} 12/27`, `${PII.card} 123`, `${PII.cardBadCheck} 12/27`].map((t) => card.pattern.test(t)), [true, true, false]);
+  });
+
+  it("reads full-width digits, hyphens and spaces, as Japanese text often writes a number, and redacts the original text", () => {
+    assert.equal(redacted(`My Number: ${PII.myNumberFullWidth}, thanks`).text, "My Number: [REDACTED:jp-my-number], thanks");
+    assert.equal(redacted(`card ${PII.cardFullWidth} on file`).text, "card [REDACTED:credit-card] on file");
+    assert.equal(redacted(`SSN ${PII.ssnFullWidth}`).text, "SSN [REDACTED:us-ssn]");
+    // Rules without a validator read the text as it is.
+    const plain = parseLeakPolicy({ leakGuard: [{ id: "digits", action: "redact", regex: "\\b\\d{12}\\b" }] });
+    const result = guardMessages(plain, [{ role: "user", content: `x ${PII.myNumberFullWidth} y` }]);
+    assert.deepEqual(result.action === "pass" && result.redactions, []);
+  });
+
   it("reads a number only when it stands on its own, not as the tail of a UUID or another hyphenated id", () => {
     for (const text of [`request ${["123e4567", "e89b", "12d3", "a456", PII.myNumber].join("-")} failed`, `ticket INC-${PII.ssn} closed`, `build v2-${PII.card}-rc1`]) {
       assert.deepEqual(redacted(text), { text, rules: [] }, text);

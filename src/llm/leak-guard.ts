@@ -10,7 +10,12 @@
 // a block rule would have caught. guardMessages() is a pure function: no I/O, no clock.
 // A rule may name a "validator" (src/llm/validators.ts): then a match counts only when the validator
 // accepts it, for blocking and for redacting alike, so that a 16-digit order number is not taken for
-// a card number unless its checksum says it could be one.
+// a card number unless its checksum says it could be one. A match that fails its check can still hold
+// a number that passes it, such as a card number followed by its expiry date (the regex takes in the
+// month as more digits): then the runs of whole digit groups inside the match are tried too, longest
+// first. Such a rule also reads full-width digits, letters, hyphens and the ideographic space (as
+// Japanese text often writes numbers) as their ASCII forms; the fold keeps every character in its
+// place, so a redaction lands on the original text.
 //
 // Scanned: message "content" (a string, or the "text" of text parts) and the "arguments" string of
 // assistant tool calls. Not scanned: images, audio and file parts, tool definitions, and any other
@@ -44,17 +49,100 @@ class ValidatedPattern extends RegExp {
   static override get [Symbol.species](): RegExpConstructor {
     return RegExp;
   }
+  readonly find: ValidatedFinder;
   constructor(
     source: string,
     flags: string,
     readonly valid: (match: string) => boolean,
   ) {
     super(source, flags);
+    this.find = validatedFinder(source, flags, valid);
   }
   override test(text: string): boolean {
-    for (const match of text.matchAll(new RegExp(this.source, `${this.flags}g`))) if (this.valid(match[0])) return true;
-    return false;
+    return this.find(foldWidth(text)).length > 0;
   }
+}
+
+/**
+ * Full-width forms (U+FF01 to U+FF5E: digits, letters, the hyphen-minus and the rest) and the
+ * ideographic space, as their ASCII forms. One UTF-16 unit becomes one, so every offset in the result
+ * is the same offset in the original.
+ */
+export function foldWidth(text: string): string {
+  return /[\uFF01-\uFF5E\u3000]/.test(text) ? text.replace(/[\uFF01-\uFF5E\u3000]/g, (ch) => (ch === "\u3000" ? " " : String.fromCharCode(ch.charCodeAt(0) - 0xfee0))) : text;
+}
+
+/** A span to replace: the first capture group that took part in the match, else the whole match. */
+interface Found {
+  start: number;
+  end: number;
+}
+type ValidatedFinder = (text: string) => Found[];
+
+/**
+ * Every place in `text` (already folded) where the pattern matches and the validator accepts the match,
+ * left to right, without overlaps. When a match fails its check, the runs of whole digit groups inside
+ * it (split at whatever the match has between digits) that the pattern matches on their own are tried,
+ * longest first, then earliest, so a card number followed by an expiry date or a security code, or
+ * after a stray number, is still found. Scanning goes on right after what was found, or one character
+ * after the start of a match that held nothing.
+ */
+function validatedFinder(source: string, flags: string, valid: (match: string) => boolean): ValidatedFinder {
+  const plain = flags.replace(/[gyd]/g, "");
+  const scan = new RegExp(source, `${plain}gd`);
+  const anchored = new RegExp(`^(?:${source})$`, `${plain}d`);
+  const spanOf = (m: RegExpExecArray, offset: number): Found => {
+    const span = m.indices?.slice(1).find((s) => s !== undefined) ?? m.indices?.[0] ?? [0, m[0].length];
+    return { start: offset + span[0], end: offset + span[1] };
+  };
+  return (text) => {
+    const found: Found[] = [];
+    let pos = 0;
+    while (pos <= text.length) {
+      scan.lastIndex = pos;
+      const m = scan.exec(text);
+      if (!m) break;
+      const start = m.index;
+      const end = start + m[0].length;
+      if (end === start) {
+        pos = start + 1;
+        continue;
+      }
+      if (valid(m[0])) {
+        found.push(spanOf(m, 0));
+        pos = end;
+        continue;
+      }
+      const inner = innerCandidate(text, start, end, anchored, valid);
+      if (inner) {
+        found.push(spanOf(inner.match, inner.start));
+        pos = inner.end;
+        continue;
+      }
+      pos = start + 1;
+    }
+    return found;
+  };
+}
+
+/** The longest (then earliest) run of whole digit groups inside text[start, end) that the pattern matches on its own and the validator accepts. */
+function innerCandidate(text: string, start: number, end: number, anchored: RegExp, valid: (match: string) => boolean): { match: RegExpExecArray; start: number; end: number } | undefined {
+  const groups = [...text.slice(start, end).matchAll(/\d+/g)].map((g): [number, number] => [start + (g.index as number), start + (g.index as number) + g[0].length]);
+  const runs: Array<[number, number]> = [];
+  for (let i = 0; i < groups.length; i++) {
+    for (let j = i; j < groups.length; j++) {
+      const s = (groups[i] as [number, number])[0];
+      const e = (groups[j] as [number, number])[1];
+      if (s !== start || e !== end) runs.push([s, e]); // the whole match was already refused
+    }
+  }
+  runs.sort((a, b) => b[1] - b[0] - (a[1] - a[0]) || a[0] - b[0]);
+  for (const [s, e] of runs) {
+    const candidate = text.slice(s, e);
+    const m = anchored.exec(candidate);
+    if (m && valid(candidate)) return { match: m, start: s, end: e };
+  }
+  return undefined;
 }
 
 export interface LeakPolicy {
@@ -87,28 +175,40 @@ export function guardMessages(policy: LeakPolicy, messages: readonly unknown[]):
   return { action: "pass", messages: result, redactions: [...counts].map(([rule, count]) => ({ rule, count })) };
 }
 
+/** A redact rule compiled for redactText(): its regex, or for a rule with a validator, the finder that honours it. */
+export interface RedactRule {
+  id: string;
+  all: RegExp;
+  find?: ValidatedFinder;
+}
+
 /** The policy's redact rules, compiled for redactText(). */
-export function redactRules(policy: LeakPolicy): Array<{ id: string; all: RegExp; valid?: (match: string) => boolean }> {
+export function redactRules(policy: LeakPolicy): RedactRule[] {
   // g to find every match, d for the positions of capture groups. matchAll() works on a copy of
   // the regex, so one per call is safe.
   return policy.rules
     .filter((rule) => rule.action === "redact")
-    .map((rule) => ({ id: rule.id, all: new RegExp(rule.pattern.source, `${rule.pattern.flags}gd`), ...(rule.validator ? { valid: VALIDATORS[rule.validator] } : {}) }));
+    .map((rule) => ({ id: rule.id, all: new RegExp(rule.pattern.source, `${rule.pattern.flags}gd`), ...(rule.pattern instanceof ValidatedPattern ? { find: rule.pattern.find } : {}) }));
 }
 
 /** Replaces what each redact rule matches in `original` with [REDACTED:<id>], counting per rule. */
-export function redactText(rules: ReadonlyArray<{ id: string; all: RegExp; valid?: (match: string) => boolean }>, original: string, counts: Map<string, number>): string {
+export function redactText(rules: readonly RedactRule[], original: string, counts: Map<string, number>): string {
   let t = original;
   for (const rule of rules) {
+    // The first capture group that took part in the match, or else the whole match. A rule with a
+    // validator finds its spans on the folded text, whose offsets are the original's.
+    const spans: Found[] = rule.find
+      ? rule.find(foldWidth(t))
+      : [...t.matchAll(rule.all)].flatMap((match) => {
+          const span = match.indices?.slice(1).find((s) => s !== undefined) ?? match.indices?.[0];
+          return span ? [{ start: span[0], end: span[1] }] : [];
+        });
     let out = "";
     let done = 0;
-    for (const match of t.matchAll(rule.all)) {
-      if (rule.valid && !rule.valid(match[0])) continue; // shaped like one, but its check says it is not
-      // The first capture group that took part in the match, or else the whole match.
-      const span = match.indices?.slice(1).find((s) => s !== undefined) ?? match.indices?.[0];
-      if (!span || span[0] === span[1]) continue;
-      out += `${t.slice(done, span[0])}[REDACTED:${rule.id}]`;
-      done = span[1];
+    for (const span of spans) {
+      if (span.start === span.end || span.start < done) continue;
+      out += `${t.slice(done, span.start)}[REDACTED:${rule.id}]`;
+      done = span.end;
       counts.set(rule.id, (counts.get(rule.id) ?? 0) + 1);
     }
     t = out + t.slice(done);

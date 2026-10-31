@@ -1765,16 +1765,21 @@ must pass the Luhn check; a My Number must end in the check digit that the Minis
 and Communications defines (Ordinance No. 85 of 2014, article 5); an SSN or an ITIN must be in the
 ranges that the SSA or the IRS assigns. A number of the right shape picked at random passes the card or
 the My Number check one time in ten. A number must also stand on its own: the tail of a UUID or of
-another hyphenated id is not read as one. They redact rather than block, so that a conversation about an
+another hyphenated id is not read as one. When a match fails its check, the runs of whole digit groups
+inside it are tried too, longest first, so a card number followed by its expiry date or its security
+code (`... 12/27`, `... 123`), which the regex takes in as more digits, is still found. These rules
+also read full-width digits, hyphens and spaces, as Japanese forms often write a number, as their
+ASCII forms. They redact rather than block, so that a conversation about an
 order goes on without the number in it. A validator holds wherever its rule is used: for a block rule,
 on the answer, and in the MCP gateway's result guard. `src/llm/validators.ts` cites its sources; every
 number the tests use is built at run time with its check digit computed, so none appears in the
 repository.
 
-**What it is not for.** The threat matrix (`test/llm/threat-matrix.json`) holds 30 prompts: secrets,
+**What it is not for.** The threat matrix (`test/llm/threat-matrix.json`) holds 32 prompts: secrets,
 personal numbers, prompt injections, jailbreaks and requests for dangerous instructions, each with what
-the leak guard does with it, and the leak guard covers 15 of them: every secret format in the policy,
-the four personal numbers, and an order number that is left alone because it fails the card check. The
+the leak guard does with it, and the leak guard covers 17 of them: every secret format in the policy,
+the four personal numbers (a card number also when its expiry date follows it, a My Number also in
+full-width digits), and an order number that is left alone because it fails the card check. The
 other 15 pass untouched, and each row says why: a secret that is encoded or split across two messages,
 an email address, a phone number, a name and an address, and every injection, jailbreak and harmful
 request. Those are matters of meaning that a regex cannot read; they belong to a classifier, to the
@@ -2421,7 +2426,7 @@ obeys, and the gateway blocks the call before it reaches the server. Another den
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 308 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 313 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file, a settle that comes
 twice or after its reservation expired, calls per minute and run caps); a leak-guard table
@@ -2450,7 +2455,7 @@ whose answers carry a secret (withheld, booked) or a key assignment (redacted). 
 damages the ledger and the usage log and turns the upstream traceparent off. A PII suite checks each
 validator (the Luhn and My Number check digits, the SSN and ITIN ranges) and the four rules on every way
 their numbers are written, with look-alikes that fail their check left alone, and that a validator
-holds for a block rule and in the MCP result guard; the threat matrix runs its 30 rows; and the README's
+holds for a block rule and in the MCP result guard; the threat matrix runs its 32 rows; and the README's
 rule table is checked against the policy. A divert suite sends personal numbers unredacted to a local
 fake and nothing to the cloud one, checks that a block still wins unless the divert lists it, that a
 missing alias or a local upstream that is down is refused and never sent to the cloud, and that a
@@ -2490,7 +2495,7 @@ an evaluation set of whole runs, each replayed and checked step by step. It chec
 not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 489/489 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 489/489 MCP gateway tests, 313/313 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for each of the two demo pages, 2/2 for the load
 test), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
@@ -2567,7 +2572,7 @@ test/llm/*.test.ts                            LLM gateway tests: routing, budget
 test/llm/fake-upstream.ts                     a fake OpenAI-compatible provider for the tests, the example and the demo
 test/llm/fake-secrets.ts                      every fake secret the tests use, in one file
 test/llm/fake-pii.ts                          made-up personal numbers, built at run time with their check digits
-test/llm/threat-matrix.json                   30 risky prompts and what the leak guard does with each, gaps included
+test/llm/threat-matrix.json                   32 risky prompts and what the leak guard does with each, gaps included
 scripts/loadtest.js                           npm run loadtest: the LLM gateway under concurrent load; the budget must hold
 test/loadtest.test.js                         a small load in npm test: never overspent, booked exactly, no 5xx
 scripts/bench.js                              npm run bench: what each gateway adds to one call, and what a state write costs

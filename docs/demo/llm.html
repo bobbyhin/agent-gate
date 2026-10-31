@@ -148,8 +148,8 @@
    "upstreamCalls": 1,
    "usage": [
     {
-     "ts": "2026-10-31T09:14:31.281Z",
-     "id": "req-70501bb1",
+     "ts": "2026-10-31T11:22:12.967Z",
+     "id": "req-1ab3fe7d",
      "key": "demo-agent",
      "task": "classify",
      "route": "classify-is-cheap",
@@ -163,8 +163,8 @@
      "attempts": 1,
      "fallback": false,
      "latencyMs": 18,
-     "traceId": "5d15dd1170177c7b4c66d5dad1454ffe",
-     "spanId": "34bc7138d4a5e0de"
+     "traceId": "7648f0db1e4ade74ca6d1728f38066f4",
+     "spanId": "7b26ce96b7d89f60"
     }
    ],
    "ledger": [
@@ -177,7 +177,7 @@
     }
    ],
    "log": [
-    "200 req-70501bb1 key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 18ms"
+    "200 req-1ab3fe7d key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 18ms"
    ],
    "title": "A classification goes to the cheap model",
    "note": "The agent asks for the large model, but its x-agent-task header says classify, and the first route that applies sends that to the cheap upstream. The cost is reserved first and settled from the provider's own token count.",
@@ -212,8 +212,8 @@
    "upstreamCalls": 0,
    "usage": [
     {
-     "ts": "2026-10-31T09:14:31.283Z",
-     "id": "req-4e858fae",
+     "ts": "2026-10-31T11:22:12.969Z",
+     "id": "req-fa474b65",
      "key": "demo-agent",
      "route": "cheap-models",
      "upstream": "cheap",
@@ -226,8 +226,8 @@
      "outputTokens": 0,
      "costUsd": 0,
      "latencyMs": 0,
-     "traceId": "7b5747b4f7866a56f5c1b42e5736b59c",
-     "spanId": "2c75a9dbfd4bc1ac"
+     "traceId": "c105a1fdaa714b00f212c3483e12108f",
+     "spanId": "1dc7b1acf43e52b4"
     }
    ],
    "ledger": [
@@ -240,7 +240,7 @@
     }
    ],
    "log": [
-    "400 req-4e858fae key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0 error=secret_detected 0ms"
+    "400 req-fa474b65 key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0 error=secret_detected 0ms"
    ],
    "title": "A secret in the prompt never leaves",
    "note": "The leak guard reads the messages before anything is sent. A block rule matched, so the request is refused with the rule's name, never the text it matched, and the provider gets nothing.",
@@ -269,7 +269,7 @@
    "response": {
     "status": 429,
     "headers": {
-     "retry-after": "53129",
+     "retry-after": "45468",
      "content-type": "application/json"
     },
     "body": "{\"error\":{\"message\":\"agent-gate: this call could cost up to $0.01503, and key \\\"demo-agent\\\" has $0.00999115 left of its daily budget of $0.01 ($0.00000885 spent, $0 held by calls in flight). Try again later, or with a lower max_tokens.\",\"type\":\"insufficient_quota\",\"param\":null,\"code\":\"budget_exceeded\",\"cap\":\"daily\"}}"
@@ -277,8 +277,8 @@
    "upstreamCalls": 0,
    "usage": [
     {
-     "ts": "2026-10-31T09:14:31.292Z",
-     "id": "req-caad4c54",
+     "ts": "2026-10-31T11:22:12.976Z",
+     "id": "req-8d7978e2",
      "key": "demo-agent",
      "route": "strong-models",
      "upstream": "strong",
@@ -289,9 +289,9 @@
      "inputTokens": 0,
      "outputTokens": 0,
      "costUsd": 0,
-     "latencyMs": 6,
-     "traceId": "a27bdbb40af58b305645b0ac938b9fcc",
-     "spanId": "8d1d16c099116a07"
+     "latencyMs": 5,
+     "traceId": "fb521771fe45670c8e04d5348b011966",
+     "spanId": "ff16536ef35dee37"
     }
    ],
    "ledger": [
@@ -304,7 +304,7 @@
     }
    ],
    "log": [
-    "429 req-caad4c54 key=demo-agent route=strong-models upstream=strong model=fake-large-1 cost=$0 error=budget_exceeded 6ms"
+    "429 req-8d7978e2 key=demo-agent route=strong-models upstream=strong model=fake-large-1 cost=$0 error=budget_exceeded 5ms"
    ],
    "title": "A call that could pass the budget is refused before it is sent",
    "note": "This call could produce 1000 output tokens at $15 per million, more than the key's whole daily cap of $0.01. The gateway reserves the most a call can cost before sending it, so it refuses now, with the numbers and a Retry-After, and nothing is charged.",
@@ -343,8 +343,8 @@
    "upstreamCalls": 1,
    "usage": [
     {
-     "ts": "2026-10-31T09:14:31.304Z",
-     "id": "req-ad4d4803",
+     "ts": "2026-10-31T11:22:12.989Z",
+     "id": "req-094b3b11",
      "key": "demo-agent",
      "route": "cheap-models",
      "upstream": "cheap",
@@ -358,9 +358,9 @@
      "fallback": false,
      "stream": true,
      "streamEnd": "done",
-     "latencyMs": 10,
-     "traceId": "b5494e2ab7036cb9c9a09ac50217008f",
-     "spanId": "dee57124aa485de2"
+     "latencyMs": 11,
+     "traceId": "8ae81450b6772dd68196420ee04c3b50",
+     "spanId": "3c80accd1ac4b8b2"
     }
    ],
    "ledger": [
@@ -373,7 +373,7 @@
     }
    ],
    "log": [
-    "200 req-ad4d4803 key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0.00000855 stream=done 10ms"
+    "200 req-094b3b11 key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0.00000855 stream=done 11ms"
    ],
    "title": "A streamed answer is held until it has been read",
    "note": "With stream: true the client gets server-sent events. The gateway asks the provider for a usage chunk, reads the whole stream, runs the leak guard over the answer, and only then sends the events, with the cost settled from the provider's count.",
@@ -420,7 +420,7 @@
   "guardMessages": {
    "id": "guardMessages",
    "file": "src/llm/leak-guard.ts",
-   "line": 78,
+   "line": 166,
    "text": "export function guardMessages(policy: LeakPolicy, messages: readonly unknown[]): GuardResult {\n  const texts = messageTexts(messages);\n  for (const rule of policy.rules) {\n    if (rule.action === \"block\" && texts.some((t) => rule.pattern.test(t))) return { action: \"block\", rule: rule.id };\n  }"
   },
   "estimate": {

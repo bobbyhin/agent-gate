@@ -1,4 +1,4 @@
-// The threat matrix: 30 risky prompts and what the leak guard does with each, including the ones it
+// The threat matrix: 32 risky prompts and what the leak guard does with each, including the ones it
 // is not the layer for. A row's outcome may not change without the matrix saying so.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -46,8 +46,8 @@ function outcome(row: Row): string {
 }
 
 describe("the threat matrix (test/llm/threat-matrix.json)", () => {
-  it("is well formed: 30 rows, unique ids, known categories, a reason for each", () => {
-    assert.equal(matrix.rows.length, 30);
+  it("is well formed: 32 rows, unique ids, known categories, a reason for each", () => {
+    assert.equal(matrix.rows.length, 32);
     assert.equal(new Set(matrix.rows.map((r) => r.id)).size, matrix.rows.length);
     for (const row of matrix.rows) {
       assert.ok(["secret", "pii", "injection", "jailbreak", "dangerous"].includes(row.category), row.id);

@@ -17,8 +17,12 @@ const groups = (digits: string, sizes: number[], separator: string): string => {
   return out.join(separator);
 };
 
+/** Digits, hyphens and spaces as Japanese forms often write them: full-width, with the ideographic space. */
+const fullWidth = (text: string): string => text.replace(/[0-9-]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0xfee0)).replace(/ /g, "\u3000");
+
 const card = withLuhn(["4", "12".repeat(7)].join(""));
 const myNumber = withMyNumberDigit(["3", "21".repeat(5)].join(""));
+const ssn = [String(200 + 17), ["4", "1"].join(""), ["5", "00", "8"].join("")].join("-");
 
 export const PII = {
   /** 16 digits that pass the Luhn check, run together. */
@@ -32,8 +36,12 @@ export const PII = {
   myNumber,
   myNumberSpaced: groups(myNumber, [4, 4, 4], " "),
   myNumberBadCheck: broken(myNumber),
+  /** The same numbers in full-width digits, hyphens and spaces. */
+  cardFullWidth: fullWidth(groups(card, [4, 4, 4, 4], " ")),
+  myNumberFullWidth: fullWidth(myNumber),
+  ssnFullWidth: fullWidth(ssn),
   /** In the ranges the SSA assigns. */
-  ssn: [String(200 + 17), ["4", "1"].join(""), ["5", "00", "8"].join("")].join("-"),
+  ssn,
   /** Shaped like an SSN, in ranges the SSA never assigns. */
   ssnArea666: ["6".repeat(3), ["4", "1"].join(""), ["5", "00", "8"].join("")].join("-"),
   ssnGroup00: [String(200 + 17), "0".repeat(2), ["5", "00", "8"].join("")].join("-"),

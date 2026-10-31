@@ -84,6 +84,16 @@ describe("divert: personal data goes to the local model only", () => {
     assert.equal(JSON.stringify(line).includes(PII.card.slice(0, 8)), false, "no text in the usage line");
   });
 
+  it("diverts a card number followed by its expiry date or security code, and a number in full-width digits", async () => {
+    const cloudCalls = cloud.requests.length;
+    for (const text of [`Charge ${PII.cardSpaced} 12/27, thanks`, `Charge ${PII.card} 123 please`, `My Number: ${PII.myNumberFullWidth}`]) {
+      const r = await chat(text);
+      assert.equal(r.status, 200, r.text);
+      assert.equal(r.headers.get("x-agent-gate-upstream"), "local", text.slice(0, 7));
+    }
+    assert.equal(cloud.requests.length, cloudCalls, "the cloud upstream got none of them");
+  });
+
   it("diverts as it is: other redact rules do not touch a diverted call either", async () => {
     const r = await chat(`My Number ${PII.myNumberSpaced} and api_key = "${FAKE.apiKeyValue}"`);
     assert.deepEqual([r.status, r.headers.get("x-agent-gate-diverted"), r.headers.get("x-agent-gate-redacted")], [200, "jp-my-number", null]);
