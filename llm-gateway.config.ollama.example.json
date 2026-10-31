@@ -1,0 +1,34 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 8787 },
+  "stateDir": ".agent-gate",
+  "policy": "llm-policy.example.json",
+  "upstreams": [
+    {
+      "name": "cloud",
+      "baseUrl": "https://llm.example.com/v1",
+      "apiKeyEnv": "CLOUD_API_KEY",
+      "models": { "small": "provider-small-1" },
+      "pricePerMTok": { "input": 0.15, "output": 0.6 }
+    },
+    {
+      "name": "local",
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "apiKeyEnv": "OLLAMA_API_KEY",
+      "models": { "small": "llama3.2" },
+      "pricePerMTok": { "input": 0, "output": 0 }
+    }
+  ],
+  "routes": [{ "id": "cloud-models", "use": { "upstream": "cloud" } }],
+  "divert": {
+    "rules": ["credit-card", "jp-my-number", "us-ssn", "us-itin"],
+    "to": { "upstream": "local", "model": "small" }
+  },
+  "keys": [
+    {
+      "name": "demo-agent",
+      "sha256": "50f762c67f800bf8729d9abff1153a2a812d6b56a74c6422cce0dfd0cae4d6eb",
+      "dailyUsd": 0.01,
+      "monthlyUsd": 1
+    }
+  ]
+}

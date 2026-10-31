@@ -34,7 +34,7 @@ import { cleanNote } from "../gateway/approvals.js";
 import { contextFromHeaders, parseTraceparent } from "../gateway/context.js";
 import { ConfigError } from "../gateway/validate.js";
 import { costUsd, estimateInputTokens, formatUsd, Ledger, roundUsd, type ReserveOutcome, type SettleOutcome } from "./budget.js";
-import { hashKey, type GatewayKey, type LlmConfig } from "./config.js";
+import { hashKey, type GatewayKey, type LlmConfig, type Upstream } from "./config.js";
 import { guardMessages, guardResponse, messageTexts, type LeakPolicy } from "./leak-guard.js";
 import { CONTENT_TYPE, Metrics } from "./metrics.js";
 import { RepeatWindow, requestHash } from "./repeats.js";
@@ -88,6 +88,15 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     else apiKeys.set(upstream.name, value);
   }
   if (missing.size > 0) throw new ConfigError(`set the environment variables named by apiKeyEnv: ${[...missing].join(", ")}`);
+
+  // divert (config.divert): its rules must be in the leak policy. A block rule it lists diverts
+  // instead of blocking, so the guard runs without those; the divert check runs on the text as sent.
+  const divertIds = new Set(config.divert?.rules ?? []);
+  for (const id of divertIds) {
+    if (!policy.rules.some((rule) => rule.id === id)) throw new ConfigError(`config.divert.rules: "${id}" is not a rule of the leak policy ${config.policyFile}`);
+  }
+  const guardPolicy: LeakPolicy = divertIds.size > 0 ? { rules: policy.rules.filter((rule) => !(rule.action === "block" && divertIds.has(rule.id))) } : policy;
+  const divertRules = policy.rules.filter((rule) => divertIds.has(rule.id));
 
   fs.mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
   const ledger = openLedger(config, now);
@@ -180,6 +189,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         ...(outcome.upstream429 ? { upstream429: outcome.upstream429 } : {}),
         ...(outcome.settle === undefined ? {} : { settle: outcome.settle }),
         ...(where.redacted === undefined ? {} : { redacted: where.redacted }),
+        ...(where.diverted === undefined ? {} : { diverted: where.diverted }),
         ...(outcome.responseRedacted === undefined ? {} : { responseRedacted: outcome.responseRedacted }),
         ...(where.stream ? { stream: true as const } : {}),
         ...(outcome.streamEnd === undefined ? {} : { streamEnd: outcome.streamEnd }),
@@ -262,7 +272,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     Object.assign(where, { route: chosen.rule, upstream: chosen.primary.upstream.name, model: chosen.primary.model });
 
     // 4. Leak guard. The error names the rule, never the text it matched.
-    const guarded = guardMessages(policy, messages);
+    const guarded = guardMessages(guardPolicy, messages);
     if (guarded.action === "block") {
       return finish(
         400,
@@ -274,14 +284,40 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         { error: "secret_detected", rule: guarded.rule, side: "prompt" },
       );
     }
-    if (guarded.redactions.length > 0) where.redacted = guarded.redactions.map((r) => r.rule);
+    // Divert: text that a divert rule matches goes, as it is, to the local upstream and nowhere else.
+    const texts = divertRules.length > 0 ? messageTexts(messages) : [];
+    const divertedBy = divertRules.filter((rule) => texts.some((t) => rule.pattern.test(t))).map((rule) => rule.id);
+    let targets: ResolvedTarget[];
+    let outgoing: unknown[];
+    if (config.divert && divertedBy.length > 0) {
+      const upstream = config.upstreams.get(config.divert.to.upstream) as Upstream;
+      const alias = config.divert.to.model ?? model;
+      const upstreamModel = upstream.models.get(alias);
+      Object.assign(where, { upstream: upstream.name, model: upstreamModel, diverted: divertedBy });
+      if (upstreamModel === undefined) {
+        return finish(
+          404,
+          apiError(
+            "model_not_found",
+            `agent-gate: the messages matched ${divertedBy.join(", ")}, so this call may go only to upstream "${upstream.name}", which has no model alias ${JSON.stringify(clip(alias))}. It was not sent anywhere.`,
+            { param: "model" },
+          ),
+          { error: "model_not_found" },
+        );
+      }
+      targets = [{ upstream, alias, model: upstreamModel }]; // no fallback: it must not leave
+      outgoing = messages;
+    } else {
+      if (guarded.redactions.length > 0) where.redacted = guarded.redactions.map((r) => r.rule);
+      targets = chosen.fallback ? [chosen.primary, chosen.fallback] : [chosen.primary];
+      outgoing = guarded.messages;
+    }
 
     // 5. Reserve the most this call can cost on any upstream it may reach.
-    const promptChars = messageTexts(guarded.messages).reduce((sum, t) => sum + t.length, 0) + (body.tools === undefined ? 0 : JSON.stringify(body.tools).length);
+    const promptChars = messageTexts(outgoing).reduce((sum, t) => sum + t.length, 0) + (body.tools === undefined ? 0 : JSON.stringify(body.tools).length);
     const inputTokens = estimateInputTokens(promptChars);
     const outputLimit = (body.max_completion_tokens ?? body.max_tokens ?? config.defaultMaxTokens) as number;
     const outputTokens = outputLimit * ((body.n ?? 1) as number);
-    const targets = chosen.fallback ? [chosen.primary, chosen.fallback] : [chosen.primary];
     const estimate = Math.max(...targets.map((t) => costUsd(t.upstream.pricePerMTok, inputTokens, outputTokens)));
 
     // The same request again and again (repeatMax): refused before anything is reserved. The check,
@@ -311,7 +347,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     if (sameRequest !== undefined) repeats.admit(key.name, sameRequest, key.repeatWindowMs as number, now());
 
     // 6. Call. Without a limit from the client, the default is sent, so the reservation covers the answer.
-    const forward: Record<string, unknown> = { ...body, messages: guarded.messages };
+    const forward: Record<string, unknown> = { ...body, messages: outgoing };
     if (body.max_tokens == null && body.max_completion_tokens == null) forward.max_tokens = config.defaultMaxTokens;
     // A stream always asks for the usage chunk, so that the real cost can be settled; the client gets
     // that chunk only if it asked for it too.
@@ -462,6 +498,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         "x-agent-gate-upstream": outcome.target.upstream.name,
         "x-agent-gate-cost-usd": formatUsd(cost),
         ...(where.redacted ? { "x-agent-gate-redacted": where.redacted.join(",") } : {}),
+        ...(where.diverted ? { "x-agent-gate-diverted": where.diverted.join(",") } : {}),
         ...(responseRedacted ? { "x-agent-gate-response-redacted": responseRedacted.join(",") } : {}),
       });
     } finally {
@@ -511,6 +548,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
       "x-agent-gate-route": routeId,
       "x-agent-gate-upstream": target.upstream.name,
       ...(where.redacted ? { "x-agent-gate-redacted": where.redacted.join(",") } : {}),
+      ...(where.diverted ? { "x-agent-gate-diverted": where.diverted.join(",") } : {}),
     };
     if (relay) res.writeHead(200, headers);
     const reader = body.getReader();
@@ -840,6 +878,8 @@ interface Where {
   upstream?: string;
   model?: string;
   redacted?: string[];
+  /** Divert rules that matched: the call went to the local upstream (config.divert). */
+  diverted?: string[];
   /** A streamed request ("stream": true). */
   stream?: boolean;
 }

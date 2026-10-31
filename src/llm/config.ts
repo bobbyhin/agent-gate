@@ -72,6 +72,16 @@ export interface GatewayKey {
   repeatWindowMs?: number;
 }
 
+/**
+ * Calls whose messages match one of `rules` (leak-guard rule ids) go to `to`, an upstream on this
+ * machine or this network, with their text unredacted, instead of being redacted (or blocked) and
+ * sent to the route's upstream. Absent: nothing is diverted.
+ */
+export interface DivertConfig {
+  rules: readonly string[];
+  to: Target;
+}
+
 /** Who may read GET /metrics (src/llm/metrics.ts). Absent: nobody, it is not served. */
 export interface MetricsConfig {
   /** SHA-256 of a key of its own: GET /metrics on the gateway's port, with Authorization: Bearer <key>. */
@@ -107,6 +117,7 @@ export interface LlmConfig {
   /** Send the upstreams a traceparent header (default true); some providers may refuse unknown headers. */
   sendTraceparent: boolean;
   metrics?: MetricsConfig;
+  divert?: DivertConfig;
 }
 
 export const DEFAULTS = {
@@ -148,7 +159,7 @@ export function parseLlmConfig(json: unknown, baseDir: string): LlmConfig {
   const config = object(json, "config");
   onlyKeys(
     config,
-    ["listen", "stateDir", "policy", "upstreams", "routes", "keys", "defaultMaxTokens", "timeoutMs", "retries", "backoffMs", "maxBackoffMs", "rateLimitWaitMs", "maxBodyBytes", "scanResponses", "streamIdleMs", "sendTraceparent", "metrics"],
+    ["listen", "stateDir", "policy", "upstreams", "routes", "keys", "defaultMaxTokens", "timeoutMs", "retries", "backoffMs", "maxBackoffMs", "rateLimitWaitMs", "maxBodyBytes", "scanResponses", "streamIdleMs", "sendTraceparent", "metrics", "divert"],
     "config",
   );
 
@@ -198,7 +209,43 @@ export function parseLlmConfig(json: unknown, baseDir: string): LlmConfig {
     streamIdleMs: optionalInteger(config.streamIdleMs, "config.streamIdleMs", 100, 600_000, DEFAULTS.streamIdleMs),
     sendTraceparent: config.sendTraceparent === undefined ? true : config.sendTraceparent === true ? true : config.sendTraceparent === false ? false : fail("config.sendTraceparent must be true or false"),
     ...(config.metrics === undefined ? {} : { metrics: parseMetrics(config.metrics, keyHashes) }),
+    ...(config.divert === undefined ? {} : { divert: parseDivert(config.divert, upstreams) }),
   };
+}
+
+/**
+ * True for an address that stays on this machine or this network: a loopback address or localhost, a
+ * private IPv4 range (10/8, 172.16/12, 192.168/16), an IPv6 unique local address (fc00::/7), or a
+ * name with no dot in it (a container or service name, such as "ollama"). Only the shape is checked:
+ * the operator vouches for what answers there.
+ */
+export function isLocalHost(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, "").toLowerCase();
+  if (h === "localhost" || isLoopback(h)) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(h);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  if (h.includes(":")) return /^f[cd][0-9a-f]{0,2}:/.test(h);
+  return !h.includes(".");
+}
+
+function parseDivert(raw: unknown, upstreams: ReadonlyMap<string, Upstream>): DivertConfig {
+  const at = "config.divert";
+  const d = object(raw, at);
+  onlyKeys(d, ["rules", "to"], at);
+  const rules = array(d.rules, `${at}.rules`).map((id, i) => text(id, `${at}.rules[${i}]`));
+  if (rules.length === 0) fail(`${at}.rules must name at least one leak-guard rule`);
+  if (new Set(rules).size !== rules.length) fail(`${at}.rules names a rule twice`);
+  const to = parseTarget(d.to, `${at}.to`, upstreams);
+  const upstream = upstreams.get(to.upstream) as Upstream;
+  // The whole point is that this text does not leave: refuse a target that does not look local.
+  const host = new URL(upstream.baseUrl).hostname;
+  if (!isLocalHost(host)) {
+    fail(`${at}.to: upstream "${upstream.name}" is at ${host}, which is not on this machine or a private network; diverted text must stay local`);
+  }
+  return { rules, to };
 }
 
 /** A loopback IP address: 127.0.0.0/8 or ::1. Names are not accepted, because a name can resolve elsewhere. */

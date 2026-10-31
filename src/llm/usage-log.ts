@@ -44,6 +44,8 @@ export interface UsageEntry {
   upstream429?: number;
   /** Leak-guard rules that redacted text in this call's messages. */
   redacted?: string[];
+  /** Divert rules that matched: the call went, unredacted, to the local upstream named in upstream. */
+  diverted?: string[];
   /** Leak-guard rules that redacted text in the answer. */
   responseRedacted?: string[];
   /** For a leak-guard block: which side the secret was on, the request ("prompt") or the answer ("response"). */

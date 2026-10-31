@@ -1033,7 +1033,7 @@ until steps 1 to 5 have passed.
 | 1. Authenticate | The gateway key (`Authorization: Bearer <key>`) is looked up by its SHA-256 and mapped to a name, such as `search-agent`. | 401 |
 | 2. Check | The body must be JSON with a `model` alias and `messages`. | 400, 413 |
 | 3. Route | Route rules pick an upstream and a model from the alias and the `x-agent-task` header. | 404 |
-| 4. Leak guard | The message text is scanned for secrets. A block rule refuses the call; a redact rule replaces the match. | 400 |
+| 4. Leak guard | The message text is scanned for secrets. A block rule refuses the call; a redact rule replaces the match. With `divert`, a call that matches a divert rule goes to a local model instead (see [Keeping personal data local](#keeping-personal-data-local)). | 400 |
 | 5. Reserve | The call's estimated cost is reserved against the key's daily and monthly caps. | 429 |
 | 6. Call | The upstream is called, with retries and then the fallback on a 5xx, a timeout or a 429. A streamed answer is read as it comes (see [Streaming](#streaming)). | 502, 504; 429 if the upstreams keep rate limiting |
 | 7. Settle | The reservation is settled with the real cost from the answer's `usage`, or released if the call failed. | |
@@ -1134,8 +1134,8 @@ read from `$GATEWAY_KEY`. This is the example config:
   `maxBackoffMs` (10000),
   `rateLimitWaitMs` (2000: the longest wait after a 429, see [Routing](#routing)), `maxBodyBytes`
   (1 MiB), `scanResponses` (true, see [Leak guard](#leak-guard)), `streamIdleMs` (30000, see
-  [Streaming](#streaming)), `sendTraceparent` (true, see [Tracing](#tracing)) and `metrics` (off, see
-  [Metrics](#metrics)).
+  [Streaming](#streaming)), `sendTraceparent` (true, see [Tracing](#tracing)), `metrics` (off, see
+  [Metrics](#metrics)) and `divert` (off, see [Keeping personal data local](#keeping-personal-data-local)).
 
 To make a gateway key and the hash for the config:
 
@@ -1422,6 +1422,68 @@ side a block was on (`"side": "prompt"` or `"response"`) and lists redactions in
 model that writes an example key in a known shape gets it refused or edited, exactly as a prompt
 with that key would be. `test/llm/response-guard.test.ts` checks every block rule on both sides.
 
+### Keeping personal data local
+
+Some text may be read by a model but may not leave the machine or the network: a customer's card
+number, a My Number. Refusing the call stops the work, and redacting the number removes what the work
+needs. `divert` sends such a call to a model you run yourself instead, with its text as it was:
+
+```json
+"divert": {
+  "rules": ["credit-card", "jp-my-number", "us-ssn", "us-itin"],
+  "to": { "upstream": "local", "model": "small" }
+}
+```
+
+`llm-gateway.config.ollama.example.json` has this, an upstream named `local` at Ollama's
+OpenAI-compatible address (`http://127.0.0.1:11434/v1`, priced at zero), and a cloud upstream that
+every other call goes to as before.
+
+- `rules` are leak-guard rule ids. When one of them matches a call's messages, the call goes to
+  `to.upstream` and nowhere else: no fallback, and nothing redacted. Its reservation is priced at that
+  upstream. If the upstream lacks the alias (`to.model`, else the one the client asked for) or does not
+  answer, the call fails; it is never sent to the cloud instead.
+- Block rules still come first: a private key next to a card number is refused, not diverted. A block
+  rule that `rules` lists diverts instead of blocking.
+- The target must look local: a loopback address or `localhost`, a private IPv4 range (10/8,
+  172.16/12, 192.168/16), an IPv6 unique local address, or a name with no dot in it (a container or a
+  service). Anything else stops the gateway at startup. Only the address is checked; what answers
+  there is the operator's to vouch for.
+- The answer goes through the response guard like any other, so a number the model repeats is
+  redacted on its way back.
+- The response names the rules in `x-agent-gate-diverted`, and the usage line in `diverted`, with no
+  text.
+
+Ollama does not check API keys, but `apiKeyEnv` needs a value, and the gateway cuts that value out of
+everything an upstream sends back (see [Keys](#keys)). Give it a long random one, such as
+`OLLAMA_API_KEY=local-$(openssl rand -hex 16)`, not a word like `ollama` that the answers contain. A
+real run against Ollama on this machine, with the example's model changed to `qwen2.5:3b` (one that
+was installed); `request.json` asks whether a made-up number that passes the Luhn check is a card
+number, and to repeat it (the `Date` and connection headers are left out):
+
+```
+$ curl -s -i http://127.0.0.1:8787/v1/chat/completions -H "Authorization: Bearer $GATEWAY_KEY" \
+    -H "content-type: application/json" -d @request.json
+HTTP/1.1 200 OK
+x-agent-gate-request-id: req-36184c47
+x-agent-gate-trace-id: 0e7d6cfefe50c1575fa390439a925e73
+content-type: application/json
+content-length: 397
+x-agent-gate-route: cloud-models
+x-agent-gate-upstream: local
+x-agent-gate-cost-usd: 0
+x-agent-gate-diverted: credit-card
+x-agent-gate-response-redacted: credit-card
+
+{"id":"chatcmpl-32","object":"chat.completion","created":1793429586,"model":"qwen2.5:3b","system_fingerprint":"fp_ollama","choices":[{"index":0,"message":{"role":"assistant","content":"No, that sequence is not a valid card number. [REDACTED:credit-card]"},"finish_reason":"stop"}],"usage":{"prompt_tokens":73,"prompt_tokens_details":{"cached_tokens":72},"completion_tokens":32,"total_tokens":105}}
+```
+
+Nothing went to the cloud upstream. The usage line:
+
+```json
+{"ts":"2026-10-31T06:53:06.780Z","id":"req-36184c47","key":"demo-agent","route":"cloud-models","upstream":"local","model":"qwen2.5:3b","status":200,"inputTokens":73,"outputTokens":32,"costUsd":0,"usage":"upstream","attempts":1,"fallback":false,"diverted":["credit-card"],"responseRedacted":["credit-card"],"latencyMs":356,"traceId":"0e7d6cfefe50c1575fa390439a925e73","spanId":"04986317c7e73252"}
+```
+
 ### Streaming
 
 A request with `"stream": true` gets its answer as server-sent events, in the format of OpenAI's chat
@@ -1609,7 +1671,8 @@ agent_gate_llm_budget_remaining_usd{key="demo-agent",cap="monthly"} 0.9997654
 - An upstream's error body is never passed on as it is, because a provider can quote the key it
   was given. A 401 or 403 becomes a 502 `upstream_auth_failed` with the gateway's own message, a
   5xx becomes the gateway's 502 or 504, a 429 the gateway's 429 `upstream_rate_limited` (see
-  [Routing](#routing)), and any other 4xx is passed on with the upstream keys cut out.
+  [Routing](#routing)), and any other 4xx is passed on with the upstream keys cut out. So is every
+  answer, streamed or not: each upstream key's value is replaced wherever it appears.
 - Client headers are not forwarded (the client's `Authorization` holds the gateway key), and
   redirects from an upstream are refused. The one header the gateway adds of its own is a
   `traceparent`, built from the checked trace id and the gateway's span id.
@@ -1861,7 +1924,7 @@ obeys, and the gateway blocks the call before it reaches the server. Another den
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 300 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 308 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file, a settle that comes
 twice or after its reservation expired, calls per minute and run caps); a leak-guard table
@@ -1891,7 +1954,10 @@ damages the ledger and the usage log and turns the upstream traceparent off. A P
 validator (the Luhn and My Number check digits, the SSN and ITIN ranges) and the four rules on every way
 their numbers are written, with look-alikes that fail their check left alone, and that a validator
 holds for a block rule and in the MCP result guard; the threat matrix runs its 30 rows; and the README's
-rule table is checked against the policy. A streaming suite runs two
+rule table is checked against the policy. A divert suite sends personal numbers unredacted to a local
+fake and nothing to the cloud one, checks that a block still wins unless the divert lists it, that a
+missing alias or a local upstream that is down is refused and never sent to the cloud, and that a
+target that is not local is refused at startup. A streaming suite runs two
 live gateways, one holding streams and one relaying them, against fakes that stream: the events passed
 on as they came, the usage chunk asked for and kept from a client that did not ask, a secret split
 across two chunks (withheld when held, passed when relayed), tool-call fragments put back together, a
@@ -1926,7 +1992,7 @@ audit log; the end-to-end test scores its own run that way. It checks which call
 the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 300/300 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1969,6 +2035,7 @@ policy.example.json                           the red lines as a gateway policy
 gateway.config.example.json                   a config that proxies the fake test server
 llm-policy.example.json                       the leak guard rules
 llm-gateway.config.example.json               an LLM gateway config for the fake upstream
+llm-gateway.config.ollama.example.json        a cloud upstream for most calls, Ollama on this machine for personal numbers
 Dockerfile                                    the LLM gateway image (and the demo's fake upstream image)
 .dockerignore                                 what the image build may read: an allowlist
 docker-compose.yml                            local demo: the gateway image in front of the fake upstream
