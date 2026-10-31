@@ -1031,13 +1031,13 @@ until steps 1 to 5 have passed.
 | Step | What happens | Refused with |
 | --- | --- | --- |
 | 1. Authenticate | The gateway key (`Authorization: Bearer <key>`) is looked up by its SHA-256 and mapped to a name, such as `search-agent`. | 401 |
-| 2. Check | The body must be JSON with a `model` alias and `messages`. `"stream": true` is refused. | 400, 413 |
+| 2. Check | The body must be JSON with a `model` alias and `messages`. | 400, 413 |
 | 3. Route | Route rules pick an upstream and a model from the alias and the `x-agent-task` header. | 404 |
 | 4. Leak guard | The message text is scanned for secrets. A block rule refuses the call; a redact rule replaces the match. | 400 |
 | 5. Reserve | The call's estimated cost is reserved against the key's daily and monthly caps. | 429 |
-| 6. Call | The upstream is called, with retries and then the fallback on a 5xx, a timeout or a 429. | 502, 504; 429 if the upstreams keep rate limiting |
+| 6. Call | The upstream is called, with retries and then the fallback on a 5xx, a timeout or a 429. A streamed answer is read as it comes (see [Streaming](#streaming)). | 502, 504; 429 if the upstreams keep rate limiting |
 | 7. Settle | The reservation is settled with the real cost from the answer's `usage`, or released if the call failed. | |
-| 8. Check the answer | The answer's text goes through the same leak guard. A block rule withholds it; a redact rule edits it. | 502 |
+| 8. Check the answer | The answer's text goes through the same leak guard. A block rule withholds it; a redact rule edits it. A stream is checked once it is complete. | 502 |
 | 9. Record | One line goes to the usage log, with no prompt or completion text. | |
 
 It is written in TypeScript on Node's own `http` module and global `fetch`, with no runtime
@@ -1132,8 +1132,9 @@ read from `$GATEWAY_KEY`. This is the example config:
 - Optional, with their defaults: `listen` (`127.0.0.1`, port 8787), `defaultMaxTokens` (1024),
   `timeoutMs` per attempt (60000), `retries` per upstream (1, at most 3), `backoffMs` (250),
   `rateLimitWaitMs` (2000: the longest wait after a 429, see [Routing](#routing)), `maxBodyBytes`
-  (1 MiB), `scanResponses` (true, see [Leak guard](#leak-guard)), `sendTraceparent` (true, see
-  [Tracing](#tracing)) and `metrics` (off, see [Metrics](#metrics)).
+  (1 MiB), `scanResponses` (true, see [Leak guard](#leak-guard)), `streamIdleMs` (30000, see
+  [Streaming](#streaming)), `sendTraceparent` (true, see [Tracing](#tracing)) and `metrics` (off, see
+  [Metrics](#metrics)).
 
 To make a gateway key and the hash for the config:
 
@@ -1161,8 +1162,8 @@ $ curl -s -i http://127.0.0.1:8787/v1/chat/completions \
     -H "x-agent-task: classify" \
     -d '{"model":"large","messages":[{"role":"user","content":"Label this ticket: printer on fire"}],"max_tokens":20}'
 HTTP/1.1 200 OK
-x-agent-gate-request-id: req-2d45a2b3
-x-agent-gate-trace-id: 35aac179a6f00f79d746d0d5f49a7d26
+x-agent-gate-request-id: req-50a14662
+x-agent-gate-trace-id: a8576eb80c1788fff01a9e61dc87c7ea
 content-type: application/json
 content-length: 286
 x-agent-gate-route: classify-is-cheap
@@ -1179,7 +1180,7 @@ tokens at $0.15 and 9 output tokens at $0.60 per million, from the upstream's ow
 gateway's log has one line per call:
 
 ```
-[agent-gate] 200 req-2d45a2b3 key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 30ms
+[agent-gate] 200 req-50a14662 key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 26ms
 ```
 
 ### Routing
@@ -1253,7 +1254,7 @@ though the key has spent almost nothing (headers shortened):
 
 ```
 HTTP/1.1 429 Too Many Requests
-retry-after: 71253
+retry-after: 63272
 
 {"error":{"message":"agent-gate: this call could cost up to $0.015015, and key \"demo-agent\" has $0.00977395 left of its daily budget of $0.01 ($0.00022605 spent, $0 held by calls in flight). Try again later, or with a lower max_tokens.","type":"insufficient_quota","param":null,"code":"budget_exceeded","cap":"daily"}}
 ```
@@ -1288,8 +1289,8 @@ twice, or a file was edited). From the run above:
 
 ```
 $ agent-gate usage --verify --config llm-gateway.config.json
-key         day         ledger       usage log    month    ledger       usage log    result
-demo-agent  2026-10-31  $0.00022605  $0.00022605  2026-10  $0.00022605  $0.00022605  ok
+key         day         ledger      usage log   month    ledger      usage log   result
+demo-agent  2026-10-31  $0.0002346  $0.0002346  2026-10  $0.0002346  $0.0002346  ok
 ```
 
 The ledger is `<stateDir>/ledger.json` (mode 0600). It is changed with the same locked
@@ -1300,7 +1301,7 @@ gateway that crashed mid-call expire on their own. The CLI shows the ledger:
 ```
 $ agent-gate usage --config llm-gateway.config.json
 key         today (2026-10-31 UTC)  this month (2026-10)  in flight
-demo-agent  $0.00022605 of $0.01    $0.00022605 of $1     0
+demo-agent  $0.0002346 of $0.01     $0.0002346 of $1      0
 ```
 
 `--json` prints the same as JSON.
@@ -1374,18 +1375,82 @@ side a block was on (`"side": "prompt"` or `"response"`) and lists redactions in
 model that writes an example key in a known shape gets it refused or edited, exactly as a prompt
 with that key would be. `test/llm/response-guard.test.ts` checks every block rule on both sides.
 
+### Streaming
+
+A request with `"stream": true` gets its answer as server-sent events, in the format of OpenAI's chat
+completions. Steps 1 to 5 do not change: a stream is authenticated, routed, checked by the leak guard
+and reserved against the budget before anything is sent upstream. From the run above (the `Date`,
+connection and transfer headers are left out):
+
+```
+$ curl -s -i -N http://127.0.0.1:8787/v1/chat/completions \
+    -H "Authorization: Bearer $GATEWAY_KEY" \
+    -H "content-type: application/json" \
+    -d '{"model":"small","messages":[{"role":"user","content":"Say hello in five words."}],"stream":true}'
+HTTP/1.1 200 OK
+x-agent-gate-request-id: req-dcf34475
+x-agent-gate-trace-id: dd177ac97093d07fabc9b5e8bb120cb5
+content-type: text/event-stream; charset=utf-8
+cache-control: no-cache
+x-agent-gate-route: cheap-models
+x-agent-gate-upstream: cheap
+x-agent-gate-cost-usd: 0.00000855
+
+data: {"id":"chatcmpl-fake-4","object":"chat.completion.chunk","created":1760400000,"model":"fake-small-1","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fake-4","object":"chat.completion.chunk","created":1760400000,"model":"fake-small-1","choices":[{"index":0,"delta":{"content":"fake answer 4"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fake-4","object":"chat.completion.chunk","created":1760400000,"model":"fake-small-1","choices":[{"index":0,"delta":{"content":" from fake-small-1"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fake-4","object":"chat.completion.chunk","created":1760400000,"model":"fake-small-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+- The gateway always asks the upstream for the usage chunk (`stream_options.include_usage`), so the
+  call is settled from the provider's own count, here 21 input and 9 output tokens. The client gets
+  that chunk only if it asked for it too; this one did not.
+- Retries, the fallback and the 429 handling work as for any call until an upstream answers. Once one
+  has answered with a stream, nothing is retried.
+- **Held until it is scanned.** With `scanResponses` on (the default), the gateway reads the whole
+  stream before it sends any of it, puts each choice's message back together (the content, and each
+  tool call's arguments, which arrive in fragments), and runs the leak guard over it as over any
+  answer. A block rule withholds it: 502 `response_blocked`, booked. A redact rule edits it, and the
+  stream is rebuilt: one chunk per choice with the whole edited message, one with its finish reason,
+  then the usage chunk if the client asked for it, and `[DONE]`. Otherwise the upstream's events go
+  out as they came. The client keeps the format and loses the speed: the first token arrives with the
+  last, which is why the answer above came with its cost in a header.
+- **Relayed.** With `"scanResponses": false`, events go to the client as they arrive, and nothing
+  reads the answer first, so a key that a model writes reaches the client. `test/llm/stream.test.ts`
+  sends a token split across two chunks through both modes.
+- **Stopped.** When the client goes away, the upstream request is aborted at once, so the model stops
+  generating. A stream that sends nothing for `streamIdleMs` (30 seconds by default) is stopped too,
+  and `timeoutMs` still bounds the whole answer. A relayed stream that is stopped or breaks off ends
+  with an error event in the gateway's own words (`upstream_error` or `upstream_timeout`) and no
+  `[DONE]`; a held one gets 502 or 504. A provider's own error event is never passed on, because it
+  can quote the key it was sent.
+- **Booked.** A stream that ends without a usage chunk (cut short, stopped, its client gone, or from a
+  provider that ignores `include_usage`) is booked at its estimate, the most it could have cost: the
+  provider bills what it generated, which the gateway cannot see. A request that never got an answer
+  costs nothing. `streamEnd` in the usage line says how a stream ended: `done`, `client_closed`,
+  `upstream_error`, `idle_timeout` or `timeout`. A client that left before anything was sent is
+  recorded with status 499.
+
+Why the default holds the stream, and what other gateways do about the same problem:
+[ADR 0011](docs/adr/0011-streaming.md).
+
 ### Usage log
 
 Every authenticated call appends one JSON line to `<stateDir>/usage.jsonl` (mode 0600). These are
 the lines from the run above:
 
 ```json
-{"ts":"2026-10-31T04:12:27.886Z","id":"req-2d45a2b3","key":"demo-agent","task":"classify","route":"classify-is-cheap","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":23,"outputTokens":9,"costUsd":0.00000885,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":30,"traceId":"35aac179a6f00f79d746d0d5f49a7d26","spanId":"f1062de8f96d8ecf"}
-{"ts":"2026-10-31T04:12:27.900Z","id":"req-0b25f5a2","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":200,"inputTokens":24,"outputTokens":9,"costUsd":0.000207,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":13,"traceId":"516b31cda97e0fad26e91a682a10de97","spanId":"859ae43a69765dfd"}
-{"ts":"2026-10-31T04:12:27.901Z","id":"req-11796913","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":400,"error":"secret_detected","rule":"private-key","side":"prompt","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":0,"traceId":"87dfb18421a8d40424f5691bc640f647","spanId":"5f6fecef640c00e2"}
-{"ts":"2026-10-31T04:12:27.913Z","id":"req-6e4fef5a","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":32,"outputTokens":9,"costUsd":0.0000102,"usage":"upstream","attempts":1,"fallback":false,"redacted":["api-key-assignment"],"latencyMs":11,"traceId":"9cf2901e1d1fd6f7edbabe06b9c7bea7","spanId":"aaa511ee0c0540ab"}
-{"ts":"2026-10-31T04:12:27.918Z","id":"req-05212835","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":429,"error":"budget_exceeded","rule":"daily","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":5,"traceId":"c36756fbda3f07fb2791108c04c655a6","spanId":"a64756d9bb24cca5"}
-{"ts":"2026-10-31T04:12:27.918Z","id":"req-025dd171","key":"demo-agent","status":400,"error":"stream_not_supported","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":0,"traceId":"c13a4d7e144a10cd7d67a456d53e27f3","spanId":"4515ac717591144d"}
+{"ts":"2026-10-31T06:25:28.251Z","id":"req-50a14662","key":"demo-agent","task":"classify","route":"classify-is-cheap","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":23,"outputTokens":9,"costUsd":0.00000885,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":26,"traceId":"a8576eb80c1788fff01a9e61dc87c7ea","spanId":"137e55b29d8a3bd8"}
+{"ts":"2026-10-31T06:25:28.270Z","id":"req-d273624f","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":200,"inputTokens":24,"outputTokens":9,"costUsd":0.000207,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":11,"traceId":"adb88b2126f5a302f0181c0c747479e0","spanId":"78c764835910b6ff"}
+{"ts":"2026-10-31T06:25:28.277Z","id":"req-71356535","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":400,"error":"secret_detected","rule":"private-key","side":"prompt","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":0,"traceId":"86e26e1f7776d62c973b1ab40dab1d4c","spanId":"a8f5c5a54fbcc58a"}
+{"ts":"2026-10-31T06:25:28.294Z","id":"req-463eb037","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":32,"outputTokens":9,"costUsd":0.0000102,"usage":"upstream","attempts":1,"fallback":false,"redacted":["api-key-assignment"],"latencyMs":12,"traceId":"cfeb7276234e9357a5f68c7aa8969116","spanId":"e7ac986e6e90516f"}
+{"ts":"2026-10-31T06:25:28.305Z","id":"req-9b4eb8e3","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":429,"error":"budget_exceeded","rule":"daily","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":5,"traceId":"3111766223a75731e4dc626d51db9960","spanId":"a7a52f8786d1071f"}
+{"ts":"2026-10-31T06:25:28.324Z","id":"req-dcf34475","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":21,"outputTokens":9,"costUsd":0.00000855,"usage":"upstream","attempts":1,"fallback":false,"stream":true,"streamEnd":"done","latencyMs":13,"traceId":"dd177ac97093d07fabc9b5e8bb120cb5","spanId":"0674f18b5459dd24"}
 ```
 
 There is no prompt or completion text in it, on purpose. Prompts carry whatever the agent read or
@@ -1395,7 +1460,8 @@ dollars, not the conversation. `id` ties a line to the `x-agent-gate-request-id`
 `usage` says whether the tokens came from the upstream or, when it reported none, from the
 estimate, and `attempts` and `fallback` show retries and fallbacks. `task` is the `x-agent-task`
 header, on one line and cut at 100 characters. `traceId` and `spanId` are the call's trace and the
-gateway's span in it (see [Tracing](#tracing)).
+gateway's span in it (see [Tracing](#tracing)). A streamed call has `"stream": true` and `streamEnd`,
+how it ended (see [Streaming](#streaming)).
 
 `agent-gate usage --by task` adds the log up per task: which kind of work spends the money, and which
 one trips the leak guard. From the run above:
@@ -1403,7 +1469,7 @@ one trips the leak guard. From the run above:
 ```
 $ agent-gate usage --by task --config llm-gateway.config.json
 task      requests  ok  input tokens  output tokens  cost         leak blocked  leak redacted
-(none)    5         2   56            18             $0.0002172   1             1
+(none)    5         3   77            27             $0.00022575  1             1
 classify  1         1   23            9              $0.00000885  0             0
 ```
 
@@ -1455,19 +1521,18 @@ A scrape at the end of the run above, which had the second form added to its con
 $ curl -s http://127.0.0.1:9464/metrics
 # HELP agent_gate_llm_requests_total Authenticated chat completion requests, by route, upstream and HTTP status.
 # TYPE agent_gate_llm_requests_total counter
-agent_gate_llm_requests_total{route="",upstream="",status="400"} 1
-agent_gate_llm_requests_total{route="cheap-models",upstream="cheap",status="200"} 1
+agent_gate_llm_requests_total{route="cheap-models",upstream="cheap",status="200"} 2
 agent_gate_llm_requests_total{route="cheap-models",upstream="cheap",status="400"} 1
 agent_gate_llm_requests_total{route="classify-is-cheap",upstream="cheap",status="200"} 1
 agent_gate_llm_requests_total{route="strong-models",upstream="strong",status="200"} 1
 agent_gate_llm_requests_total{route="strong-models",upstream="strong",status="429"} 1
 # HELP agent_gate_llm_tokens_total Tokens booked: input and output.
 # TYPE agent_gate_llm_tokens_total counter
-agent_gate_llm_tokens_total{direction="input"} 79
-agent_gate_llm_tokens_total{direction="output"} 27
+agent_gate_llm_tokens_total{direction="input"} 100
+agent_gate_llm_tokens_total{direction="output"} 36
 # HELP agent_gate_llm_cost_usd_total US dollars booked against the gateway keys.
 # TYPE agent_gate_llm_cost_usd_total counter
-agent_gate_llm_cost_usd_total 0.00022605
+agent_gate_llm_cost_usd_total 0.0002346
 # HELP agent_gate_llm_request_duration_seconds Time from receiving a request to answering it.
 # TYPE agent_gate_llm_request_duration_seconds histogram
 agent_gate_llm_request_duration_seconds_bucket{le="0.05"} 6
@@ -1481,15 +1546,13 @@ agent_gate_llm_request_duration_seconds_bucket{le="10"} 6
 agent_gate_llm_request_duration_seconds_bucket{le="30"} 6
 agent_gate_llm_request_duration_seconds_bucket{le="60"} 6
 agent_gate_llm_request_duration_seconds_bucket{le="+Inf"} 6
-agent_gate_llm_request_duration_seconds_sum 0.059
+agent_gate_llm_request_duration_seconds_sum 0.067
 agent_gate_llm_request_duration_seconds_count 6
 # HELP agent_gate_llm_budget_remaining_usd What a key may still spend: its cap minus settled spend minus what calls in flight hold.
 # TYPE agent_gate_llm_budget_remaining_usd gauge
-agent_gate_llm_budget_remaining_usd{key="demo-agent",cap="daily"} 0.00977395
-agent_gate_llm_budget_remaining_usd{key="demo-agent",cap="monthly"} 0.99977395
+agent_gate_llm_budget_remaining_usd{key="demo-agent",cap="daily"} 0.0097654
+agent_gate_llm_budget_remaining_usd{key="demo-agent",cap="monthly"} 0.9997654
 ```
-
-The first `requests_total` line is the streaming request: refused before routing, so it has no route.
 
 ### Keys
 
@@ -1509,8 +1572,9 @@ provider key appears in any response, in the state files or in the gateway's log
 
 ### What the LLM gateway does not cover
 
-- Streaming. `"stream": true` is refused with 400 `stream_not_supported`. Relaying a stream means
-  forwarding it chunk by chunk and reading `usage` from the last chunk.
+- Token by token delivery of a scanned answer. With `scanResponses` on, a stream reaches the client
+  all at once, when it is complete; turning the scan off gives real streaming, unscanned (see
+  [Streaming](#streaming)).
 - Other endpoints: embeddings, images, audio, the Responses API, legacy completions. Only
   `POST /v1/chat/completions` and `GET /healthz` exist.
 - Provider-specific features. The request body is forwarded as it is, apart from `model`, redacted
@@ -1522,8 +1586,8 @@ provider key appears in any response, in the state files or in the gateway's log
   count for nothing; after it, the upstream's own `usage` is booked. The ADR says what that means
   for the caps.
 - Secrets the leak guard does not know. It is a list of regexes, on the request and the answer, so a
-  secret in a format it does not know, split across messages or chunks of an answer, or encoded
-  (base64, for example) gets through.
+  secret in a format it does not know, split across messages, or encoded (base64, for example) gets
+  through. A held stream is put back together before it is read; a relayed one is not read at all.
 - Token rate limits, and budgets per route or per model. Budgets, calls per minute and run caps are
   per key.
 - Prices are config values. Keep them in step with the providers' price lists.
@@ -1532,8 +1596,8 @@ provider key appears in any response, in the state files or in the gateway's log
   proxy that terminates TLS.
 - Upstream health. `/healthz` reports that the process is up; it does not call the upstreams,
   because a probe that did would spend money.
-- Cancellation. A client that disconnects does not cancel the upstream call; the call finishes and
-  is booked.
+- Cancelling a call that is not streamed. When its client disconnects, the upstream call goes on,
+  finishes and is booked. A stream is cut off at once (see [Streaming](#streaming)).
 
 ## Example: a status server behind the MCP gateway
 
@@ -1660,6 +1724,8 @@ records written after a call has already happened; those fail loudly instead, on
 | LLM gateway | a provider key's variable is not set | the gateway does not start, naming the variable | `test/llm/cli.test.ts` |
 | LLM gateway | the upstream answers 5xx or times out | retries, then the fallback; else 502 or 504, and nothing is charged | `test/llm/upstream.test.ts`, `e2e.test.ts` |
 | LLM gateway | the upstream answers 429 | the fallback at once; on the last upstream, one capped wait; else the gateway's own 429, and nothing is charged | `test/llm/upstream.test.ts`, `e2e.test.ts` |
+| LLM gateway | a stream breaks off, sends an error event, or goes quiet for `streamIdleMs` | the upstream is cut off; a relayed client gets an error event in the gateway's words and no `[DONE]`, a held one 502 or 504; booked at its estimate | `test/llm/stream.test.ts` |
+| LLM gateway | the client of a stream goes away | the upstream request is aborted at once; booked at its estimate, or nothing if no answer had started | `test/llm/stream.test.ts` |
 | After a call | an MCP result line, an LLM usage line or the ledger's settle cannot be written | the call has already run, so it is answered and the failure is reported on stderr; a settle that failed leaves its reservation until the reservation expires | `test/llm/failure.test.ts` (the usage line); the other two have no test |
 
 ## Related work
@@ -1748,7 +1814,7 @@ obeys, and the gateway blocks the call before it reaches the server. Another den
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 235 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 253 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file, a settle that comes
 twice or after its reservation expired, calls per minute and run caps); a leak-guard table
@@ -1771,7 +1837,13 @@ third call and before it passes its dollars, each cut in the usage log; the end-
 checks that `usage --verify` finds the usage log and the ledger in agreement. A response-guard
 suite runs every block rule on a request and on an answer, and a live gateway against providers
 whose answers carry a secret (withheld, booked) or a key assignment (redacted). A failure suite
-damages the ledger and the usage log and turns the upstream traceparent off. Six more check the
+damages the ledger and the usage log and turns the upstream traceparent off. A streaming suite runs two
+live gateways, one holding streams and one relaying them, against fakes that stream: the events passed
+on as they came, the usage chunk asked for and kept from a client that did not ask, a secret split
+across two chunks (withheld when held, passed when relayed), tool-call fragments put back together, a
+redaction rebuilt into the stream, a client that leaves mid-stream or before the answer (the fake sees
+its request closed), a stream cut short, an error event that quotes the key, a quiet upstream, and the
+usage log and the ledger in agreement afterwards. Six more check the
 gateway configs under `deploy/`: they load, they use the container's paths, the deployable one
 refuses the demo key, the Kubernetes copy of the leak-guard policy matches the example, and Cloud
 Run's request timeout is longer than the gateway's longest call. Every
@@ -1800,7 +1872,7 @@ audit log; the end-to-end test scores its own run that way. It checks which call
 the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 235/235 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 253/253 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1829,6 +1901,7 @@ src/gateway/cli.ts                            agent-gate serve, approvals ..., l
 src/llm/server.ts                             the LLM gateway: HTTP, keys, the steps of a call
 src/llm/routing.ts                            routing (pure): route(config, request) -> upstream and model
 src/llm/upstream.ts                           calls the upstreams: retries, backoff, fallback
+src/llm/stream.ts                             streamed answers: reads the events, puts messages back together
 src/llm/budget.ts                             the cost estimate and the ledger in <stateDir>/ledger.json
 src/llm/leak-guard.ts                         the leak guard (pure): block or redact secrets in messages
 src/llm/usage-log.ts                          the usage log, <stateDir>/usage.jsonl
@@ -1888,6 +1961,7 @@ docs/adr/0005-approvals-are-action-tokens.md  an approval is a server-side actio
 docs/adr/0006-standing-approvals.md           bounded standing approvals, and why only some rules accept them
 docs/adr/0007-where-agent-gate-sits.md        a control plane in front of calls, not an agent host; production readiness
 docs/adr/0008-second-reviewer-escalate-only.md a second reviewer that can only make a decision stricter (partly built)
+docs/adr/0011-streaming.md                    why a streamed answer is held until it is scanned, unless scanning is off
 tsconfig.json                                 compiles src/ and test/ into dist/
 AGENTS.md                                     build, layout and rules for coding agents
 CLAUDE.md                                     one line that points Claude Code to AGENTS.md

@@ -37,9 +37,10 @@ import { costUsd, estimateInputTokens, formatUsd, Ledger, roundUsd, type Reserve
 import { hashKey, type GatewayKey, type LlmConfig } from "./config.js";
 import { guardMessages, guardResponse, messageTexts, type LeakPolicy } from "./leak-guard.js";
 import { CONTENT_TYPE, Metrics } from "./metrics.js";
-import { route } from "./routing.js";
+import { route, type ResolvedTarget } from "./routing.js";
+import { isUsageOnly, rebuildEvents, SseParser, StreamAssembler } from "./stream.js";
 import { callUpstreams } from "./upstream.js";
-import { UsageLog, type UsageEntry } from "./usage-log.js";
+import { UsageLog, type StreamEnd, type UsageEntry } from "./usage-log.js";
 
 export interface LlmGatewayOptions {
   /** Where the upstream API keys are read from (default: process.env). */
@@ -59,7 +60,10 @@ export interface LlmGateway {
 }
 
 type ExtraHeaders = Record<string, string | number>;
-type Outcome = Partial<Pick<UsageEntry, "error" | "rule" | "side" | "inputTokens" | "outputTokens" | "costUsd" | "usage" | "attempts" | "fallback" | "upstream429" | "settle" | "responseRedacted">>;
+type Outcome = Partial<Pick<UsageEntry, "error" | "rule" | "side" | "inputTokens" | "outputTokens" | "costUsd" | "usage" | "attempts" | "fallback" | "upstream429" | "settle" | "responseRedacted" | "streamEnd">>;
+/** Writes the usage line (and the log line and the metrics) of a call, without answering it. */
+type Record_ = (status: number, outcome?: Outcome) => void;
+type Finish = (status: number, body: unknown, outcome?: Outcome, headers?: ExtraHeaders) => void;
 
 /** The x-agent-task header is kept in the usage line on one line, at most this long. */
 const TASK_MAX_CHARS = 100;
@@ -155,8 +159,8 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     const task = typeof taskHeader === "string" ? cleanNote(taskHeader, TASK_MAX_CHARS) : undefined;
 
     // From here on, every answer also writes a usage line.
-    const where: { route?: string; upstream?: string; model?: string; redacted?: string[] } = {};
-    const finish = (status: number, body: unknown, outcome: Outcome = {}, headers: ExtraHeaders = {}): void => {
+    const where: Where = {};
+    const record: Record_ = (status, outcome = {}) => {
       const entry: Omit<UsageEntry, "ts"> = {
         id,
         key: key.name,
@@ -175,6 +179,8 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         ...(outcome.settle === undefined ? {} : { settle: outcome.settle }),
         ...(where.redacted === undefined ? {} : { redacted: where.redacted }),
         ...(outcome.responseRedacted === undefined ? {} : { responseRedacted: outcome.responseRedacted }),
+        ...(where.stream ? { stream: true as const } : {}),
+        ...(outcome.streamEnd === undefined ? {} : { streamEnd: outcome.streamEnd }),
         latencyMs: Math.round(performance.now() - started),
         traceId,
         spanId,
@@ -193,13 +199,16 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
       }
       log(
         `${status} ${id} key=${key.name}${where.route ? ` route=${where.route} upstream=${where.upstream} model=${where.model}` : ""}` +
-          ` cost=$${formatUsd(entry.costUsd)}${outcome.error ? ` error=${outcome.error}` : ""} ${entry.latencyMs}ms`,
+          ` cost=$${formatUsd(entry.costUsd)}${outcome.error ? ` error=${outcome.error}` : ""}${outcome.streamEnd ? ` stream=${outcome.streamEnd}` : ""} ${entry.latencyMs}ms`,
       );
+    };
+    const finish: Finish = (status, body, outcome = {}, headers = {}) => {
+      record(status, outcome);
       send(res, status, body, headers);
     };
 
     try {
-      await chat(req, key, where, finish, traceparent, context.runId);
+      await chat(req, res, key, where, record, finish, traceparent, context.runId);
     } catch (err) {
       log(`${id} failed: ${errorText(err)}`);
       if (res.headersSent) res.destroy();
@@ -209,9 +218,11 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
 
   async function chat(
     req: http.IncomingMessage,
+    res: http.ServerResponse,
     key: GatewayKey,
-    where: { route?: string; upstream?: string; model?: string; redacted?: string[] },
-    finish: (status: number, body: unknown, outcome?: Outcome, headers?: ExtraHeaders) => void,
+    where: Where,
+    record: Record_,
+    finish: Finish,
     traceparent: string,
     runId: string | undefined,
   ): Promise<void> {
@@ -235,6 +246,8 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     if (problem) return finish(400, apiError(problem.code, `agent-gate: ${problem.message}`, { param: problem.param }), { error: problem.code });
     const model = body.model as string;
     const messages = body.messages as unknown[];
+    const streaming = body.stream === true;
+    if (streaming) where.stream = true;
 
     // 3. Route.
     const taskHeader = req.headers["x-agent-task"];
@@ -278,6 +291,22 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     // 6. Call. Without a limit from the client, the default is sent, so the reservation covers the answer.
     const forward: Record<string, unknown> = { ...body, messages: guarded.messages };
     if (body.max_tokens == null && body.max_completion_tokens == null) forward.max_tokens = config.defaultMaxTokens;
+    // A stream always asks for the usage chunk, so that the real cost can be settled; the client gets
+    // that chunk only if it asked for it too.
+    const clientWantsUsage = isRecord(body.stream_options) && body.stream_options.include_usage === true;
+    if (streaming) forward.stream_options = { ...(isRecord(body.stream_options) ? body.stream_options : {}), include_usage: true };
+    // A streamed call stops when its client goes away: no more attempts, and the upstream is cut off.
+    const cancel = new AbortController();
+    let stopped: StreamEnd | undefined;
+    const stop = (why: StreamEnd): void => {
+      stopped ??= why;
+      cancel.abort(new Error(`stream stopped: ${why}`));
+    };
+    if (streaming) {
+      res.once("close", () => {
+        if (!res.writableEnded) stop("client_closed");
+      });
+    }
     let open = true;
     const release = (): void => {
       open = false;
@@ -293,7 +322,13 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         ...(options.fetch ? { fetch: options.fetch } : {}),
         log,
         ...(config.sendTraceparent ? { traceparent } : {}),
+        ...(streaming ? { stream: true, signal: cancel.signal } : {}),
       });
+      if (!outcome.ok && outcome.failure === "cancelled") {
+        // The client left before any upstream answered: as for any call that failed, nothing is booked.
+        release();
+        return record(499, { error: "client_closed", attempts: outcome.attempts, fallback: targets.length > 1, upstream429: outcome.rateLimited, streamEnd: "client_closed" });
+      }
       if (!outcome.ok && outcome.failure === "rate_limited") {
         release();
         // The provider's own body is not passed on (it can quote the key); its Retry-After is.
@@ -323,6 +358,15 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
 
       Object.assign(where, { upstream: outcome.target.upstream.name, model: outcome.target.model });
       const via = { attempts: outcome.attempts, fallback: outcome.fallback, upstream429: outcome.rateLimited };
+      if (outcome.response) {
+        const response = outcome.response;
+        if ((response.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream") && response.body) {
+          open = false; // relayStream() settles the reservation itself
+          return await relayStream(res, response.body, outcome.target, chosen.rule, key.name, reservation, { input: inputTokens, output: outputTokens }, via, clientWantsUsage, where, record, finish, stop, () => stopped);
+        }
+        // An upstream that answered a streamed request with a whole JSON answer: handled like one.
+        outcome.body = await response.text();
+      }
       if (outcome.status >= 400) {
         release();
         if (outcome.status === 401 || outcome.status === 403) {
@@ -406,6 +450,167 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         }
       }
     }
+  }
+
+  /**
+   * A streamed answer, from step 7 on. With scanResponses (the default) the whole stream is read
+   * first and scanned like a non-streamed answer; only then is it sent, so the client gets every event
+   * at once, at the end. Without it, events are passed on as they arrive and the answer is not
+   * scanned. Either way the call is settled from the usage chunk, or at its estimate when the stream
+   * ended without one: the provider bills what it generated, and the gateway cannot see that once it
+   * stops reading. Why: docs/adr/0011-streaming.md.
+   */
+  async function relayStream(
+    res: http.ServerResponse,
+    body: ReadableStream<Uint8Array>,
+    target: ResolvedTarget,
+    routeId: string,
+    keyName: string,
+    reservation: { id: string; usd: number },
+    estimate: { input: number; output: number },
+    via: Outcome,
+    clientWantsUsage: boolean,
+    where: Where,
+    record: Record_,
+    finish: Finish,
+    stop: (why: StreamEnd) => void,
+    stopped: () => StreamEnd | undefined,
+  ): Promise<void> {
+    const relay = !config.scanResponses;
+    const parser = new SseParser();
+    const assembler = new StreamAssembler();
+    const decoder = new TextDecoder();
+    const kept: string[] = []; // the events to send, when buffering; each without its blank line
+    let usageChunk: Record<string, unknown> | undefined;
+    const headers: ExtraHeaders = {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+      "x-agent-gate-route": routeId,
+      "x-agent-gate-upstream": target.upstream.name,
+      ...(where.redacted ? { "x-agent-gate-redacted": where.redacted.join(",") } : {}),
+    };
+    if (relay) res.writeHead(200, headers);
+    const reader = body.getReader();
+    let end: StreamEnd | undefined;
+    let idle: NodeJS.Timeout | undefined;
+    try {
+      reading: for (;;) {
+        idle = setTimeout(() => stop("idle_timeout"), config.streamIdleMs);
+        const { value, done } = await reader.read();
+        clearTimeout(idle);
+        if (done) break;
+        for (const event of parser.push(decoder.decode(value, { stream: true }))) {
+          if (event.data === undefined) continue; // comments and other fields are not passed on
+          if (event.data.trim() === "[DONE]") {
+            end = "done";
+            break reading;
+          }
+          let chunk: unknown;
+          try {
+            chunk = JSON.parse(event.data);
+          } catch {
+            chunk = undefined;
+          }
+          // An "error" frame, or anything that is not a JSON chunk, is the upstream failing mid-stream.
+          // Its text is not passed on: a provider's error can quote the key it was sent.
+          if (!isRecord(chunk) || chunk.error !== undefined) {
+            end = "upstream_error";
+            break reading;
+          }
+          assembler.add(chunk);
+          if (isUsageOnly(chunk)) {
+            usageChunk = chunk;
+            if (!clientWantsUsage) continue;
+          }
+          const text = scrub(event.raw, apiKeys);
+          if (relay) await write(res, `${text}\n\n`);
+          else kept.push(text);
+        }
+      }
+      // The body ended without [DONE]: whole if every choice has finished, else cut short.
+      end ??= assembler.finished ? "done" : "upstream_error";
+    } catch (err) {
+      end = stopped() ?? ((err as { name?: unknown } | null)?.name === "TimeoutError" ? "timeout" : "upstream_error");
+    } finally {
+      clearTimeout(idle);
+      // Done: stop reading. Anything else: cut the upstream off, so that it stops generating.
+      if (end !== "done") stop(end ?? "upstream_error");
+      reader.cancel().catch(() => undefined);
+    }
+
+    const used = readUsage({ usage: assembler.usage });
+    const cost = used ? costUsd(target.upstream.pricePerMTok, used.input, used.output) : reservation.usd;
+    let settled: SettleOutcome = "booked";
+    try {
+      settled = ledger.settle(keyName, reservation.id, cost);
+    } catch (err) {
+      log(`could not settle ${reservation.id} for key "${keyName}" ($${formatUsd(cost)}): ${errorText(err)}; its reservation stays until it expires`);
+    }
+    if (settled !== "booked") log(`settled ${reservation.id} for key "${keyName}" ($${formatUsd(cost)}) as ${settled}`);
+    const spent: Outcome = {
+      inputTokens: used?.input ?? estimate.input,
+      outputTokens: used?.output ?? estimate.output,
+      costUsd: cost,
+      usage: used ? "upstream" : "estimate",
+      ...via,
+      ...(settled === "booked" ? {} : { settle: settled }),
+      streamEnd: end,
+    };
+    const failed = end === "done" || end === "client_closed" ? undefined : streamFailure(end, used !== undefined);
+
+    if (relay) {
+      // The client already has a 200 and the events so far: the end of the stream says how it ended.
+      if (end === "done") await write(res, "data: [DONE]\n\n");
+      else if (failed) await write(res, `data: ${JSON.stringify(failed.body)}\n\n`);
+      record(200, { ...spent, ...(failed ? { error: failed.code } : end === "client_closed" ? { error: "client_closed" } : {}) });
+      if (!res.destroyed) res.end();
+      return;
+    }
+    // Buffered: nothing has been sent yet.
+    if (end === "client_closed") return record(499, { ...spent, error: "client_closed" });
+    if (failed) return finish(failed.status, failed.body, { ...spent, error: failed.code });
+    const scanned = guardResponse(policy, assembler.answer());
+    if (scanned.action === "block") {
+      return finish(
+        502,
+        apiError(
+          "response_blocked",
+          `agent-gate: the model's answer contains text that looks like a secret (rule ${scanned.rule}), so it was not passed on. The call was paid for; if the secret is real, rotate it.`,
+          { type: "api_error", rule: scanned.rule },
+        ),
+        { ...spent, error: "response_blocked", rule: scanned.rule, side: "response" },
+      );
+    }
+    let events = [...kept, "data: [DONE]"];
+    let responseRedacted: string[] | undefined;
+    if (scanned.redactions.length > 0) {
+      // The pieces cannot be replayed: a match can span several of them. Each choice is sent whole.
+      responseRedacted = scanned.redactions.map((r) => r.rule);
+      const usage = clientWantsUsage ? (usageChunk ?? (assembler.usage ? { ...assembler.meta, object: "chat.completion.chunk", choices: [], usage: assembler.usage } : undefined)) : undefined;
+      events = rebuildEvents(assembler.meta, scanned.body.choices as Array<{ index: number; message: unknown; finish_reason: unknown }>, usage).map((e) => scrub(e, apiKeys));
+    }
+    record(200, { ...spent, ...(responseRedacted ? { responseRedacted } : {}) });
+    if (res.destroyed) return;
+    res.writeHead(200, {
+      ...headers,
+      "x-agent-gate-cost-usd": formatUsd(cost),
+      ...(responseRedacted ? { "x-agent-gate-response-redacted": responseRedacted.join(",") } : {}),
+    });
+    res.end(events.map((e) => `${e}\n\n`).join(""));
+  }
+
+  /** How a stream that broke off is reported: the gateway's own words, never the provider's. */
+  function streamFailure(end: StreamEnd, usageKnown: boolean): { status: number; code: string; body: unknown } {
+    const timedOut = end === "timeout" || end === "idle_timeout";
+    const what =
+      end === "idle_timeout"
+        ? `the upstream sent nothing for ${config.streamIdleMs} ms, so the stream was stopped`
+        : end === "timeout"
+          ? `the upstream's stream took longer than ${config.timeoutMs} ms, so it was stopped`
+          : "the upstream's stream broke off before it finished";
+    const charged = usageKnown ? "It was booked from the usage the upstream reported." : "It was booked at its estimate, because the provider bills what it generated.";
+    const code = timedOut ? "upstream_timeout" : "upstream_error";
+    return { status: timedOut ? 504 : 502, code, body: apiError(code, `agent-gate: ${what}. ${charged}`, { type: "api_error" }) };
   }
 
   const server = http.createServer((req, res) => {
@@ -527,11 +732,8 @@ export function longestCallMs(config: Pick<LlmConfig, "timeoutMs" | "retries" | 
 }
 
 function checkRequest(body: Record<string, unknown>): { code: string; param: string; message: string } | undefined {
-  // ponytail: non-streaming only. A streamed answer has to be relayed chunk by chunk and its usage
-  // read from the last chunk; until that exists, "stream": true is refused rather than half done.
-  if (body.stream != null && body.stream !== false) {
-    return { code: "stream_not_supported", param: "stream", message: 'streaming is not supported by this gateway; leave "stream" out or set it to false' };
-  }
+  if (body.stream != null && typeof body.stream !== "boolean") return { code: "invalid_request", param: "stream", message: "stream must be true or false" };
+  if (body.stream_options != null && !isRecord(body.stream_options)) return { code: "invalid_request", param: "stream_options", message: "stream_options must be an object" };
   if (typeof body.model !== "string" || body.model === "") return { code: "invalid_request", param: "model", message: "model must be a non-empty string (a model alias)" };
   if (!Array.isArray(body.messages) || body.messages.length === 0) return { code: "invalid_request", param: "messages", message: "messages must be a non-empty array" };
   for (const field of ["max_tokens", "max_completion_tokens"]) {
@@ -586,6 +788,34 @@ function send(res: http.ServerResponse, status: number, body: unknown, headers: 
   const text = typeof body === "string" ? body : JSON.stringify(body);
   res.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text), ...headers });
   res.end(text);
+}
+
+/** Writes to a client, waiting while its connection is full; nothing once it is gone. */
+async function write(res: http.ServerResponse, text: string): Promise<void> {
+  if (res.destroyed || res.writableEnded) return;
+  if (res.write(text)) return;
+  await new Promise<void>((resolve) => {
+    const done = (): void => {
+      res.off("drain", done);
+      res.off("close", done);
+      resolve();
+    };
+    res.once("drain", done);
+    res.once("close", done);
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+interface Where {
+  route?: string;
+  upstream?: string;
+  model?: string;
+  redacted?: string[];
+  /** A streamed request ("stream": true). */
+  stream?: boolean;
 }
 
 function clip(value: string): string {

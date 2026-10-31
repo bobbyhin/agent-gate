@@ -96,8 +96,10 @@ export interface LlmConfig {
   /** After a 429 on the last upstream: the longest the gateway waits (Retry-After, capped) before its one retry. 0: never. */
   rateLimitWaitMs: number;
   maxBodyBytes: number;
-  /** Run the leak guard over the answers too (default true). */
+  /** Run the leak guard over the answers too (default true). A streamed answer is then held until it is complete. */
   scanResponses: boolean;
+  /** A stream that sends nothing for this long is stopped (default 30 s). */
+  streamIdleMs: number;
   /** Send the upstreams a traceparent header (default true); some providers may refuse unknown headers. */
   sendTraceparent: boolean;
   metrics?: MetricsConfig;
@@ -112,6 +114,7 @@ export const DEFAULTS = {
   backoffMs: 250,
   rateLimitWaitMs: 2000,
   maxBodyBytes: 1024 * 1024,
+  streamIdleMs: 30_000,
 } as const;
 
 // ponytail: at most 3 retries per upstream. Each one costs the caller a timeout; past that, the
@@ -140,7 +143,7 @@ export function parseLlmConfig(json: unknown, baseDir: string): LlmConfig {
   const config = object(json, "config");
   onlyKeys(
     config,
-    ["listen", "stateDir", "policy", "upstreams", "routes", "keys", "defaultMaxTokens", "timeoutMs", "retries", "backoffMs", "rateLimitWaitMs", "maxBodyBytes", "scanResponses", "sendTraceparent", "metrics"],
+    ["listen", "stateDir", "policy", "upstreams", "routes", "keys", "defaultMaxTokens", "timeoutMs", "retries", "backoffMs", "rateLimitWaitMs", "maxBodyBytes", "scanResponses", "streamIdleMs", "sendTraceparent", "metrics"],
     "config",
   );
 
@@ -186,6 +189,7 @@ export function parseLlmConfig(json: unknown, baseDir: string): LlmConfig {
     rateLimitWaitMs: optionalInteger(config.rateLimitWaitMs, "config.rateLimitWaitMs", 0, 60_000, DEFAULTS.rateLimitWaitMs),
     maxBodyBytes: optionalInteger(config.maxBodyBytes, "config.maxBodyBytes", 1024, 32 * 1024 * 1024, DEFAULTS.maxBodyBytes),
     scanResponses: config.scanResponses === undefined ? true : config.scanResponses === true ? true : config.scanResponses === false ? false : fail("config.scanResponses must be true or false"),
+    streamIdleMs: optionalInteger(config.streamIdleMs, "config.streamIdleMs", 100, 600_000, DEFAULTS.streamIdleMs),
     sendTraceparent: config.sendTraceparent === undefined ? true : config.sendTraceparent === true ? true : config.sendTraceparent === false ? false : fail("config.sendTraceparent must be true or false"),
     ...(config.metrics === undefined ? {} : { metrics: parseMetrics(config.metrics, keyHashes) }),
   };

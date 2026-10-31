@@ -314,11 +314,21 @@ describe("LLM gateway end to end", () => {
     assert.equal(usageLines().at(-1)!.task, "review this one");
   });
 
-  it("refuses streaming, unknown models and malformed requests clearly, without calling an upstream", async () => {
+  it("streams an answer, settled from the usage chunk it asked the upstream for", async () => {
+    const r = await post({ model: "small", messages: ask(), stream: true });
+    assert.equal(r.status, 200, r.text);
+    assert.match(r.headers.get("content-type") ?? "", /^text\/event-stream/);
+    assert.match(r.text, /"content":"fake answer \d+"\}.*\n\ndata: .*"content":" from fake-small-1"/);
+    assert.match(r.text, /data: \[DONE\]\n\n$/);
+    assert.deepEqual(last(healthy).body.stream_options, { include_usage: true });
+    const line = usageLines().at(-1)!;
+    assert.deepEqual([line.stream, line.streamEnd, line.usage, line.costUsd], [true, "done", "upstream", 0.000701]);
+  });
+
+  it("refuses unknown models and malformed requests clearly, without calling an upstream", async () => {
     const calls = upstreamCalls();
     const table: Array<[body: unknown, status: number, code: string]> = [
-      [{ model: "small", messages: ask(), stream: true }, 400, "stream_not_supported"],
-      [{ model: "small", messages: ask(), stream: "yes" }, 400, "stream_not_supported"],
+      [{ model: "small", messages: ask(), stream: "yes" }, 400, "invalid_request"],
       [{ model: "gpt-9", messages: ask() }, 404, "model_not_found"],
       ["{ not json", 400, "invalid_json"],
       [{ model: "small", messages: [] }, 400, "invalid_request"],
@@ -343,7 +353,7 @@ describe("LLM gateway end to end", () => {
     assert.equal(lines.length, authenticated);
     assert.equal(content.includes("prompt-marker-"), false, "a prompt reached the usage log");
     assert.equal(content.includes("fake answer"), false, "a completion reached the usage log");
-    const allowed = ["ts", "id", "key", "task", "route", "upstream", "model", "status", "error", "rule", "inputTokens", "outputTokens", "costUsd", "usage", "attempts", "fallback", "upstream429", "settle", "redacted", "responseRedacted", "side", "latencyMs", "traceId", "spanId", "parentSpanId", "session", "runId", "contextDropped"];
+    const allowed = ["ts", "id", "key", "task", "route", "upstream", "model", "status", "error", "rule", "inputTokens", "outputTokens", "costUsd", "usage", "attempts", "fallback", "upstream429", "settle", "redacted", "responseRedacted", "side", "stream", "streamEnd", "latencyMs", "traceId", "spanId", "parentSpanId", "session", "runId", "contextDropped"];
     for (const line of lines) {
       assert.deepEqual(Object.keys(line).filter((k) => !allowed.includes(k)), [], JSON.stringify(line));
       assert.match(line.traceId, /^[0-9a-f]{32}$/);

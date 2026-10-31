@@ -9,6 +9,10 @@
 // again, using one of the upstream's `retries`; if Retry-After is longer than rateLimitWaitMs, it does
 // not wait at all. A request waits after a 429 at most once.
 // Any other 4xx is the answer: it would fail the same way again.
+// A streamed request (`stream`) is retried the same way until an upstream answers with a 2xx: then the
+// answer's body is handed back unread, and nothing is retried once it starts (server.ts relays it).
+// `signal` (the client went away) stops everything at once: no further attempt, no wait, and the
+// attempt in flight, body included, is aborted.
 // ponytail: bounded and plain. At most (1 + retries) attempts per upstream, whatever went wrong,
 // retries is capped at 3 (config.ts), and the 5xx backoff has no jitter.
 // ponytail: an upstream's answer is read whole, with no size limit; upstreams are configured by
@@ -32,17 +36,24 @@ export interface UpstreamOptions {
   log?: (message: string) => void;
   /** The gateway's own W3C traceparent for this request (its trace id, its span), sent to every upstream. */
   traceparent?: string;
+  /** A streamed request: a 2xx answer comes back as `response`, its body unread. */
+  stream?: boolean;
+  /** Aborts the request: no more attempts, and the one in flight (with its body) is cut off. */
+  signal?: AbortSignal;
 }
 
-export type Failure = "timeout" | "unreachable" | "server_error" | "rate_limited";
+/** "cancelled": `signal` fired (the client went away) before an upstream answered. */
+export type Failure = "timeout" | "unreachable" | "server_error" | "rate_limited" | "cancelled";
 
 export type UpstreamOutcome =
   | {
       ok: true;
       target: ResolvedTarget;
       status: number;
-      /** The upstream's body as text. The caller decides what of it reaches the client. */
+      /** The upstream's body as text. The caller decides what of it reaches the client. Empty for a stream. */
       body: string;
+      /** A streamed request's 2xx answer, its body not read yet; the attempt's timeout and `signal` still apply to it. */
+      response?: Response;
       attempts: number;
       /** True when the fallback answered. */
       fallback: boolean;
@@ -82,6 +93,8 @@ export async function callUpstreams(
   let waitedOn429 = false;
   let last: { failure: Failure; status?: number; retryAfterSeconds?: number } = { failure: "unreachable" };
 
+  const cancelled = (): UpstreamOutcome => ({ ok: false, failure: "cancelled", attempts, rateLimited });
+
   for (const [index, target] of targets.entries()) {
     const isLast = index === targets.length - 1;
     let failures = 0; // 5xx answers, timeouts and failed connections on this upstream
@@ -90,22 +103,27 @@ export async function callUpstreams(
       if (wait429 > 0) await sleep(wait429);
       else if (failures > 0) await sleep(options.backoffMs * 2 ** (failures - 1));
       wait429 = 0;
+      if (options.signal?.aborted) return cancelled();
       attempts++;
       try {
+        const timeout = AbortSignal.timeout(options.timeoutMs);
         const response = await doFetch(`${target.upstream.baseUrl}/chat/completions`, {
           method: "POST",
           headers: {
             authorization: `Bearer ${options.apiKey(target)}`,
             "content-type": "application/json",
-            accept: "application/json",
+            accept: options.stream ? "text/event-stream" : "application/json",
             ...(options.traceparent ? { traceparent: options.traceparent } : {}),
           },
           body: JSON.stringify({ ...body, model: target.model }),
           // An API does not redirect; following one could send the key somewhere else.
           redirect: "error",
-          // Covers reading the body too.
-          signal: AbortSignal.timeout(options.timeoutMs),
+          // Covers reading the body too, a stream's included.
+          signal: options.signal ? anySignal([timeout, options.signal]) : timeout,
         });
+        if (options.stream && response.status >= 200 && response.status < 300) {
+          return { ok: true, target, status: response.status, body: "", response, attempts, fallback: index > 0, rateLimited };
+        }
         const text = await response.text();
         if (response.status === 429) {
           rateLimited++;
@@ -128,6 +146,7 @@ export async function callUpstreams(
         }
         return { ok: true, target, status: response.status, body: text, attempts, fallback: index > 0, rateLimited };
       } catch (err) {
+        if (options.signal?.aborted) return cancelled();
         const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
         last = { failure: timedOut ? "timeout" : "unreachable" };
         options.log?.(`upstream "${target.upstream.name}" ${timedOut ? `timed out after ${options.timeoutMs} ms` : "could not be reached"} (attempt ${attempts})`);
@@ -136,4 +155,17 @@ export async function callUpstreams(
     }
   }
   return { ok: false, ...last, attempts, rateLimited };
+}
+
+/** A signal that aborts when any of `signals` does, with that one's reason. (AbortSignal.any needs Node 20.3.) */
+export function anySignal(signals: readonly AbortSignal[]): AbortSignal {
+  const controller = new AbortController();
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+    signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
+  }
+  return controller.signal;
 }

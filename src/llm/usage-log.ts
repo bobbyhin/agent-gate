@@ -50,8 +50,19 @@ export interface UsageEntry {
   side?: "prompt" | "response";
   /** How the ledger booked the cost when it was not the usual way: "orphan" (the reservation had expired) or "duplicate". */
   settle?: "orphan" | "duplicate";
+  /** A streamed request ("stream": true). */
+  stream?: true;
+  /** How a streamed call ended, once an upstream was asked: see StreamEnd. */
+  streamEnd?: StreamEnd;
   latencyMs: number;
 }
+
+/**
+ * How a streamed call ended: "done" (the whole answer), "client_closed" (the client went away),
+ * "upstream_error" (the stream broke off, or the upstream sent an error frame), "idle_timeout" (no
+ * data for streamIdleMs) or "timeout" (longer than timeoutMs).
+ */
+export type StreamEnd = "done" | "client_closed" | "upstream_error" | "idle_timeout" | "timeout";
 
 export class UsageLog {
   constructor(readonly file: string) {}
