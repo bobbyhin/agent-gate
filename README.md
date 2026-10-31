@@ -1186,8 +1186,8 @@ The shell guard suite needs no dependencies; `node --test test/command-guard.tes
 its own. It runs 351 tests: the 239 cases in `test/cases.json` and a check that the file is well
 formed; the 73 upload cases of suite G in `test/cases-exfil.json`, a check that that file is well
 formed, and a hook test for a blocked upload; 5 tests that run the hook as a child process; 15 timing
-tests on crafted long commands (each must finish within 1 or 3 seconds, where v5.1 took from 2.8
-seconds to hours); 10 tests of the 32-word reading limit; a differential test: the answers for
+tests on crafted long commands (each must finish within 0.5 or 3 seconds, where v5.1 took from 1.1
+seconds to hours; on a machine too busy for that, its time must grow in step with its length); 10 tests of the 32-word reading limit; a differential test: the answers for
 20,594 generated commands (`test/generated-commands.js`) must hash to the value recorded from v5.1;
 2 tests of the held-out set: it is well formed, and its score is no worse than
 `test/heldout-baseline.json` (`npm run redteam` prints that score per category); and 3 tests that

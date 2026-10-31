@@ -206,7 +206,9 @@ of the command, and asks about what it will not read. The answers do not change:
 and label as under v5.1 (a test compares a hash of all the answers).
 
 Times for one call of `analyze()` on a laptop (Apple silicon, Node 22). `npm test` times each of these
-inputs against a bound; "> 120 s" means the run was stopped after 120 seconds.
+inputs against a bound (500 ms, or 3 s for the two slowest); on a machine too busy for the bound, it
+checks instead that 4 times the length takes less than 12 times as long (linear code: about 4,
+quadratic: about 16, v5.1: 12 to 112). "> 120 s" means the run was stopped after 120 seconds.
 
 | Input | Length | v5.1 | v5.2 |
 | --- | --- | --- | --- |
