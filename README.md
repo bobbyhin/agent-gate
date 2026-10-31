@@ -2379,7 +2379,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 458 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 489 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
@@ -2490,7 +2490,7 @@ an evaluation set of whole runs, each replayed and checked step by step. It chec
 not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 458/458 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 489/489 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for each of the two demo pages, 2/2 for the load
 test), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
