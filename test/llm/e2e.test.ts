@@ -108,8 +108,8 @@ describe("LLM gateway end to end", () => {
     return [{ role: "user", content: `${text} [prompt-marker-${++marker}]` }];
   }
 
-  async function post(body: unknown, options: { key?: string | null; task?: string } = {}): Promise<Reply> {
-    const headers: Record<string, string> = { "content-type": "application/json" };
+  async function post(body: unknown, options: { key?: string | null; task?: string; headers?: Record<string, string> } = {}): Promise<Reply> {
+    const headers: Record<string, string> = { "content-type": "application/json", ...options.headers };
     const key = options.key === undefined ? KEY_A : options.key;
     if (key !== null) headers.authorization = `Bearer ${key}`;
     if (options.task !== undefined) headers["x-agent-task"] = options.task;
@@ -252,6 +252,38 @@ describe("LLM gateway end to end", () => {
     assert.match(sent, /^connect with api_key = "\[REDACTED:api-key-assignment\]" \[prompt-marker-\d+\]$/);
   });
 
+  it("puts each call in a trace, the client's or a new one, and sends upstream a traceparent of its own", async () => {
+    const trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const r = await post(
+      { model: "small", messages: ask() },
+      { task: "classify", headers: { traceparent: `00-${trace}-00f067aa0ba902b7-01`, "x-agent-session": "sess-42", "x-run-id": "run-7" } },
+    );
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.headers.get("x-agent-gate-trace-id"), trace);
+    const sent = /^00-([0-9a-f]{32})-([0-9a-f]{16})-01$/.exec(last(healthy).traceparent ?? "");
+    assert.ok(sent, `the upstream got ${last(healthy).traceparent}`);
+    assert.equal(sent[1], trace, "same trace");
+    assert.notEqual(sent[2], "00f067aa0ba902b7", "the gateway's own span, not the client's");
+    const line = usageLines().at(-1)!;
+    assert.deepEqual(
+      [line.traceId, line.spanId, line.parentSpanId, line.session, line.runId, line.task, line.contextDropped],
+      [trace, sent[2], "00f067aa0ba902b7", "sess-42", "run-7", "classify", undefined],
+    );
+
+    // No traceparent: a new trace, sent upstream as not sampled. A malformed one is dropped by name.
+    const fresh = await post({ model: "small", messages: ask() }, { headers: { traceparent: "00-not-a-trace", "x-run-id": "a b" } });
+    const id = fresh.headers.get("x-agent-gate-trace-id") ?? "";
+    assert.match(id, /^[0-9a-f]{32}$/);
+    assert.notEqual(id, trace);
+    assert.match(last(healthy).traceparent ?? "", new RegExp(`^00-${id}-[0-9a-f]{16}-00$`));
+    const freshLine = usageLines().at(-1)!;
+    assert.deepEqual([freshLine.traceId, freshLine.parentSpanId, freshLine.runId, freshLine.contextDropped], [id, undefined, undefined, ["traceparent", "runId"]]);
+
+    // The task is kept on one line.
+    await post({ model: "small", messages: ask() }, { task: "review\tthis   one" });
+    assert.equal(usageLines().at(-1)!.task, "review this one");
+  });
+
   it("refuses streaming, unknown models and malformed requests clearly, without calling an upstream", async () => {
     const calls = upstreamCalls();
     const table: Array<[body: unknown, status: number, code: string]> = [
@@ -281,8 +313,13 @@ describe("LLM gateway end to end", () => {
     assert.equal(lines.length, authenticated);
     assert.equal(content.includes("prompt-marker-"), false, "a prompt reached the usage log");
     assert.equal(content.includes("fake answer"), false, "a completion reached the usage log");
-    const allowed = ["ts", "id", "key", "route", "upstream", "model", "status", "error", "rule", "inputTokens", "outputTokens", "costUsd", "usage", "attempts", "fallback", "redacted", "latencyMs"];
-    for (const line of lines) assert.deepEqual(Object.keys(line).filter((k) => !allowed.includes(k)), [], JSON.stringify(line));
+    const allowed = ["ts", "id", "key", "task", "route", "upstream", "model", "status", "error", "rule", "inputTokens", "outputTokens", "costUsd", "usage", "attempts", "fallback", "redacted", "latencyMs", "traceId", "spanId", "parentSpanId", "session", "runId", "contextDropped"];
+    for (const line of lines) {
+      assert.deepEqual(Object.keys(line).filter((k) => !allowed.includes(k)), [], JSON.stringify(line));
+      assert.match(line.traceId, /^[0-9a-f]{32}$/);
+      assert.match(line.spanId, /^[0-9a-f]{16}$/);
+    }
+    assert.equal(new Set(lines.map((l) => l.spanId)).size, lines.length, "one span per call");
 
     const classify = lines.find((l) => l.route === "classify-is-cheap");
     assert.deepEqual(
@@ -322,6 +359,15 @@ describe("LLM gateway end to end", () => {
       .filter((l) => l.key === "team-a")
       .reduce((sum, l) => sum + l.costUsd, 0);
     assert.ok(teamA && Math.abs(teamA.dayUsd - spentA) < 1e-9, `ledger ${teamA?.dayUsd} vs usage log ${spentA}`);
+
+    const byTask = spawnSync(process.execPath, [BIN, "usage", "--by", "task", "--json", "--config", configFile], { encoding: "utf8" });
+    assert.equal(byTask.status, 0, byTask.stderr);
+    const groups: Array<Record<string, any>> = JSON.parse(byTask.stdout);
+    const tasked = usageLines().filter((l) => l.task === "classify");
+    assert.deepEqual(
+      groups.find((g) => g.group === "classify") && [groups.find((g) => g.group === "classify")!.requests, groups.find((g) => g.group === "classify")!.costUsd],
+      [tasked.length, Math.round(tasked.reduce((sum, l) => sum + l.costUsd, 0) * 1e9) / 1e9],
+    );
 
     const text = spawnSync(process.execPath, [BIN, "usage", "--config", configFile], { encoding: "utf8" });
     assert.equal(text.status, 0, text.stderr);

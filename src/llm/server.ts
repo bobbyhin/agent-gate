@@ -15,6 +15,10 @@
 // Nothing is sent upstream until steps 1 to 5 have passed. Upstream API keys are read from the
 // environment once, at startup; each is sent only to its own upstream and is never logged or
 // returned, and client headers (including the client's Authorization) are never forwarded.
+// Tracing: a valid W3C traceparent from the client puts the call in the client's trace; without
+// one, the call starts a new trace. Either way the gateway sends upstream a traceparent of its own
+// (the trace id, the gateway's span id), returns the trace id as x-agent-gate-trace-id, and writes
+// both to the usage line.
 
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
@@ -22,6 +26,8 @@ import * as http from "node:http";
 import type { AddressInfo } from "node:net";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
+import { cleanNote } from "../gateway/approvals.js";
+import { contextFromHeaders, parseTraceparent } from "../gateway/context.js";
 import { ConfigError } from "../gateway/validate.js";
 import { costUsd, estimateInputTokens, formatUsd, Ledger, roundUsd } from "./budget.js";
 import { hashKey, type GatewayKey, type LlmConfig } from "./config.js";
@@ -47,6 +53,9 @@ export interface LlmGateway {
 
 type ExtraHeaders = Record<string, string | number>;
 type Outcome = Partial<Pick<UsageEntry, "error" | "rule" | "inputTokens" | "outputTokens" | "costUsd" | "usage" | "attempts" | "fallback">>;
+
+/** The x-agent-task header is kept in the usage line on one line, at most this long. */
+const TASK_MAX_CHARS = 100;
 
 const stderrLog = (message: string): void => {
   process.stderr.write(`[agent-gate] ${message}\n`);
@@ -104,12 +113,22 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
       });
     }
 
+    // The client's correlation headers, checked (src/gateway/context.ts), and this call's trace.
+    const context = contextFromHeaders(req.headers);
+    const traceId = context.traceId ?? randomBytes(16).toString("hex");
+    const spanId = randomBytes(8).toString("hex");
+    const traceparent = `00-${traceId}-${spanId}-${parseTraceparent(req.headers.traceparent)?.flags ?? "00"}`;
+    res.setHeader("x-agent-gate-trace-id", traceId);
+    const taskHeader = req.headers["x-agent-task"];
+    const task = typeof taskHeader === "string" ? cleanNote(taskHeader, TASK_MAX_CHARS) : undefined;
+
     // From here on, every answer also writes a usage line.
     const where: { route?: string; upstream?: string; model?: string; redacted?: string[] } = {};
     const finish = (status: number, body: unknown, outcome: Outcome = {}, headers: ExtraHeaders = {}): void => {
       const entry: Omit<UsageEntry, "ts"> = {
         id,
         key: key.name,
+        ...(task === undefined ? {} : { task }),
         ...(where.route === undefined ? {} : { route: where.route, upstream: where.upstream, model: where.model }),
         status,
         ...(outcome.error === undefined ? {} : { error: outcome.error }),
@@ -121,6 +140,12 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         ...(outcome.attempts === undefined ? {} : { attempts: outcome.attempts, fallback: outcome.fallback ?? false }),
         ...(where.redacted === undefined ? {} : { redacted: where.redacted }),
         latencyMs: Math.round(performance.now() - started),
+        traceId,
+        spanId,
+        ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
+        ...(context.session ? { session: context.session } : {}),
+        ...(context.runId ? { runId: context.runId } : {}),
+        ...(context.contextDropped ? { contextDropped: context.contextDropped } : {}),
       };
       try {
         usageLog.write(entry, new Date(now()));
@@ -137,7 +162,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     };
 
     try {
-      await chat(req, key, where, finish);
+      await chat(req, key, where, finish, traceparent);
     } catch (err) {
       log(`${id} failed: ${errorText(err)}`);
       if (res.headersSent) res.destroy();
@@ -150,6 +175,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     key: GatewayKey,
     where: { route?: string; upstream?: string; model?: string; redacted?: string[] },
     finish: (status: number, body: unknown, outcome?: Outcome, headers?: ExtraHeaders) => void,
+    traceparent: string,
   ): Promise<void> {
     let raw: string;
     try {
@@ -238,6 +264,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         apiKey: (target) => apiKeys.get(target.upstream.name) as string,
         ...(options.fetch ? { fetch: options.fetch } : {}),
         log,
+        traceparent,
       });
       if (!outcome.ok) {
         release();

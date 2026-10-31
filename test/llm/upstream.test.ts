@@ -101,6 +101,16 @@ describe("callUpstreams", () => {
     });
   }
 
+  it("sends the gateway's traceparent to every upstream it tries, and none when there is none", async () => {
+    const parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    const s = scripted([500, 500, 200]);
+    await callUpstreams(targets(), { model: "large", messages: [] }, { ...s.options, traceparent: parent });
+    assert.deepEqual(s.calls.map((c) => (c.init.headers as Record<string, string>).traceparent), [parent, parent, parent]);
+    const plain = scripted([200]);
+    await callUpstreams(targets(), { model: "large", messages: [] }, plain.options);
+    assert.equal("traceparent" in (plain.calls[0]?.init.headers as Record<string, string>), false);
+  });
+
   it("doubles the backoff before each retry and stops after `retries`", async () => {
     const s = scripted([500, 500, 500, 500, 200]);
     const outcome = await callUpstreams(targets(), { model: "large", messages: [] }, { ...s.options, retries: 3 });

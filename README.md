@@ -970,7 +970,8 @@ $ curl -s -i http://127.0.0.1:8787/v1/chat/completions \
     -H "x-agent-task: classify" \
     -d '{"model":"large","messages":[{"role":"user","content":"Label this ticket: printer on fire"}],"max_tokens":20}'
 HTTP/1.1 200 OK
-x-agent-gate-request-id: req-a3792412
+x-agent-gate-request-id: req-43e3c7c2
+x-agent-gate-trace-id: dcfc88e3a89e0d989577c068734ee920
 content-type: application/json
 content-length: 286
 x-agent-gate-route: classify-is-cheap
@@ -980,12 +981,13 @@ x-agent-gate-cost-usd: 0.00000885
 {"id":"chatcmpl-fake-1","object":"chat.completion","created":1760400000,"model":"fake-small-1","choices":[{"index":0,"message":{"role":"assistant","content":"fake answer 1 from fake-small-1"},"finish_reason":"stop"}],"usage":{"prompt_tokens":23,"completion_tokens":9,"total_tokens":32}}
 ```
 
-The body is the upstream's answer, unchanged. The `x-agent-gate-*` headers say which route and
-upstream served the call and what it cost: 23 input tokens at $0.15 and 9 output tokens at $0.60
-per million, from the upstream's own `usage`. The gateway's log has one line per call:
+The body is the upstream's answer, unchanged. The `x-agent-gate-*` headers say which trace the call
+belongs to (see [Tracing](#tracing)), which route and upstream served it and what it cost: 23 input
+tokens at $0.15 and 9 output tokens at $0.60 per million, from the upstream's own `usage`. The
+gateway's log has one line per call:
 
 ```
-[agent-gate] 200 req-a3792412 key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 27ms
+[agent-gate] 200 req-43e3c7c2 key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 261ms
 ```
 
 ### Routing
@@ -1047,7 +1049,7 @@ though the key has spent almost nothing (headers shortened):
 
 ```
 HTTP/1.1 429 Too Many Requests
-retry-after: 45064
+retry-after: 74404
 
 {"error":{"message":"agent-gate: this call could cost up to $0.015015, and key \"demo-agent\" has $0.00977395 left of its daily budget of $0.01 ($0.00022605 spent, $0 held by calls in flight). Try again later, or with a lower max_tokens.","type":"insufficient_quota","param":null,"code":"budget_exceeded","cap":"daily"}}
 ```
@@ -1062,7 +1064,7 @@ gateway that crashed mid-call expire on their own. The CLI shows the ledger:
 
 ```
 $ agent-gate usage --config llm-gateway.config.json
-key         today (2026-10-14 UTC)  this month (2026-10)  in flight
+key         today (2026-10-31 UTC)  this month (2026-10)  in flight
 demo-agent  $0.00022605 of $0.01    $0.00022605 of $1     0
 ```
 
@@ -1132,12 +1134,12 @@ Every authenticated call appends one JSON line to `<stateDir>/usage.jsonl` (mode
 the lines from the run above:
 
 ```json
-{"ts":"2026-10-14T11:28:56.525Z","id":"req-a3792412","key":"demo-agent","route":"classify-is-cheap","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":23,"outputTokens":9,"costUsd":0.00000885,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":27}
-{"ts":"2026-10-14T11:28:56.546Z","id":"req-9cd325f3","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":200,"inputTokens":24,"outputTokens":9,"costUsd":0.000207,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":11}
-{"ts":"2026-10-14T11:28:56.553Z","id":"req-6de918a4","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":400,"error":"secret_detected","rule":"private-key","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":0}
-{"ts":"2026-10-14T11:28:56.570Z","id":"req-77ea652f","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":32,"outputTokens":9,"costUsd":0.0000102,"usage":"upstream","attempts":1,"fallback":false,"redacted":["api-key-assignment"],"latencyMs":10}
-{"ts":"2026-10-14T11:28:56.580Z","id":"req-96b5643f","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":429,"error":"budget_exceeded","rule":"daily","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":4}
-{"ts":"2026-10-14T11:28:56.586Z","id":"req-eadc4dd5","key":"demo-agent","status":400,"error":"stream_not_supported","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":0}
+{"ts":"2026-10-31T03:19:56.527Z","id":"req-43e3c7c2","key":"demo-agent","task":"classify","route":"classify-is-cheap","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":23,"outputTokens":9,"costUsd":0.00000885,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":261,"traceId":"dcfc88e3a89e0d989577c068734ee920","spanId":"d5636fdb34257c2b"}
+{"ts":"2026-10-31T03:19:56.602Z","id":"req-cd440393","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":200,"inputTokens":24,"outputTokens":9,"costUsd":0.000207,"usage":"upstream","attempts":1,"fallback":false,"latencyMs":55,"traceId":"cbba63d73999a99742875feed164bf8a","spanId":"fd6cedee73ee35ad"}
+{"ts":"2026-10-31T03:19:56.615Z","id":"req-6f1aa09a","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":400,"error":"secret_detected","rule":"private-key","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":2,"traceId":"e128a0a9e348b42bb716cae2acfe1623","spanId":"d8dcc869f28c5d03"}
+{"ts":"2026-10-31T03:19:56.678Z","id":"req-b80e1819","key":"demo-agent","route":"cheap-models","upstream":"cheap","model":"fake-small-1","status":200,"inputTokens":32,"outputTokens":9,"costUsd":0.0000102,"usage":"upstream","attempts":1,"fallback":false,"redacted":["api-key-assignment"],"latencyMs":53,"traceId":"ca1dc16c90337805192daf02cc821766","spanId":"79be2ac851145ea4"}
+{"ts":"2026-10-31T03:19:56.702Z","id":"req-a3cc8182","key":"demo-agent","route":"strong-models","upstream":"strong","model":"fake-large-1","status":429,"error":"budget_exceeded","rule":"daily","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":17,"traceId":"ca7fd7bc30c61e3c1db715a2418d7966","spanId":"9c6c527825928c06"}
+{"ts":"2026-10-31T03:19:56.712Z","id":"req-112b11f6","key":"demo-agent","status":400,"error":"stream_not_supported","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":2,"traceId":"b50db9a734a48f94e0ee6495b961c630","spanId":"db443832b00a5865"}
 ```
 
 There is no prompt or completion text in it, on purpose. Prompts carry whatever the agent read or
@@ -1145,7 +1147,40 @@ was told, including secrets and personal data, and completions repeat it. The us
 cost and availability: it is kept for a long time and read by people who need the tokens and the
 dollars, not the conversation. `id` ties a line to the `x-agent-gate-request-id` the client got.
 `usage` says whether the tokens came from the upstream or, when it reported none, from the
-estimate, and `attempts` and `fallback` show retries and fallbacks.
+estimate, and `attempts` and `fallback` show retries and fallbacks. `task` is the `x-agent-task`
+header, on one line and cut at 100 characters. `traceId` and `spanId` are the call's trace and the
+gateway's span in it (see [Tracing](#tracing)).
+
+`agent-gate usage --by task` adds the log up per task: which kind of work spends the money, and which
+one trips the leak guard. From the run above:
+
+```
+$ agent-gate usage --by task --config llm-gateway.config.json
+task      requests  ok  input tokens  output tokens  cost         leak blocked  leak redacted
+(none)    5         2   56            18             $0.0002172   1             1
+classify  1         1   23            9              $0.00000885  0             0
+```
+
+`--by` also takes `key`, `route`, `upstream`, `model`, `session` and `runId`; `--json` prints the
+rows as JSON.
+
+### Tracing
+
+Every call belongs to a [W3C Trace Context](https://www.w3.org/TR/trace-context/) trace, so a
+usage line can be joined with the agent's own trace and with the provider's logs:
+
+- A client that sends a valid `traceparent` header (version 00) puts the call in its trace: the usage
+  line keeps the trace id and the client's span (`parentSpanId`). Without one, or with one that does
+  not fit the format, the call starts a new trace.
+- The gateway makes a span id of its own for each call (`spanId`) and sends the upstream a
+  `traceparent` with the trace id and that span, keeping the client's sampled flag (a new trace is
+  sent as not sampled). The answer carries the trace id in `x-agent-gate-trace-id`.
+- `x-agent-session` and `x-run-id` are written as `session` and `runId` when they are plain ids
+  (letters, digits, `.`, `_`, `:` and `-`, up to 128 characters). A header that does not fit is left
+  out, and `contextDropped` names it.
+
+The gateway records ids; it does not export spans to a tracing backend. The MCP gateway reads the
+same ids from a tool call's `_meta` (see [Audit log](#audit-log)).
 
 ### Keys
 
@@ -1157,7 +1192,8 @@ estimate, and `attempts` and `fallback` show retries and fallbacks.
   5xx becomes the gateway's 502 or 504, and any other 4xx is passed on with the upstream keys cut
   out.
 - Client headers are not forwarded (the client's `Authorization` holds the gateway key), and
-  redirects from an upstream are refused.
+  redirects from an upstream are refused. The one header the gateway adds of its own is a
+  `traceparent`, built from the checked trace id and the gateway's span id.
 
 The end-to-end test runs fake upstreams that quote the key they receive, and checks that no
 provider key appears in any response, in the state files or in the gateway's log.
@@ -1290,7 +1326,7 @@ obeys, and the gateway blocks the call before it reaches the server. Another den
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 173 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 178 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file); a leak-guard table
 for every shipped rule, with 29 samples of prose and code that must pass untouched; retries and
@@ -1298,8 +1334,10 @@ the fallback with a scripted `fetch`, plus a real timeout; the CLI; and an end-t
 test starts `agent-gate llm serve` against two fake upstream HTTP servers, one healthy and one that
 always answers 500, and checks routing by alias and by `x-agent-task`, the fallback after a 500,
 costs settled from the upstream's `usage`, a 429 with no upstream call once a cap is reached,
-secrets blocked before any upstream call, redaction, a usage log without prompt text, 401 for an
-unknown key, and that no provider key ever appears in a response or a log. Five more check the
+secrets blocked before any upstream call, redaction, a usage log without prompt text, the trace
+context (the client's trace kept, a new one started, the gateway's own span sent upstream, bad values
+dropped), `usage --by task`, 401 for an unknown key, and that no provider key ever appears in a
+response or a log. Five more check the
 gateway configs under `deploy/`: they load, they use the container's paths, the deployable one
 refuses the demo key, and the Kubernetes copy of the leak-guard policy matches the example. Every
 fake secret the tests use is in `test/llm/fake-secrets.ts`, assembled from pieces at run time, so
@@ -1324,7 +1362,7 @@ the decision, with no model judging and no tolerance band. And it is evaluated o
 there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 292/292 MCP gateway tests, 173/173 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 292/292 MCP gateway tests, 178/178 LLM gateway tests, 7/7 for
 the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).

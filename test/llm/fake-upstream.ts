@@ -28,6 +28,8 @@ export interface FakeUpstreamOptions {
 
 export interface ReceivedRequest {
   authorization: string;
+  /** The traceparent header the gateway sent, if any. */
+  traceparent?: string;
   /** The parsed JSON body. */
   body: Record<string, unknown>;
 }
@@ -59,7 +61,8 @@ export async function startFakeUpstream(options: FakeUpstreamOptions): Promise<F
       } catch {
         return reply(400, { error: { message: "invalid JSON" } });
       }
-      requests.push({ authorization, body });
+      const traceparent = typeof req.headers.traceparent === "string" ? req.headers.traceparent : undefined;
+      requests.push({ authorization, body, ...(traceparent === undefined ? {} : { traceparent }) });
 
       const key = authorization.replace(/^Bearer /, "");
       if (options.mode === "fail") return reply(500, { error: { message: `upstream exploded while serving key ${key}` } });

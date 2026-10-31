@@ -21,6 +21,8 @@ export interface UpstreamOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Told about every failed attempt, without bodies or keys. */
   log?: (message: string) => void;
+  /** The gateway's own W3C traceparent for this request (its trace id, its span), sent to every upstream. */
+  traceparent?: string;
 }
 
 export type Failure = "timeout" | "unreachable" | "server_error";
@@ -60,6 +62,7 @@ export async function callUpstreams(
             authorization: `Bearer ${options.apiKey(target)}`,
             "content-type": "application/json",
             accept: "application/json",
+            ...(options.traceparent ? { traceparent: options.traceparent } : {}),
           },
           body: JSON.stringify({ ...body, model: target.model }),
           // An API does not redirect; following one could send the key somewhere else.

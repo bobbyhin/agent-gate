@@ -10,6 +10,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { formatUsd } from "../llm/budget.js";
 import { loadLeakPolicy, loadLlmConfig } from "../llm/config.js";
 import { openLedger, startLlmGateway } from "../llm/server.js";
+import { GROUP_FIELDS, groupUsage, readUsageLog, type GroupField } from "../llm/usage-report.js";
 import { ApprovalError, ApprovalStore, canonicalJson, cleanNote, isLive, type Approval, type Confirmation, type StandingApproval } from "./approvals.js";
 import { AuditLog, type ApprovalEvent } from "./audit.js";
 import { auditStats, readAudit } from "./audit-tools.js";
@@ -29,6 +30,9 @@ const USAGE = `Usage:
   agent-gate approvals grants [--all] [--json] [--config <file>]   standing approvals
   agent-gate llm serve [--config <file>]              run the LLM gateway (HTTP)
   agent-gate usage [--json] [--config <file>]         LLM spend per gateway key: today, this month, caps
+  agent-gate usage --by <field> [--json] [--config <file>]
+                                                      the usage log summed by task, key, route, upstream,
+                                                      model, session or runId
   agent-gate audit stats [--json] [--config <file>]   per tool: calls, decisions, errors, p50/p95 time
 
 "list" shows the requests that are waiting; --all also shows decided, used and expired ones.
@@ -55,7 +59,7 @@ const COMMANDS: Readonly<Record<string, { options: readonly string[]; required?:
   "approvals grant": { options: ["uses", "hours", "arg", "note"], required: ["uses", "hours"], id: true },
   "approvals grants": { options: ["all", "json"] },
   "llm serve": { options: [] },
-  usage: { options: ["json"] },
+  usage: { options: ["json", "by"] },
   "audit stats": { options: ["json"] },
 };
 
@@ -98,6 +102,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
         uses: { type: "string" },
         hours: { type: "string" },
         arg: { type: "string", multiple: true },
+        by: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -129,7 +134,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
   try {
     if (name === "serve") return await serve(configFile);
     if (name === "llm serve") return await serveLlm(llmConfigFile);
-    if (name === "usage") return usage(llmConfigFile, values.json, io);
+    if (name === "usage") return values.by === undefined ? usage(llmConfigFile, values.json, io) : usageBy(llmConfigFile, values.by, values.json, io);
     const config = loadConfig(configFile);
     const store = new ApprovalStore(config.stateDir, config.approvalTtlMs);
     const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"));
@@ -227,6 +232,31 @@ function usage(configFile: string, json: boolean, io: Io): number {
     ],
     io,
   );
+  return 0;
+}
+
+/** usage --by <field>: the usage log summed per task (or key, route, ...), most expensive first. */
+function usageBy(configFile: string, by: string, json: boolean, io: Io): number {
+  if (!(GROUP_FIELDS as readonly string[]).includes(by)) {
+    io.err(`agent-gate: --by takes one of ${GROUP_FIELDS.join(", ")}\n`);
+    return 2;
+  }
+  const config = loadLlmConfig(configFile);
+  const file = path.join(config.stateDir, "usage.jsonl");
+  const { lines, unreadable } = readUsageLog(file);
+  const rows = groupUsage(lines, by as GroupField);
+  if (json) io.out(`${JSON.stringify(rows, null, 2)}\n`);
+  else if (rows.length === 0) io.out("No calls recorded yet.\n");
+  else {
+    printTable(
+      [
+        [by, "requests", "ok", "input tokens", "output tokens", "cost", "leak blocked", "leak redacted"],
+        ...rows.map((r) => [r.group, `${r.requests}`, `${r.ok}`, `${r.inputTokens}`, `${r.outputTokens}`, `$${formatUsd(r.costUsd)}`, `${r.leakBlocked}`, `${r.leakRedacted}`]),
+      ],
+      io,
+    );
+  }
+  if (unreadable.length > 0) io.err(`agent-gate: ${unreadable.length} line(s) of ${file} are not JSON and were skipped\n`);
   return 0;
 }
 

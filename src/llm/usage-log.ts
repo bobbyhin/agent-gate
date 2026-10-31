@@ -7,6 +7,19 @@ export interface UsageEntry {
   ts: string;
   /** The gateway's id for the request, also sent to the client as x-agent-gate-request-id. */
   id: string;
+  /** The W3C trace this call belongs to: the client's (traceparent header), or a new one. Sent back as x-agent-gate-trace-id. */
+  traceId: string;
+  /** The gateway's span for this call: the parent id in the traceparent it sends upstream. */
+  spanId: string;
+  /** The client's span that made the call, from its traceparent. */
+  parentSpanId?: string;
+  /** The x-agent-session and x-run-id headers, when they fit the id format (src/gateway/context.ts). */
+  session?: string;
+  runId?: string;
+  /** Headers the client sent in a shape the gateway does not accept, so their values were left out. */
+  contextDropped?: string[];
+  /** The x-agent-task header, on one line and at most 100 characters. */
+  task?: string;
   /** The gateway key's name from the config, never the key. */
   key: string;
   /** The route rule that decided; absent when no route matched. */

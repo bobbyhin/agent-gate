@@ -38,7 +38,7 @@ describe("agent-gate llm serve and usage", () => {
   });
   after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
-  for (const argv of [["llm"], ["llm", "frobnicate"], ["llm", "serve", "now"], ["usage", "extra"]]) {
+  for (const argv of [["llm"], ["llm", "frobnicate"], ["llm", "serve", "now"], ["usage", "extra"], ["usage", "--by"], ["llm", "serve", "--by", "task"]]) {
     it(`exits 2 for: ${argv.join(" ")}`, async () => {
       const r = await run(...argv, "--config", "/nonexistent/llm-gateway.config.json");
       assert.equal(r.code, 2);
@@ -63,6 +63,36 @@ describe("agent-gate llm serve and usage", () => {
     const r = await run("usage", "--config", "/nonexistent/llm-gateway.config.json");
     assert.equal(r.code, 1);
     assert.match(r.err, /^agent-gate: cannot read the config file \/nonexistent\/llm-gateway\.config\.json/);
+  });
+
+  it("usage --by sums the usage log per task, most expensive first, and counts leak-guard hits", async () => {
+    fs.mkdirSync(path.join(tmp, "state"), { recursive: true });
+    const line = (fields: Record<string, unknown>) => JSON.stringify({ key: "search-agent", status: 200, inputTokens: 10, outputTokens: 5, costUsd: 0.1, ...fields });
+    fs.writeFileSync(
+      path.join(tmp, "state", "usage.jsonl"),
+      [
+        line({ task: "classify", costUsd: 0.000001 }),
+        line({ task: "classify", status: 400, error: "secret_detected", rule: "private-key", inputTokens: 0, outputTokens: 0, costUsd: 0 }),
+        line({ task: "code", costUsd: 0.2, redacted: ["api-key-assignment"] }),
+        line({ task: "code", costUsd: 0.1 }),
+        line({ costUsd: 0.05 }),
+        "{ broken",
+      ].join("\n") + "\n",
+    );
+    const r = await run("usage", "--by", "task", "--json", "--config", configFile);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(JSON.parse(r.out), [
+      { group: "code", requests: 2, ok: 2, inputTokens: 20, outputTokens: 10, costUsd: 0.3, leakBlocked: 0, leakRedacted: 1 },
+      { group: "(none)", requests: 1, ok: 1, inputTokens: 10, outputTokens: 5, costUsd: 0.05, leakBlocked: 0, leakRedacted: 0 },
+      { group: "classify", requests: 2, ok: 1, inputTokens: 10, outputTokens: 5, costUsd: 0.000001, leakBlocked: 1, leakRedacted: 0 },
+    ]);
+    assert.match(r.err, /1 line\(s\) of .*usage\.jsonl are not JSON and were skipped/);
+    const text = await run("usage", "--by", "task", "--config", configFile);
+    assert.match(text.out, /^task {6}requests {2}ok {2}input tokens {2}output tokens {2}cost {7}leak blocked {2}leak redacted\n/);
+    assert.match(text.out, /\nclassify {2}2 {9}1 {3}10 {12}5 {14}\$0\.000001 {2}1 {13}0\n$/);
+    const bad = await run("usage", "--by", "colour", "--config", configFile);
+    assert.deepEqual([bad.code, bad.err], [2, "agent-gate: --by takes one of task, key, route, upstream, model, session, runId\n"]);
+    fs.rmSync(path.join(tmp, "state", "usage.jsonl"));
   });
 
   it("usage shows every configured key, at zero before any call", async () => {
