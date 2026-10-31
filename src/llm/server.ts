@@ -39,7 +39,7 @@ import { guardMessages, guardResponse, messageTexts, type LeakPolicy } from "./l
 import { CONTENT_TYPE, Metrics } from "./metrics.js";
 import { route, type ResolvedTarget } from "./routing.js";
 import { isUsageOnly, rebuildEvents, SseParser, StreamAssembler } from "./stream.js";
-import { callUpstreams } from "./upstream.js";
+import { backoffCeiling, callUpstreams } from "./upstream.js";
 import { UsageLog, type StreamEnd, type UsageEntry } from "./usage-log.js";
 
 export interface LlmGatewayOptions {
@@ -317,6 +317,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         timeoutMs: config.timeoutMs,
         retries: config.retries,
         backoffMs: config.backoffMs,
+        maxBackoffMs: config.maxBackoffMs,
         rateLimitWaitMs: config.rateLimitWaitMs,
         apiKey: (target) => apiKeys.get(target.upstream.name) as string,
         ...(options.fetch ? { fetch: options.fetch } : {}),
@@ -723,11 +724,14 @@ export function openLedger(config: LlmConfig, now: () => number = Date.now): Led
 }
 
 /**
- * The longest a call can take: every attempt on both upstreams timing out, plus the backoff, plus the
- * one wait after a 429 (it takes a retry's place, so it adds no attempt). With the defaults: 242.5 s.
+ * The longest a call can take: every attempt on both upstreams timing out (a stream included: timeoutMs
+ * bounds the whole answer), plus every backoff at its ceiling, plus the one wait after a 429 (it takes a
+ * retry's place, so it adds no attempt). Jitter only shortens waits. With the defaults: 242.5 s.
  */
-export function longestCallMs(config: Pick<LlmConfig, "timeoutMs" | "retries" | "backoffMs" | "rateLimitWaitMs">): number {
-  const perUpstream = (config.retries + 1) * config.timeoutMs + config.backoffMs * (2 ** config.retries - 1);
+export function longestCallMs(config: Pick<LlmConfig, "timeoutMs" | "retries" | "backoffMs" | "maxBackoffMs" | "rateLimitWaitMs">): number {
+  let backoff = 0;
+  for (let n = 1; n <= config.retries; n++) backoff += backoffCeiling(config.backoffMs, config.maxBackoffMs, n);
+  const perUpstream = (config.retries + 1) * config.timeoutMs + backoff;
   return 2 * perUpstream + config.rateLimitWaitMs;
 }
 

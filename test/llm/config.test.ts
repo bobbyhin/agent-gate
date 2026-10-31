@@ -75,6 +75,7 @@ describe("LLM gateway config", () => {
     ["duplicate key hashes", { ...valid, keys: [valid.keys[0], { ...valid.keys[0], name: "other" }] }, /config\.keys\[1\]\.sha256 is the same as an earlier key's/],
     ["zero daily cap", { ...valid, keys: [{ ...valid.keys[0], dailyUsd: 0 }] }, /config\.keys\[0\]\.dailyUsd must be a positive number/],
     ["retries above the limit", { ...valid, retries: 4 }, /config\.retries must be a whole number from 0 to 3/],
+    ["maxBackoffMs above the limit", { ...valid, maxBackoffMs: 60_001 }, /config\.maxBackoffMs must be a whole number from 0 to 60000/],
     ["port out of range", { ...valid, listen: { port: 70000 } }, /config\.listen\.port must be a whole number from 0 to 65535/],
     ["unknown field", { ...valid, budget: {} }, /config has an unknown field "budget"/],
   ];

@@ -1,8 +1,10 @@
 // Sending one chat completion to its upstreams: the primary first, then the fallback.
 //
-// A 5xx answer, a timeout or a connection failure is retried on the same upstream up to `retries`
-// more times, waiting backoffMs, 2 x backoffMs, 4 x backoffMs ... before each retry; then the
-// fallback (if the route has one) gets the same treatment.
+// A 5xx answer, a 408, a timeout or a connection failure is retried on the same upstream up to
+// `retries` more times; then the fallback (if the route has one) gets the same treatment. Before
+// retry n the gateway waits a random time between 0 and min(maxBackoffMs, backoffMs x 2^(n-1))
+// ("full jitter"), so that clients refused together do not all come back at the same moment.
+// A 408 means the server did not get the whole request in time, so it never ran it.
 // A 429 (the provider's rate limit or quota) moves on to the fallback at once. On the last upstream
 // there is nowhere to go, so it waits for the answer's Retry-After (backoffMs without one), plus up
 // to a fifth more at random so that clients refused together do not come back together, and tries
@@ -13,8 +15,8 @@
 // answer's body is handed back unread, and nothing is retried once it starts (server.ts relays it).
 // `signal` (the client went away) stops everything at once: no further attempt, no wait, and the
 // attempt in flight, body included, is aborted.
-// ponytail: bounded and plain. At most (1 + retries) attempts per upstream, whatever went wrong,
-// retries is capped at 3 (config.ts), and the 5xx backoff has no jitter.
+// ponytail: bounded and plain. At most (1 + retries) attempts per upstream, whatever went wrong, and
+// retries is capped at 3 (config.ts). docs/adr/0010-retries.md has the reasoning.
 // ponytail: an upstream's answer is read whole, with no size limit; upstreams are configured by
 // the operator and trusted to send answers of a sane size.
 
@@ -24,6 +26,8 @@ export interface UpstreamOptions {
   timeoutMs: number;
   retries: number;
   backoffMs: number;
+  /** The longest wait before a retry after a 5xx, a 408 or a timeout (default: no cap). */
+  maxBackoffMs?: number;
   /** The longest the gateway waits after a 429 before its one retry on the last upstream; 0 never waits or retries. */
   rateLimitWaitMs?: number;
   /** Jitter source, 0 <= x < 1 (default Math.random); a test can fix it. */
@@ -101,7 +105,7 @@ export async function callUpstreams(
     let wait429 = 0;
     while (failures <= options.retries) {
       if (wait429 > 0) await sleep(wait429);
-      else if (failures > 0) await sleep(options.backoffMs * 2 ** (failures - 1));
+      else if (failures > 0) await sleep(Math.floor(random() * backoffCeiling(options.backoffMs, options.maxBackoffMs, failures)));
       wait429 = 0;
       if (options.signal?.aborted) return cancelled();
       attempts++;
@@ -138,7 +142,7 @@ export async function callUpstreams(
           wait429 = Math.max(1, Math.min(maxWait, Math.round(base + base * 0.2 * random())));
           continue;
         }
-        if (response.status >= 500) {
+        if (response.status >= 500 || response.status === 408) {
           last = { failure: "server_error", status: response.status };
           options.log?.(`upstream "${target.upstream.name}" answered ${response.status} (attempt ${attempts})`);
           failures++;
@@ -168,4 +172,10 @@ export function anySignal(signals: readonly AbortSignal[]): AbortSignal {
     signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
   }
   return controller.signal;
+}
+
+/** The most the wait before retry n (1, 2, 3) can be: backoffMs x 2^(n-1), at most maxBackoffMs. Full jitter waits a random part of it. */
+export function backoffCeiling(backoffMs: number, maxBackoffMs: number | undefined, n: number): number {
+  const doubled = backoffMs * 2 ** (n - 1);
+  return maxBackoffMs === undefined ? doubled : Math.min(maxBackoffMs, doubled);
 }

@@ -1131,6 +1131,7 @@ read from `$GATEWAY_KEY`. This is the example config:
   directory.
 - Optional, with their defaults: `listen` (`127.0.0.1`, port 8787), `defaultMaxTokens` (1024),
   `timeoutMs` per attempt (60000), `retries` per upstream (1, at most 3), `backoffMs` (250),
+  `maxBackoffMs` (10000),
   `rateLimitWaitMs` (2000: the longest wait after a 429, see [Routing](#routing)), `maxBodyBytes`
   (1 MiB), `scanResponses` (true, see [Leak guard](#leak-guard)), `streamIdleMs` (30000, see
   [Streaming](#streaming)), `sendTraceparent` (true, see [Tracing](#tracing)) and `metrics` (off, see
@@ -1211,10 +1212,12 @@ The example's routes, for a request that asks for `large`:
 
 The routing function (`src/llm/routing.ts`) is pure, like the policy engine, and has a table test.
 
-A 5xx answer, a timeout or a failed connection is retried on the same upstream up to `retries`
-times, waiting `backoffMs` before the first retry and twice as long before each next one. After
-that, the fallback gets the same treatment. When every attempt fails, the client gets 502, or 504
-if the last attempt timed out, with the gateway's own message.
+A 5xx answer, a 408, a timeout or a failed connection is retried on the same upstream up to
+`retries` times. (A 408 means the server did not get the whole request in time, so it never ran it.)
+Before retry n the gateway waits a random time between 0 and `backoffMs` × 2^(n−1), at most
+`maxBackoffMs`: full jitter, so that calls that failed together do not all come back together.
+After that, the fallback gets the same treatment. When every attempt fails, the client gets 502, or
+504 if the last attempt timed out, with the gateway's own message.
 
 A 429 is a provider's rate limit or quota: the most common way a call fails, and one that another
 upstream can often still serve. So a 429 moves on to the fallback at once. On the last upstream
@@ -1225,6 +1228,10 @@ and tries once more, using one of that upstream's `retries`. It waits at most `r
 the client gets the gateway's own 429 `upstream_rate_limited`, with the last upstream's
 `Retry-After`, and nothing is charged. The usage line counts the 429s on the way (`upstream429`).
 Any other 4xx is not retried: it would fail the same way again.
+
+All of it fits in a known time: every attempt timing out, plus every wait at its ceiling, is the
+longest a call can take (242.5 seconds with the defaults), and a call's budget reservation is sized
+by it. Why full jitter, and how the bound is tested: [ADR 0010](docs/adr/0010-retries.md).
 
 ### Budgets
 
@@ -1722,7 +1729,7 @@ records written after a call has already happened; those fail loudly instead, on
 | MCP gateway | a downstream server goes away later | its calls fail, and their result lines say so; the other servers' calls go on | `test/gateway/http-downstream.test.ts` |
 | LLM gateway | `ledger.json` is damaged | the call is refused before anything is sent upstream, because an empty ledger would hand every key its whole budget again | `test/llm/failure.test.ts`, `budget.test.ts` |
 | LLM gateway | a provider key's variable is not set | the gateway does not start, naming the variable | `test/llm/cli.test.ts` |
-| LLM gateway | the upstream answers 5xx or times out | retries, then the fallback; else 502 or 504, and nothing is charged | `test/llm/upstream.test.ts`, `e2e.test.ts` |
+| LLM gateway | the upstream answers 5xx or 408, or times out | retries after a random wait, then the fallback; else 502 or 504, and nothing is charged | `test/llm/upstream.test.ts`, `e2e.test.ts` |
 | LLM gateway | the upstream answers 429 | the fallback at once; on the last upstream, one capped wait; else the gateway's own 429, and nothing is charged | `test/llm/upstream.test.ts`, `e2e.test.ts` |
 | LLM gateway | a stream breaks off, sends an error event, or goes quiet for `streamIdleMs` | the upstream is cut off; a relayed client gets an error event in the gateway's words and no `[DONE]`, a held one 502 or 504; booked at its estimate | `test/llm/stream.test.ts` |
 | LLM gateway | the client of a stream goes away | the upstream request is aborted at once; booked at its estimate, or nothing if no answer had started | `test/llm/stream.test.ts` |
@@ -1814,13 +1821,15 @@ obeys, and the gateway blocks the call before it reaches the server. Another den
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 253 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 257 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file, a settle that comes
 twice or after its reservation expired, calls per minute and run caps); a leak-guard table
 for every shipped rule, with 29 samples of prose and code that must pass untouched; retries and
 the fallback with a scripted `fetch` (including 429s: to the fallback at once, one capped wait for
-`Retry-After` on the last upstream, an HTTP-date `Retry-After`), plus a real timeout; the CLI; and
+`Retry-After` on the last upstream, an HTTP-date `Retry-After`; a 408; the jittered backoff and its
+cap, and that with any random value a call's waits fit inside the time its reservation is sized by),
+plus a real timeout; the CLI; and
 an end-to-end test. That
 test starts `agent-gate llm serve` against three fake upstream HTTP servers, one healthy, one that
 always answers 500 and one that always answers 429, and checks routing by alias and by
@@ -1872,7 +1881,7 @@ audit log; the end-to-end test scores its own run that way. It checks which call
 the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 253/253 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 257/257 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1961,6 +1970,7 @@ docs/adr/0005-approvals-are-action-tokens.md  an approval is a server-side actio
 docs/adr/0006-standing-approvals.md           bounded standing approvals, and why only some rules accept them
 docs/adr/0007-where-agent-gate-sits.md        a control plane in front of calls, not an agent host; production readiness
 docs/adr/0008-second-reviewer-escalate-only.md a second reviewer that can only make a decision stricter (partly built)
+docs/adr/0010-retries.md                      why retries wait a random time up to a cap, and a 429 goes to the fallback first
 docs/adr/0011-streaming.md                    why a streamed answer is held until it is scanned, unless scanning is off
 tsconfig.json                                 compiles src/ and test/ into dist/
 AGENTS.md                                     build, layout and rules for coding agents

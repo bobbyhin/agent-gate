@@ -91,8 +91,9 @@ export interface LlmConfig {
   timeoutMs: number;
   /** Extra attempts on the same upstream after a 5xx or a timeout, before the fallback. */
   retries: number;
-  /** Wait before retry n: backoffMs * 2^(n-1). */
+  /** The wait before retry n is a random time up to backoffMs * 2^(n-1), at most maxBackoffMs (full jitter). */
   backoffMs: number;
+  maxBackoffMs: number;
   /** After a 429 on the last upstream: the longest the gateway waits (Retry-After, capped) before its one retry. 0: never. */
   rateLimitWaitMs: number;
   maxBodyBytes: number;
@@ -112,6 +113,7 @@ export const DEFAULTS = {
   timeoutMs: 60_000,
   retries: 1,
   backoffMs: 250,
+  maxBackoffMs: 10_000,
   rateLimitWaitMs: 2000,
   maxBodyBytes: 1024 * 1024,
   streamIdleMs: 30_000,
@@ -143,7 +145,7 @@ export function parseLlmConfig(json: unknown, baseDir: string): LlmConfig {
   const config = object(json, "config");
   onlyKeys(
     config,
-    ["listen", "stateDir", "policy", "upstreams", "routes", "keys", "defaultMaxTokens", "timeoutMs", "retries", "backoffMs", "rateLimitWaitMs", "maxBodyBytes", "scanResponses", "streamIdleMs", "sendTraceparent", "metrics"],
+    ["listen", "stateDir", "policy", "upstreams", "routes", "keys", "defaultMaxTokens", "timeoutMs", "retries", "backoffMs", "maxBackoffMs", "rateLimitWaitMs", "maxBodyBytes", "scanResponses", "streamIdleMs", "sendTraceparent", "metrics"],
     "config",
   );
 
@@ -186,6 +188,7 @@ export function parseLlmConfig(json: unknown, baseDir: string): LlmConfig {
     timeoutMs: optionalInteger(config.timeoutMs, "config.timeoutMs", 1, 600_000, DEFAULTS.timeoutMs),
     retries: optionalInteger(config.retries, "config.retries", 0, MAX_RETRIES, DEFAULTS.retries),
     backoffMs: optionalInteger(config.backoffMs, "config.backoffMs", 0, 60_000, DEFAULTS.backoffMs),
+    maxBackoffMs: optionalInteger(config.maxBackoffMs, "config.maxBackoffMs", 0, 60_000, DEFAULTS.maxBackoffMs),
     rateLimitWaitMs: optionalInteger(config.rateLimitWaitMs, "config.rateLimitWaitMs", 0, 60_000, DEFAULTS.rateLimitWaitMs),
     maxBodyBytes: optionalInteger(config.maxBodyBytes, "config.maxBodyBytes", 1024, 32 * 1024 * 1024, DEFAULTS.maxBodyBytes),
     scanResponses: config.scanResponses === undefined ? true : config.scanResponses === true ? true : config.scanResponses === false ? false : fail("config.scanResponses must be true or false"),

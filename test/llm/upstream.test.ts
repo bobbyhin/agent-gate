@@ -6,7 +6,8 @@ import * as http from "node:http";
 import type { AddressInfo } from "node:net";
 import { parseLlmConfig } from "../../src/llm/config.js";
 import { route, type ResolvedTarget } from "../../src/llm/routing.js";
-import { callUpstreams, retryAfterMs, type UpstreamOptions } from "../../src/llm/upstream.js";
+import { longestCallMs } from "../../src/llm/server.js";
+import { backoffCeiling, callUpstreams, retryAfterMs, type UpstreamOptions } from "../../src/llm/upstream.js";
 
 function targets(primaryUrl = "http://primary.test/v1", fallbackUrl = "http://fallback.test/v1"): ResolvedTarget[] {
   const config = parseLlmConfig(
@@ -82,9 +83,11 @@ describe("callUpstreams", () => {
   });
 
   const table: Array<[name: string, steps: Step[], expected: unknown, sleeps: number[]]> = [
-    ["a 500 is retried once on the same upstream", [500, 200], { ok: true, upstream: "primary", status: 200, attempts: 2, fallback: false }, [100]],
-    ["two 5xx move on to the fallback", [500, 503, 200], { ok: true, upstream: "fallback", status: 200, attempts: 3, fallback: true }, [100]],
-    ["a timeout is retried, then the fallback answers", ["timeout", "timeout", 200], { ok: true, upstream: "fallback", status: 200, attempts: 3, fallback: true }, [100]],
+    // random() is 0.5 in these, so a backoff waits half its ceiling: 50 ms before the first retry.
+    ["a 500 is retried once on the same upstream", [500, 200], { ok: true, upstream: "primary", status: 200, attempts: 2, fallback: false }, [50]],
+    ["a 408 is retried like a 5xx: the server never ran the request", [408, 200], { ok: true, upstream: "primary", status: 200, attempts: 2, fallback: false }, [50]],
+    ["two 5xx move on to the fallback", [500, 503, 200], { ok: true, upstream: "fallback", status: 200, attempts: 3, fallback: true }, [50]],
+    ["a timeout is retried, then the fallback answers", ["timeout", "timeout", 200], { ok: true, upstream: "fallback", status: 200, attempts: 3, fallback: true }, [50]],
     ["a 4xx is the answer: no retry, no fallback", [400], { ok: true, upstream: "primary", status: 400, attempts: 1, fallback: false }, []],
     ["a 429 moves on to the fallback at once, without waiting", [429, 200], { ok: true, upstream: "fallback", status: 200, attempts: 2, fallback: true }, []],
     ["a 429 on the fallback waits for Retry-After (plus jitter) and tries once more", [429, { status: 429, retryAfter: "1" }, 200], { ok: true, upstream: "fallback", status: 200, attempts: 3, fallback: true }, [1100]],
@@ -96,10 +99,10 @@ describe("callUpstreams", () => {
     ],
     ["a Retry-After longer than rateLimitWaitMs is not waited for", [429, { status: 429, retryAfter: "120" }], { ok: false, failure: "rate_limited", status: 429, attempts: 2, rateLimited: 2, retryAfterSeconds: 120 }, []],
     ["without a Retry-After the wait is backoffMs, with jitter", [429, 429, 200], { ok: true, upstream: "fallback", status: 200, attempts: 3, fallback: true }, [110]],
-    ["the retry after a 429 is one of the upstream's retries", [500, 500, 500, { status: 429, retryAfter: "1" }], { ok: false, failure: "rate_limited", status: 429, attempts: 4, rateLimited: 1, retryAfterSeconds: 1 }, [100, 100]],
-    ["every attempt fails with a 5xx", [500, 500, 502, 503], { ok: false, failure: "server_error", status: 503, attempts: 4, rateLimited: 0 }, [100, 100]],
-    ["the last failure decides: timeout", [500, 500, "unreachable", "timeout"], { ok: false, failure: "timeout", attempts: 4, rateLimited: 0 }, [100, 100]],
-    ["the last failure decides: unreachable", ["timeout", "timeout", "unreachable", "unreachable"], { ok: false, failure: "unreachable", attempts: 4, rateLimited: 0 }, [100, 100]],
+    ["the retry after a 429 is one of the upstream's retries", [500, 500, 500, { status: 429, retryAfter: "1" }], { ok: false, failure: "rate_limited", status: 429, attempts: 4, rateLimited: 1, retryAfterSeconds: 1 }, [50, 50]],
+    ["every attempt fails with a 5xx", [500, 500, 502, 503], { ok: false, failure: "server_error", status: 503, attempts: 4, rateLimited: 0 }, [50, 50]],
+    ["the last failure decides: timeout", [500, 500, "unreachable", "timeout"], { ok: false, failure: "timeout", attempts: 4, rateLimited: 0 }, [50, 50]],
+    ["the last failure decides: unreachable", ["timeout", "timeout", "unreachable", "unreachable"], { ok: false, failure: "unreachable", attempts: 4, rateLimited: 0 }, [50, 50]],
   ];
   for (const [name, steps, expected, sleeps] of table) {
     it(name, async () => {
@@ -124,11 +127,47 @@ describe("callUpstreams", () => {
     assert.equal("traceparent" in (plain.calls[0]?.init.headers as Record<string, string>), false);
   });
 
-  it("doubles the backoff before each retry and stops after `retries`", async () => {
+  it("doubles the backoff's ceiling before each retry, waits a random part of it, and stops after `retries`", async () => {
     const s = scripted([500, 500, 500, 500, 200]);
     const outcome = await callUpstreams(targets(), { model: "large", messages: [] }, { ...s.options, retries: 3 });
     assert.equal(outcome.ok && outcome.target.upstream.name, "fallback");
-    assert.deepEqual(s.sleeps, [100, 200, 400]);
+    assert.deepEqual(s.sleeps, [50, 100, 200]);
+    const low = scripted([500, 500, 500, 500, 200]);
+    await callUpstreams(targets(), { model: "large", messages: [] }, { ...low.options, retries: 3, random: () => 0 });
+    assert.deepEqual(low.sleeps, [0, 0, 0], "full jitter can retry at once");
+  });
+
+  it("caps the backoff at maxBackoffMs", async () => {
+    const s = scripted([500, 500, 500, 500, 200]);
+    await callUpstreams(targets(), { model: "large", messages: [] }, { ...s.options, retries: 3, maxBackoffMs: 150, random: () => 0.999999 });
+    assert.deepEqual(s.sleeps, [99, 149, 149]);
+    assert.deepEqual([1, 2, 3, 4].map((n) => backoffCeiling(100, 150, n)), [100, 150, 150, 150]);
+    assert.deepEqual([1, 2, 3].map((n) => backoffCeiling(100, undefined, n)), [100, 200, 400]);
+  });
+
+  it("whatever the jitter, the waits of a call fit inside longestCallMs (what a reservation is sized by)", async () => {
+    const config = { timeoutMs: 1000, retries: 3, backoffMs: 400, maxBackoffMs: 1000, rateLimitWaitMs: 2000 };
+    const failures: Step[][] = [
+      [500, 500, 500, 500, 500, 500, 500, 500],
+      ["timeout", 503, 408, 500, 500, 502, 504, { status: 429, retryAfter: "1" }, 500],
+      [429, 500, 500, 500, { status: 429 }, 500],
+      // the one wait after a 429 on the last upstream, between backoffs
+      [500, 500, 500, 500, { status: 429, retryAfter: "1" }, 500, 500, 500],
+    ];
+    for (const steps of failures) {
+      for (const r of [0, 0.25, 0.5, 0.75, 0.999999]) {
+        const s = scripted(steps);
+        const outcome = await callUpstreams(targets(), { model: "large", messages: [] }, { ...s.options, ...config, random: () => r });
+        assert.equal(outcome.ok, false);
+        const ceilings = s.sleeps.every((ms) => ms <= Math.max(config.maxBackoffMs, config.rateLimitWaitMs));
+        assert.ok(ceilings, `a wait above its ceiling: ${s.sleeps.join(", ")}`);
+        // Every attempt timing out is the worst case for the attempts themselves.
+        const worst = s.calls.length * config.timeoutMs + s.sleeps.reduce((a, b) => a + b, 0);
+        assert.ok(worst <= longestCallMs(config), `${worst} ms > ${longestCallMs(config)} ms with random ${r}`);
+      }
+    }
+    // With the defaults the bound is what Cloud Run's request timeout is set against (test/llm/deploy.test.ts).
+    assert.equal(longestCallMs({ timeoutMs: 60_000, retries: 1, backoffMs: 250, maxBackoffMs: 10_000, rateLimitWaitMs: 2000 }), 242_500);
   });
 
   it("with no fallback and retries 0, makes exactly one attempt", async () => {
