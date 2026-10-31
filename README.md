@@ -26,6 +26,32 @@ Status: v0.1.0. It is extracted from the guard that runs daily on the author's o
 where a newer private copy is in use. It is a heuristic reader of shell commands, not a sandbox.
 See [Known limits](#known-limits).
 
+## Where it sits in an agent loop
+
+Agent frameworks let a program step in before and after each step of an agent's loop. Google's Agent
+Development Kit (ADK) has callbacks before and after an agent's run, a model call and a tool call, and
+its documentation presents them as the place for guardrails: a `before_tool_callback` that returns a
+value skips the tool, and the value becomes the tool's result
+([ADK callbacks](https://adk.dev/callbacks/types-of-callbacks/)). agent-gate does those jobs at the
+same points, from outside the agent:
+
+| ADK callback | Runs | In agent-gate |
+| --- | --- | --- |
+| `before_agent_callback`, `after_agent_callback` | before and after an agent's run | Not seen: the guards see calls, not runs. A client can name its run, session and chain of agents (`x-run-id`, `_meta`), and the run caps and the audit log use those names. |
+| `before_model_callback` | before a request goes to the model | The LLM gateway: the leak guard (block, redact, or divert to a local model), routing, stop rules (calls per minute, per run, repeats) and the budget reservation. |
+| `after_model_callback` | after the model's answer comes back | The LLM gateway: the same leak guard on the answer (by default a streamed answer is held until it has been read), the cost settled, a usage line. |
+| `before_tool_callback` | before a tool runs | The Claude Code hook (the shell guard) and the MCP gateway's policy: allow, warn, ask a human or block; the gateway writes its audit line before anything runs. |
+| `after_tool_callback` | after a tool returns | The MCP gateway's result line with the result's hash, and its optional result guard (secrets withheld or redacted, instruction-like text flagged). |
+
+The difference is where the code runs. A callback runs inside the agent's process, with the agent's
+credentials, and only in agents whose authors added it (for security policies, ADK's documentation
+recommends plugins: the same hooks, shared by many agents). agent-gate runs outside: the hook inside
+Claude Code's permission system, and the two gateways as the only addresses the agent has for its
+tools and its model. When the provider keys live in the LLM gateway's environment and the tool
+servers' credentials in the MCP gateway's, an agent that skips a gateway reaches neither the tools
+nor the model. The price is that a gateway sees only what crosses it: the agent's plan, its memory
+and its reasons for a call stay inside the agent.
+
 ## The four decisions
 
 | Decision | What happens | Examples |
