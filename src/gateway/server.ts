@@ -2,6 +2,8 @@
 //
 // It lists every downstream tool as "<server>__<tool>", decides every call with the policy, and
 // forwards the calls that may run. Forwarded calls get the downstream result back unchanged.
+// Every call is written to the audit log before anything is forwarded; a forwarded call gets a
+// second line when it comes back, with its duration and a hash of its result (audit.ts).
 //
 //   allow  forward, audit
 //   warn   forward, audit, and a note on stderr
@@ -12,8 +14,10 @@
 // ponytail: only tools are proxied. Resources, prompts, and requests from a downstream server
 // back to the client (sampling, elicitation) are not.
 
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { performance } from "node:perf_hooks";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -29,8 +33,9 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { ApprovalStore, hashArguments, type Approval } from "./approvals.js";
-import { AuditLog } from "./audit.js";
+import { AuditLog, hashJson } from "./audit.js";
 import type { GatewayConfig } from "./config.js";
+import { contextFromMeta, type CallContext } from "./context.js";
 import { bindFiles } from "./files.js";
 import { evaluate, type Policy, type ToolCall, type Verdict } from "./policy.js";
 
@@ -52,6 +57,9 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
   fs.mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
   const approvals = new ApprovalStore(config.stateDir, config.approvalTtlMs);
   const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"), config.auditArguments);
+  // One connection per gateway process: the stdio transport serves exactly one client.
+  const connId = `cn-${randomBytes(4).toString("hex")}`;
+  let seq = 0;
 
   // The low-level Server rather than McpServer (the SDK marks Server deprecated for ordinary
   // servers): a proxy republishes tools whose JSON Schemas come from other servers, while
@@ -70,10 +78,13 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
     const client = route && downstream.get(route.server);
     if (!route || !client) throw new McpError(ErrorCode.InvalidParams, `Unknown tool: ${name}`);
 
+    const n = ++seq;
+    const context = contextFromMeta(request.params._meta);
     const call: ToolCall = { server: route.server, tool: route.tool, args: rawArgs ?? {} };
+    const argsHash = hashArguments(call.args);
     let refusal: CallToolResult | undefined;
     try {
-      refusal = decide(call);
+      refusal = decide(call, n, argsHash, context);
     } catch (err) {
       // The policy, the approval file or the audit log failed: the call is not run.
       // ponytail: such a failure goes to stderr only; the audit log may be what failed.
@@ -81,16 +92,27 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
       return errorResult(`agent-gate could not check or record this call, so it was not run: ${errorText(err)}`);
     }
     if (refusal) return refusal;
-    return forward(client, route.server, route.tool, rawArgs, extra.signal);
+    return forwardAndRecord(client, call, n, argsHash, rawArgs, extra.signal);
   });
 
   /** Returns an error result when the call must not run, or undefined when it may be forwarded. */
-  function decide(call: ToolCall): CallToolResult | undefined {
+  function decide(call: ToolCall, n: number, argsHash: string, context: CallContext): CallToolResult | undefined {
     const verdict = evaluate(policy, call);
-    const argsHash = hashArguments(call.args);
     const record = (forwarded: boolean, approvalId?: string) =>
       audit.write(
-        { server: call.server, tool: call.tool, decision: verdict.decision, rule: verdict.rule, why: verdict.why, argsHash, forwarded, ...(approvalId ? { approvalId } : {}) },
+        {
+          connId,
+          seq: n,
+          server: call.server,
+          tool: call.tool,
+          decision: verdict.decision,
+          rule: verdict.rule,
+          why: verdict.why,
+          argsHash,
+          forwarded,
+          ...(approvalId ? { approvalId } : {}),
+          ...context,
+        },
         call.args,
       );
 
@@ -115,6 +137,7 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
           ...(verdict.ttlMs !== undefined ? { ttlMs: verdict.ttlMs } : {}),
           ...(files ? { files } : {}),
           ...(verdict.standing ? { standing: true } : {}),
+          ...(context.agentPath ? { agentPath: context.agentPath } : {}),
         });
         if (outcome.kind === "approved") {
           record(true, outcome.approval.id);
@@ -130,13 +153,44 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
     }
   }
 
+  /** Forwards a call that may run, then writes its call-result line: duration, error flag, result hash and size. */
+  async function forwardAndRecord(
+    client: Client,
+    call: ToolCall,
+    n: number,
+    argsHash: string,
+    rawArgs: Record<string, unknown> | undefined,
+    signal: AbortSignal,
+  ): Promise<CallToolResult> {
+    const started = performance.now();
+    const record = (outcome: { isError: boolean; resultHash?: string; resultBytes?: number; errorCode?: number }): void => {
+      try {
+        audit.writeResult({ connId, seq: n, server: call.server, tool: call.tool, argsHash, durationMs: Math.round(performance.now() - started), ...outcome });
+      } catch (err) {
+        // ponytail: the call has already run, so a result line that cannot be written is reported
+        // on stderr only, and the agent still gets its result.
+        log(`could not record the result of call ${n} to ${call.server}${SEPARATOR}${call.tool}: ${errorText(err)}`);
+      }
+    };
+    let result: CallToolResult;
+    try {
+      result = await forward(client, call.server, call.tool, rawArgs, signal);
+    } catch (err) {
+      record({ isError: true, errorCode: err instanceof McpError ? err.code : ErrorCode.InternalError });
+      throw err;
+    }
+    const { hash, bytes } = hashJson(result);
+    record({ isError: result.isError === true, resultHash: hash, resultBytes: bytes });
+    return result;
+  }
+
   function splitName(name: string): { server: string; tool: string } | undefined {
     const at = name.indexOf(SEPARATOR);
     if (at <= 0 || at + SEPARATOR.length === name.length) return undefined;
     return { server: name.slice(0, at), tool: name.slice(at + SEPARATOR.length) };
   }
 
-  log(`ready: ${downstream.size} downstream server(s) (${[...downstream.keys()].join(", ")}), state in ${config.stateDir}`);
+  log(`ready: ${downstream.size} downstream server(s) (${[...downstream.keys()].join(", ")}), state in ${config.stateDir}, connection ${connId}`);
   return {
     server,
     async close() {

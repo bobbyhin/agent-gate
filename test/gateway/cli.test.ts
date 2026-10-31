@@ -48,6 +48,12 @@ describe("agent-gate CLI", () => {
     ["approvals", "list", "--reason", "x"],
     ["serve", "now"],
     ["--bogus"],
+    ["audit"],
+    ["audit", "frobnicate"],
+    ["audit", "stats", "extra"],
+    ["audit", "stats", "--all"],
+    ["usage", "--all"],
+    ["llm", "serve", "--json"],
   ];
   for (const argv of bad) {
     it(`exits 2 for: ${argv.join(" ") || "(nothing)"}`, async () => {
@@ -65,6 +71,54 @@ describe("agent-gate CLI", () => {
 
   it("formats waits for people", () => {
     assert.deepEqual([duration(4_000), duration(252_000), duration(3_900_000), duration(183_600_000)], ["4s", "4m 12s", "1h 05m", "2d 03h"]);
+  });
+});
+
+describe("audit stats: per tool, from the call and call-result lines", () => {
+  let tmp: string;
+  let config: string;
+  before(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-audit-stats-"));
+    config = path.join(tmp, "gateway.config.json");
+    fs.writeFileSync(config, JSON.stringify({ servers: [{ name: "demo", command: "node" }], policy: "policy.json", stateDir: "state" }));
+    fs.mkdirSync(path.join(tmp, "state"));
+    const lines: unknown[] = [];
+    // echo: 20 forwarded calls that took 1, 2, ... 20 ms (written out of order); delete_file: 1 asked, 1 forwarded that failed; one blocked shell call.
+    for (let i = 1; i <= 20; i++) {
+      lines.push({ connId: "cn-00000001", seq: i, server: "demo", tool: "echo", decision: "allow", forwarded: true });
+      lines.push({ event: "call-result", connId: "cn-00000001", seq: i, server: "demo", tool: "echo", durationMs: ((i * 7) % 20) + 1, isError: false });
+    }
+    lines.push({ connId: "cn-00000001", seq: 21, server: "demo", tool: "delete_file", decision: "ask", forwarded: false });
+    lines.push({ connId: "cn-00000001", seq: 22, server: "demo", tool: "delete_file", decision: "ask", forwarded: true });
+    lines.push({ event: "call-result", connId: "cn-00000001", seq: 22, server: "demo", tool: "delete_file", durationMs: 2500, isError: true, errorCode: -32001 });
+    lines.push({ connId: "cn-00000001", seq: 23, server: "demo", tool: "run_command", decision: "block", forwarded: false });
+    lines.push({ event: "approval-decided", server: "demo", tool: "delete_file", decision: "approved" });
+    fs.writeFileSync(path.join(tmp, "state", "audit.jsonl"), `${lines.map((l) => JSON.stringify(l)).join("\n")}\nnot json\n`);
+  });
+  after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  it("counts decisions and errors, with nearest-rank p50 and p95 of the duration", async () => {
+    const r = await run("audit", "stats", "--json", "--config", config);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(JSON.parse(r.out), [
+      { tool: "demo__delete_file", calls: 2, forwarded: 1, asked: 1, blocked: 0, results: 1, errors: 1, p50Ms: 2500, p95Ms: 2500, maxMs: 2500 },
+      { tool: "demo__echo", calls: 20, forwarded: 20, asked: 0, blocked: 0, results: 20, errors: 0, p50Ms: 10, p95Ms: 19, maxMs: 20 },
+      { tool: "demo__run_command", calls: 1, forwarded: 0, asked: 0, blocked: 1, results: 0, errors: 0, p50Ms: null, p95Ms: null, maxMs: null },
+    ]);
+    assert.match(r.err, /1 line\(s\) of .*audit\.jsonl are not JSON and were skipped \(line 46\)/);
+  });
+
+  it("prints a table", async () => {
+    const r = await run("audit", "stats", "--config", config);
+    assert.match(r.out, /^tool {15}calls {2}forwarded {2}asked {2}blocked {2}errors {2}p50 {4}p95 {4}max\n/);
+    assert.match(r.out, /\ndemo__delete_file {2}2 {6}1 {10}1 {6}0 {8}1 {7}2\.5 s {2}2\.5 s {2}2\.5 s\n/);
+    assert.match(r.out, /\ndemo__run_command {2}1 {6}0 {10}0 {6}1 {8}0 {7}- {6}- {6}-\n$/);
+  });
+
+  it("says so when nothing is recorded yet", async () => {
+    fs.rmSync(path.join(tmp, "state", "audit.jsonl"));
+    const r = await run("audit", "stats", "--config", config);
+    assert.deepEqual([r.code, r.out], [0, "No tool calls recorded yet.\n"]);
   });
 });
 

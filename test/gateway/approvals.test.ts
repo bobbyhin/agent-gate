@@ -39,6 +39,14 @@ describe("ApprovalStore", () => {
   });
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
+  it("keeps the agent path of the call that made the request; the same call from another path reuses it", () => {
+    const first = store.resolveAsk({ ...request({ path: "a.txt" }), agentPath: "main>research-sub" });
+    assert.equal(first.approval.agentPath, "main>research-sub");
+    const again = store.resolveAsk({ ...request({ path: "a.txt" }), agentPath: "main>other-sub" });
+    assert.deepEqual([again.approval.id, again.approval.agentPath], [first.approval.id, "main>research-sub"]);
+    assert.equal("agentPath" in store.resolveAsk(request({ path: "b.txt" })).approval, false, "no path given, none stored");
+  });
+
   it("a rule's ttlMinutes sets the request's life; an approval left unused past it lets nothing through", () => {
     const short = { ...request({ path: "prod" }, "deploy"), rule: "red-line-3-ship", ttlMs: 30 * 60 * 1000 };
     const first = store.resolveAsk(short);

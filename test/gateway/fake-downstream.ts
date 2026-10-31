@@ -66,6 +66,15 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  "fail",
+  { description: "Pretends to fail: answers with an error result.", inputSchema: { reason: z.string() } },
+  async ({ reason }) => {
+    received("fail", { reason });
+    return { content: [{ type: "text", text: `pretended to fail: ${reason}` }], isError: true };
+  },
+);
+
 server.connect(new StdioServerTransport()).catch((err: unknown) => {
   process.stderr.write(`fake-downstream: ${String(err)}\n`);
   process.exit(1);

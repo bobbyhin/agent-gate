@@ -1,11 +1,16 @@
 // The audit log: one JSON line per decision, appended to <stateDir>/audit.jsonl.
-// Two kinds of line share the file. The gateway writes one per tool call (AuditEntry, no "event"
-// field). The CLI writes one when a human answers an approval request or finds it expired
-// (ApprovalEvent, "event": "approval-decided"); approvals.json forgets a request a week after it
-// expires, and these lines are the lasting record of who decided what and how long it waited.
+// Several kinds of line share the file. The gateway writes one per tool call before it forwards
+// anything (AuditEntry, no "event" field), and one more when a forwarded call comes back
+// (CallResultEvent, "event": "call-result": how long it took and a hash of what came back, joined to
+// its call by connId and seq). The CLI writes one when a human answers an approval request or finds
+// it expired (ApprovalEvent, "event": "approval-decided"); approvals.json forgets a request a week
+// after it expires, and these lines are the lasting record of who decided what and how long it waited.
 // ponytail: the file is never rotated or shipped anywhere; that is left to the operator.
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import { canonicalJson } from "./approvals.js";
+import type { CallContext } from "./context.js";
 import type { Decision } from "./policy.js";
 
 export interface ApprovalEvent {
@@ -43,8 +48,12 @@ export interface StandingEvent {
   note?: string;
 }
 
-export interface AuditEntry {
+export interface AuditEntry extends CallContext {
   ts: string;
+  /** The gateway connection the call came in on: one per "agent-gate serve" process, "cn-" and 8 hex digits. */
+  connId: string;
+  /** The call's place in its connection, from 1. Its call-result line has the same connId and seq. */
+  seq: number;
   server: string;
   tool: string;
   decision: Decision;
@@ -57,6 +66,33 @@ export interface AuditEntry {
   approvalId?: string;
   /** Only present when "auditArguments" is true in the gateway config. */
   args?: Record<string, unknown>;
+}
+
+/** What came back from a forwarded call. The result itself is never stored, only its hash and size. */
+export interface CallResultEvent {
+  ts: string;
+  event: "call-result";
+  connId: string;
+  seq: number;
+  server: string;
+  tool: string;
+  argsHash: string;
+  /** Milliseconds from forwarding the call to the downstream server's answer. Time spent waiting for a human is not in it. */
+  durationMs: number;
+  /** The result said isError: true, or the call failed and there is no result (errorCode). */
+  isError: boolean;
+  /** sha256 of the canonical JSON of the result the agent got. Someone holding a result can hash it and compare. */
+  resultHash?: string;
+  /** The size of that canonical JSON in bytes. */
+  resultBytes?: number;
+  /** The JSON-RPC error code when the call failed without a result, for example -32001 (timeout). */
+  errorCode?: number;
+}
+
+/** sha256 of canonical JSON (object keys sorted), with its size: how the audit log names a value without storing it. */
+export function hashJson(value: unknown): { hash: string; bytes: number } {
+  const text = canonicalJson(value);
+  return { hash: `sha256:${createHash("sha256").update(text).digest("hex")}`, bytes: Buffer.byteLength(text) };
 }
 
 export class AuditLog {
@@ -76,6 +112,13 @@ export class AuditLog {
   write(entry: Omit<AuditEntry, "ts" | "args">, args: Record<string, unknown>, now = new Date()): AuditEntry {
     const line: AuditEntry = { ts: now.toISOString(), ...entry };
     if (this.withArguments) line.args = args;
+    fs.appendFileSync(this.file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
+    return line;
+  }
+
+  /** Appends the line for a call that came back, or throws. Its value stays out; its hash and size go in. */
+  writeResult(event: Omit<CallResultEvent, "ts" | "event">, now = new Date()): CallResultEvent {
+    const line: CallResultEvent = { ts: now.toISOString(), event: "call-result", ...event };
     fs.appendFileSync(this.file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
     return line;
   }

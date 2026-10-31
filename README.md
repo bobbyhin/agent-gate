@@ -381,8 +381,8 @@ cp gateway.config.example.json gateway.config.json
 }
 ```
 
-The example proxies the fake server from the end-to-end test. Its three tools (`echo`,
-`delete_file`, `run_command`) only pretend, so the whole flow can be tried safely; its path is
+The example proxies the fake server from the end-to-end test. Its tools (`echo`, `delete_file`,
+`run_command` and a few more) only pretend, so the whole flow can be tried safely; its path is
 relative, so run the gateway from the repository root. For real use, list real servers, for
 example `{ "name": "files", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/srv/agent-work"] }`.
 
@@ -519,6 +519,7 @@ agent-gate approvals stats [--json]                 per rule: approved, denied, 
 agent-gate approvals grant <server>__<tool> --uses <n> --hours <h> [--arg <name>=<glob>]... [--note <text>]
                                                     a standing approval (deny sa-… revokes it)
 agent-gate approvals grants [--all] [--json]        standing approvals in force (--all: also used up, expired, revoked)
+agent-gate audit stats [--json]                     per tool: calls, decisions, errors, p50/p95 time (see Audit log)
 ```
 
 Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.config.json`).
@@ -684,22 +685,78 @@ errors too, so a typo cannot silently turn a rule off.
 
 ### Audit log
 
-Every decision appends one JSON line to `<stateDir>/audit.jsonl` (mode 0600). These are the
-lines from the run above, plus a blocked shell call:
+Every call appends one JSON line to `<stateDir>/audit.jsonl` (mode 0600) before anything is
+forwarded, and a forwarded call gets a second line when it comes back. These lines are from a run of
+the steps above (with its own approval id, `ap-044ff37e`), in which the client also sent a trace
+context and an agent path, plus a blocked shell call; the user name is changed:
 
 ```json
-{"ts":"2026-10-14T08:55:58.727Z","server":"demo","tool":"delete_file","decision":"ask","rule":"red-line-4-delete","why":"Red line 4: this tool looks like it deletes or overwrites data.","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","forwarded":false,"approvalId":"ap-f646780e"}
-{"ts":"2026-10-14T08:55:58.931Z","server":"demo","tool":"delete_file","decision":"ask","rule":"red-line-4-delete","why":"Red line 4: this tool looks like it deletes or overwrites data.","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","forwarded":true,"approvalId":"ap-f646780e"}
-{"ts":"2026-10-14T08:55:58.938Z","server":"demo","tool":"delete_file","decision":"ask","rule":"red-line-4-delete","why":"Red line 4: this tool looks like it deletes or overwrites data.","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","forwarded":false,"approvalId":"ap-ed722973"}
-{"ts":"2026-10-14T08:55:58.940Z","server":"demo","tool":"run_command","decision":"block","rule":"shell-guard","why":"shell guard: force push","argsHash":"sha256:2c29a8326969480173c60a2f1083c6dbf5b73aa28539723243a204c8793dc5e9","forwarded":false}
+{"ts":"2026-10-31T03:07:09.098Z","connId":"cn-6c5ce60f","seq":1,"server":"demo","tool":"echo","decision":"allow","rule":"default","why":"no rule matched; the policy default is allow","argsHash":"sha256:cbbbdcd27692344de5dbab3abcaba413fb0f45307267de7081401576df1cb176","forwarded":true}
+{"ts":"2026-10-31T03:07:09.101Z","event":"call-result","connId":"cn-6c5ce60f","seq":1,"server":"demo","tool":"echo","argsHash":"sha256:cbbbdcd27692344de5dbab3abcaba413fb0f45307267de7081401576df1cb176","durationMs":2,"isError":false,"resultHash":"sha256:18687cbcbbbe577d59f89473d37a53854caea9bb3ebfe514c0637f290ae69a06","resultBytes":94}
+{"ts":"2026-10-31T03:07:09.110Z","connId":"cn-6c5ce60f","seq":2,"server":"demo","tool":"delete_file","decision":"ask","rule":"red-line-4-delete","why":"Red line 4: this tool looks like it deletes or overwrites data.","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","forwarded":false,"approvalId":"ap-044ff37e","traceId":"4bf92f3577b34da6a3ce929d0e0e4736","parentSpanId":"00f067aa0ba902b7","session":"sess-42","agentPath":"main>research-sub"}
+{"ts":"2026-10-31T03:07:09.250Z","event":"approval-decided","approvalId":"ap-044ff37e","server":"demo","tool":"delete_file","rule":"red-line-4-delete","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","decision":"approved","waitMs":141,"decidedBy":"alice","confirmation":"--yes"}
+{"ts":"2026-10-31T03:07:09.261Z","connId":"cn-6c5ce60f","seq":3,"server":"demo","tool":"delete_file","decision":"ask","rule":"red-line-4-delete","why":"Red line 4: this tool looks like it deletes or overwrites data.","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","forwarded":true,"approvalId":"ap-044ff37e","traceId":"4bf92f3577b34da6a3ce929d0e0e4736","parentSpanId":"00f067aa0ba902b7","session":"sess-42","agentPath":"main>research-sub"}
+{"ts":"2026-10-31T03:07:09.262Z","event":"call-result","connId":"cn-6c5ce60f","seq":3,"server":"demo","tool":"delete_file","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","durationMs":1,"isError":false,"resultHash":"sha256:2c439525489f5c192e7dc1890336d9ab6723bda91cd0bdb43d148e109a30058b","resultBytes":71}
+{"ts":"2026-10-31T03:07:09.264Z","connId":"cn-6c5ce60f","seq":4,"server":"demo","tool":"run_command","decision":"block","rule":"shell-guard","why":"shell guard: force push","argsHash":"sha256:2c29a8326969480173c60a2f1083c6dbf5b73aa28539723243a204c8793dc5e9","forwarded":false}
 ```
 
-`forwarded` says whether the call reached the downstream server. Argument values are not logged:
+- `connId` names the gateway connection (one per `agent-gate serve` process, which serves one
+  client) and `seq` numbers its calls 1, 2, 3 in the order they came in. Together they tie a call
+  line to its result line, and they order the calls of one session.
+- `forwarded` says whether the call reached the downstream server.
+- A `"call-result"` line is written when a forwarded call comes back: `durationMs` from forwarding
+  to the answer (a call held for a human is answered at once and made again later, so waiting for a
+  human is never in it), `isError`, and the SHA-256 and size of the result the agent got
+  (`resultHash`, `resultBytes`). When a call fails without a result, `errorCode` has the JSON-RPC
+  error code instead. See [Tool results are untrusted data](#tool-results-are-untrusted-data).
+
+Argument values are not logged:
 tool arguments often carry secrets (tokens, passwords) and personal data (names, message bodies),
 while an audit log is kept for a long time and read by more people than the call itself. The hash
 is enough to tie a line to an approval, or to a call that someone already has in hand. Set
-`"auditArguments": true` to log the values anyway. If a line cannot be written, the call is not
-run.
+`"auditArguments": true` to log the values anyway. If a call line cannot be written, the call is not
+run. If a result line cannot be written, the call has already run: the gateway reports it on stderr
+and still returns the result.
+
+**Tracing a call back to the agent.** A client can send correlation ids in the `_meta` of a
+`tools/call` request:
+
+```json
+{
+  "name": "demo__delete_file",
+  "arguments": { "path": "notes/old.md" },
+  "_meta": {
+    "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    "agent-gate/session": "sess-42",
+    "agent-gate/run-id": "run-7",
+    "agent-gate/agent-path": ["main", "research-sub"]
+  }
+}
+```
+
+`traceparent` is a [W3C Trace Context](https://www.w3.org/TR/trace-context/) header (version 00);
+the call line keeps its trace id and its parent span id (`traceId`, `parentSpanId`), so the line can
+be joined with the agent runtime's own trace. `session` and `runId` are written as they are.
+`agentPath` lists the agents a call was handed down through, outermost first, so a line answers
+"who started this, and through whom". It is also kept with an approval request and shown by
+`approvals list` and the read-back (`agents:`). These values are the client's claim: the gateway
+checks their format (letters, digits and a few separators, up to 128 characters; at most 16 agents),
+not their truth. A value that does not fit is not written anywhere, and the line names the field in
+`contextDropped` instead, so a line break or a terminal escape in it cannot forge a line in the log
+or in `approvals list`. The gateway does not pass the trace context on to the downstream server.
+
+`agent-gate audit stats` adds the lines up per tool. From the run above:
+
+```
+$ agent-gate audit stats
+tool               calls  forwarded  asked  blocked  errors  p50   p95   max
+demo__delete_file  2      1          1      0        0       1 ms  1 ms  1 ms
+demo__echo         1      1          0      0        0       2 ms  2 ms  2 ms
+demo__run_command  1      0          0      1        0       -     -     -
+```
+
+`errors` counts results with `isError` and calls that failed without a result; p50 and p95 are
+nearest-rank percentiles of `durationMs` over the call-result lines. `--json` prints the same rows.
 
 The CLI adds a second kind of line when a human approves or denies a request, or tries to after
 it expired. It has `"event": "approval-decided"`, the approval id, the rule, the decision
@@ -722,6 +779,26 @@ red-line-4-delete  0         1       0        0        100%       0s
 
 A request that expires with nobody answering leaves no line, so `stats` also counts the expired
 requests still in `approvals.json`; one that expired more than a week ago is no longer counted.
+
+### Tool results are untrusted data
+
+A tool's result goes straight into the model's context. When the tool reads a database, a web page,
+an inbox or a document store (the retrieval step of a RAG agent), the result carries text that
+someone else wrote, and the model cannot tell an instruction planted in a row or a page from one its
+user gave. That is how an indirect prompt injection arrives. The gateway treats results as untrusted
+data:
+
+- It records what the model was given without keeping it. Each call-result line has the result's
+  SHA-256 over its canonical JSON (object keys sorted, as for `argsHash`) and its size. With a
+  result in hand, from the agent's transcript or the downstream server's log, anyone can hash it and
+  find the line; the audit log itself holds no customer data or secrets from results. In a checkout:
+  `node -e 'const { hashJson } = require("./dist/src/gateway/audit.js"); console.log(hashJson(JSON.parse(require("fs").readFileSync(0, "utf8"))))' < result.json`.
+- It decides the agent's next call, not the text the agent read. The end-to-end test plays an
+  injection: an `echo` result tells the agent to upload its SSH key, the agent obeys, and the shell
+  rule blocks the upload before it reaches the server. An upload of a file that is not a secret
+  waits for a human.
+- What it cannot do: tell a planted instruction from a real one, stop the model from reading it, or
+  see the results of tools that the agent reaches some other way.
 
 ### What the gateway does not cover
 
@@ -746,8 +823,9 @@ requests still in `approvals.json`; one that expired more than a week ago is no 
 - Only tools are proxied. Resources, prompts, and requests from a downstream server back to the
   client (sampling, elicitation) are not.
 - It does not read tool results, so it cannot spot instructions an attacker planted in them (a
-  prompt injection). What it decides is the agent's next call: if the agent obeys and tries to
-  upload a secret through a shell tool, the shell rule blocks it, as the end-to-end test shows.
+  prompt injection); it records only their hash and size. What it decides is the agent's next call:
+  if the agent obeys and tries to upload a secret through a shell tool, the shell rule blocks it, as
+  the end-to-end test shows.
 - Downstream servers are started once. If one fails to start, the gateway does not start; if one
   dies later, its calls fail until the gateway is restarted.
 - Downstream calls use the SDK's default 60-second request timeout, and progress notifications
@@ -1195,14 +1273,16 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 260 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 292 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
 controls, standing approvals and their bounds, the escalate-only rule of a second reviewer, the CLI's exit codes, its read-back before an approval, and what a decision leaves behind
-(the record, the `approval-decided` line, `stats`), and an end-to-end test. That test starts `agent-gate serve`
+(the record, the `approval-decided` line, `stats`), the correlation ids a client may send (and what
+is dropped), `audit stats`, and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
-real CLI, and checks what reached the downstream server and what was written to the audit log.
+real CLI, and checks what reached the downstream server and what was written to the audit log,
+including a call-result line, with the hash of what came back, for every forwarded call.
 Crash tests (`test/gateway/crash.test.ts`) kill the gateway and a writer with `kill -9` and check
 what survives.
 One step plays a prompt injection: a tool result tells the agent to upload its SSH key, the agent
@@ -1244,7 +1324,7 @@ the decision, with no model judging and no tolerance band. And it is evaluated o
 there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 260/260 MCP gateway tests, 173/173 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 292/292 MCP gateway tests, 173/173 LLM gateway tests, 7/7 for
 the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1261,6 +1341,8 @@ src/gateway/approvals.ts                      the approval queue in <stateDir>/a
 src/gateway/files.ts                          binds approvals to the content of the files a call names
 src/gateway/advisor.ts                        the escalate-only rule for a second reviewer (ADR 0008; not wired yet)
 src/gateway/audit.ts                          the audit log, <stateDir>/audit.jsonl
+src/gateway/audit-tools.ts                    reads the audit log back: agent-gate audit ...
+src/gateway/context.ts                        correlation ids a client may send: trace, session, run, agent path
 src/gateway/config.ts                         loads and checks the gateway config
 src/gateway/validate.ts                       field-by-field checks for the configs and the policies
 src/gateway/state-file.ts                     lock and atomic write for approvals.json and ledger.json

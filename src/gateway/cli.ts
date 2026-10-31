@@ -12,6 +12,7 @@ import { loadLeakPolicy, loadLlmConfig } from "../llm/config.js";
 import { openLedger, startLlmGateway } from "../llm/server.js";
 import { ApprovalError, ApprovalStore, canonicalJson, cleanNote, isLive, type Approval, type Confirmation, type StandingApproval } from "./approvals.js";
 import { AuditLog, type ApprovalEvent } from "./audit.js";
+import { auditStats, readAudit } from "./audit-tools.js";
 import { loadConfig, loadPolicy, type GatewayConfig } from "./config.js";
 import { bindFiles } from "./files.js";
 import { createGateway, SEPARATOR } from "./server.js";
@@ -28,6 +29,7 @@ const USAGE = `Usage:
   agent-gate approvals grants [--all] [--json] [--config <file>]   standing approvals
   agent-gate llm serve [--config <file>]              run the LLM gateway (HTTP)
   agent-gate usage [--json] [--config <file>]         LLM spend per gateway key: today, this month, caps
+  agent-gate audit stats [--json] [--config <file>]   per tool: calls, decisions, errors, p50/p95 time
 
 "list" shows the requests that are waiting; --all also shows decided, used and expired ones.
 "approve" reads the call back to you and asks you to type the last 4 characters of its id;
@@ -41,6 +43,21 @@ The MCP gateway's config file is --config, else $AGENT_GATE_CONFIG, else ./gatew
 The LLM gateway's ("llm serve", "usage") is --config, else $AGENT_GATE_LLM_CONFIG, else
 ./llm-gateway.config.json.
 `;
+
+/** Every command: the options it takes, the ones it needs, and whether it takes an id after the action word. */
+const COMMANDS: Readonly<Record<string, { options: readonly string[]; required?: readonly string[]; id?: true }>> = {
+  serve: { options: [] },
+  "approvals list": { options: ["all", "json"] },
+  "approvals show": { options: [], id: true },
+  "approvals approve": { options: ["note", "yes"], id: true },
+  "approvals deny": { options: ["reason"], id: true },
+  "approvals stats": { options: ["json"] },
+  "approvals grant": { options: ["uses", "hours", "arg", "note"], required: ["uses", "hours"], id: true },
+  "approvals grants": { options: ["all", "json"] },
+  "llm serve": { options: [] },
+  usage: { options: ["json"] },
+  "audit stats": { options: ["json"] },
+};
 
 export interface Io {
   out: (text: string) => void;
@@ -96,30 +113,27 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
   const configFile = values.config ?? process.env.AGENT_GATE_CONFIG ?? "gateway.config.json";
   const llmConfigFile = values.config ?? process.env.AGENT_GATE_LLM_CONFIG ?? "llm-gateway.config.json";
   const [command, action, id, ...extra] = positionals;
-  const isServe = command === "serve" && action === undefined;
-  const isGrant = action === "grant";
-  const isApprovals =
-    command === "approvals" &&
-    extra.length === 0 &&
-    (action === "list" || action === "stats" || action === "grants" ? id === undefined : ["show", "approve", "deny", "grant"].includes(action ?? "") && id !== undefined) &&
-    (values.reason === undefined || action === "deny") &&
-    (values.note === undefined || action === "approve" || isGrant) &&
-    (!values.yes || action === "approve") &&
-    (isGrant ? values.uses !== undefined && values.hours !== undefined : values.uses === undefined && values.hours === undefined && values.arg === undefined);
-  const isLlmServe = command === "llm" && action === "serve" && id === undefined;
-  const isUsage = command === "usage" && action === undefined;
-  if (!isServe && !isApprovals && !isLlmServe && !isUsage) {
+  // "serve" and "usage" take no action word; every other command does.
+  const single = command === "serve" || command === "usage";
+  const name = single ? command : `${command} ${action}`;
+  const spec = Object.prototype.hasOwnProperty.call(COMMANDS, name) ? COMMANDS[name] : undefined;
+  const given = Object.entries(values)
+    .filter(([option, value]) => option !== "config" && option !== "help" && value !== undefined && value !== false && !(Array.isArray(value) && value.length === 0))
+    .map(([option]) => option);
+  const positionalsFit = single ? action === undefined : spec?.id ? id !== undefined && extra.length === 0 : id === undefined;
+  if (!spec || !positionalsFit || given.some((option) => !spec.options.includes(option)) || (spec.required ?? []).some((option) => !given.includes(option))) {
     io.err(USAGE);
     return 2;
   }
 
   try {
-    if (isServe) return await serve(configFile);
-    if (isLlmServe) return await serveLlm(llmConfigFile);
-    if (isUsage) return usage(llmConfigFile, values.json, io);
+    if (name === "serve") return await serve(configFile);
+    if (name === "llm serve") return await serveLlm(llmConfigFile);
+    if (name === "usage") return usage(llmConfigFile, values.json, io);
     const config = loadConfig(configFile);
     const store = new ApprovalStore(config.stateDir, config.approvalTtlMs);
     const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"));
+    if (name === "audit stats") return auditStatsCommand(audit.file, values.json, io);
     if (action === "list") return list(store, values.all, values.json, io);
     if (action === "stats") return stats(store, audit.file, values.json, io);
     if (action === "grants") return grants(store, values.all, values.json, io);
@@ -201,18 +215,50 @@ function usage(configFile: string, json: boolean, io: Io): number {
     return 0;
   }
   const first = rows[0];
-  const table = [
-    ["key", `today (${first?.day ?? ""} UTC)`, `this month (${first?.month ?? ""})`, "in flight"],
-    ...rows.map((r) => [
-      r.key,
-      `$${formatUsd(r.dayUsd)} of $${formatUsd(r.dailyUsd)}`,
-      `$${formatUsd(r.monthUsd)} of $${formatUsd(r.monthlyUsd)}`,
-      r.inFlight === 0 ? "0" : `${r.inFlight} ($${formatUsd(r.reservedUsd)} reserved)`,
-    ]),
-  ];
+  printTable(
+    [
+      ["key", `today (${first?.day ?? ""} UTC)`, `this month (${first?.month ?? ""})`, "in flight"],
+      ...rows.map((r) => [
+        r.key,
+        `$${formatUsd(r.dayUsd)} of $${formatUsd(r.dailyUsd)}`,
+        `$${formatUsd(r.monthUsd)} of $${formatUsd(r.monthlyUsd)}`,
+        r.inFlight === 0 ? "0" : `${r.inFlight} ($${formatUsd(r.reservedUsd)} reserved)`,
+      ]),
+    ],
+    io,
+  );
+  return 0;
+}
+
+/** Columns padded to their widest cell, two spaces apart. */
+function printTable(table: string[][], io: Io): void {
   const widths = (table[0] ?? []).map((_, column) => Math.max(...table.map((row) => (row[column] ?? "").length)));
   for (const row of table) io.out(`${row.map((cell, column) => cell.padEnd(widths[column] ?? 0)).join("  ").trimEnd()}\n`);
+}
+
+/** audit stats: per tool, from the call and call-result lines of the audit log. */
+function auditStatsCommand(file: string, json: boolean, io: Io): number {
+  const { lines, unreadable } = readAudit(file);
+  const rows = auditStats(lines);
+  if (json) io.out(`${JSON.stringify(rows, null, 2)}\n`);
+  else if (rows.length === 0) io.out("No tool calls recorded yet.\n");
+  else {
+    printTable(
+      [
+        ["tool", "calls", "forwarded", "asked", "blocked", "errors", "p50", "p95", "max"],
+        ...rows.map((r) => [r.tool, `${r.calls}`, `${r.forwarded}`, `${r.asked}`, `${r.blocked}`, `${r.errors}`, formatMs(r.p50Ms), formatMs(r.p95Ms), formatMs(r.maxMs)]),
+      ],
+      io,
+    );
+  }
+  if (unreadable.length > 0) io.err(`agent-gate: ${unreadable.length} line(s) of ${file} are not JSON and were skipped (line ${unreadable.slice(0, 5).join(", ")}${unreadable.length > 5 ? ", ..." : ""})\n`);
   return 0;
+}
+
+/** 7 ms · 1.2 s · - for none */
+function formatMs(ms: number | null): string {
+  if (ms === null) return "-";
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
 }
 
 function list(store: ApprovalStore, all: boolean, json: boolean, io: Io): number {
@@ -232,6 +278,7 @@ function list(store: ApprovalStore, all: boolean, json: boolean, io: Io): number
       [
         `${a.id}  ${state}  ${a.server}${SEPARATOR}${a.tool}`,
         `  why:     ${a.why} (rule ${a.rule})`,
+        ...(a.agentPath ? [`  agents:  ${a.agentPath}`] : []),
         `  args:    ${preview(canonicalJson(a.args))}`,
         ...(a.files ?? []).map((f) => `  file:    ${f.path} ${f.sha256 ?? "(did not exist)"}`),
         `  created: ${a.createdAt}  expires: ${a.expiresAt}`,
@@ -329,6 +376,7 @@ export function readBack(a: Approval, config: Pick<GatewayConfig, "fileBinding">
   return [
     `Approve this call? ${a.id}`,
     `  call:     ${a.server}${SEPARATOR}${a.tool}`,
+    ...(a.agentPath ? [`  agents:   ${a.agentPath} (as the client states it)`] : []),
     `  args:     ${args[0]}`,
     ...args.slice(1).map((line) => `            ${line}`),
     `  rule:     ${a.rule}: ${a.why}`,
@@ -445,12 +493,13 @@ function stats(store: ApprovalStore, auditFile: string, json: boolean, io: Io): 
   }
   if (rows.length === 0) io.out("No approval requests or decisions recorded yet.\n");
   else {
-    const table = [
-      ["rule", "approved", "denied", "expired", "waiting", "deny rate", "median wait"],
-      ...rows.map((r) => [r.rule, `${r.approved}`, `${r.denied}`, `${r.expired}`, `${r.waiting}`, r.denyRate === null ? "-" : `${Math.round(r.denyRate * 100)}%`, r.medianWaitMs === null ? "-" : duration(r.medianWaitMs)]),
-    ];
-    const widths = (table[0] ?? []).map((_, column) => Math.max(...table.map((row) => (row[column] ?? "").length)));
-    for (const row of table) io.out(`${row.map((cell, column) => cell.padEnd(widths[column] ?? 0)).join("  ").trimEnd()}\n`);
+    printTable(
+      [
+        ["rule", "approved", "denied", "expired", "waiting", "deny rate", "median wait"],
+        ...rows.map((r) => [r.rule, `${r.approved}`, `${r.denied}`, `${r.expired}`, `${r.waiting}`, r.denyRate === null ? "-" : `${Math.round(r.denyRate * 100)}%`, r.medianWaitMs === null ? "-" : duration(r.medianWaitMs)]),
+      ],
+      io,
+    );
   }
   if (unreadable > 0) io.err(`agent-gate: ${unreadable} line(s) of ${auditFile} are not JSON and were skipped\n`);
   return 0;

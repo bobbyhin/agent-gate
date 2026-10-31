@@ -37,6 +37,11 @@ export interface Approval {
   files?: BoundFile[];
   rule: string;
   why: string;
+  /**
+   * The agents the call passed through, as the client stated it (main>research-sub), from the call
+   * that created the request. The gateway checked its format, not its truth.
+   */
+  agentPath?: string;
   status: ApprovalStatus;
   createdAt: string;
   /** createdAt + TTL. After this, the record cannot be approved and cannot allow a call. */
@@ -77,6 +82,8 @@ export interface AskRequest {
   files?: BoundFile[];
   /** The rule allows a standing approval to answer this call (policy "standing": true). */
   standing?: boolean;
+  /** The client's agent path for this call (see Approval.agentPath). */
+  agentPath?: string;
 }
 
 /**
@@ -325,6 +332,7 @@ export class ApprovalStore {
         ...(request.files ? { files: request.files } : {}),
         rule: request.rule,
         why: request.why,
+        ...(request.agentPath ? { agentPath: request.agentPath } : {}),
         status: "pending",
         createdAt: new Date(now).toISOString(),
         expiresAt: new Date(now + (request.ttlMs ?? this.ttlMs)).toISOString(),
