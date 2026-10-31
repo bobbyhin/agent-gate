@@ -793,6 +793,7 @@ Pinning is trust on first use: a definition that is hostile the first time the g
 pinned like any other. It catches changes, not bad first versions, and a call that names a tool the
 gateway has not listed yet makes it list that server first. A damaged `tools.json` is an error: that
 server's tools are not listed, and calls to them are not run. `"pinTools": false` turns pinning off.
+Why it works this way, and what it cannot catch: [ADR 0009](docs/adr/0009-pin-tool-definitions.md).
 
 ### Policy
 
@@ -2232,8 +2233,9 @@ controls, standing approvals and their bounds, the escalate-only rule of a secon
 is dropped), `audit stats`, every rule that matched next to the one that decided (and a check that
 the decisions are first match's), rewrite rules on their own and through a running gateway, loop
 limits (their counts with a clock the test controls, and a loop through a running gateway), tool
-lists (a server that changes a tool's description mid-session, `expose`, profiles, tools the policy
-always blocks, a damaged pin file), the result guard (secrets withheld or redacted in text, resources and
+lists (the pin store on its own: a change to each field the model reads, a tool that disappears and
+comes back, a change undone, a damaged file; a server that changes a tool's description mid-session,
+`expose`, profiles, tools the policy always blocks), the result guard (secrets withheld or redacted in text, resources and
 structured content, instruction-like text flagged, ordinary text left alone), `audit verify` (a log
 the gateway wrote passes; each of ten hand edits fails it) and `audit trajectory` (the three modes,
 precision and recall), a remote server over Streamable HTTP on 127.0.0.1 (its header from the
@@ -2426,6 +2428,7 @@ docs/adr/0005-approvals-are-action-tokens.md  an approval is a server-side actio
 docs/adr/0006-standing-approvals.md           bounded standing approvals, and why only some rules accept them
 docs/adr/0007-where-agent-gate-sits.md        a control plane in front of calls, not an agent host; production readiness
 docs/adr/0008-second-reviewer-escalate-only.md a second reviewer that can only make a decision stricter (partly built)
+docs/adr/0009-pin-tool-definitions.md         why a tool whose definition changes is withheld until a human accepts it
 docs/adr/0010-retries.md                      why retries wait a random time up to a cap, and a 429 goes to the fallback first
 docs/adr/0011-streaming.md                    why a streamed answer is held until it is scanned, unless scanning is off
 docs/adr/0012-an-http-endpoint-for-agents.md  agents over HTTP: a key per agent, approvals bound to it; what deploying it needs
