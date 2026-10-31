@@ -204,6 +204,33 @@ curl -s "$URL/v1/chat/completions" \
 Cloud Run reserves some URL paths that end in `z`, so do not rely on `/healthz` from outside; the
 startup and liveness probes use it on each instance.
 
+### A first deploy that calls no provider
+
+A deploy can be checked end to end without spending anything at a model provider, because the
+gateway answers these requests itself, before any upstream call:
+
+1. Put the SHA-256 of a gateway key you made into the config (the main README shows how), and give
+   each provider-key secret a placeholder value, such as `unused-smoke-test`. The gateway refuses to
+   start without a value, but these requests never reach a provider.
+2. Apply as above.
+3. Three requests, and the answers that show each layer works:
+
+```
+URL=$(terraform output -raw service_url)
+TOKEN=$(gcloud auth print-identity-token)
+# no Google ID token: Cloud Run refuses it (401 or 403); the gateway never sees it
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$URL/v1/chat/completions"
+# ID token, no gateway key: the gateway refuses (401, invalid_api_key)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST "$URL/v1/chat/completions" -H "X-Serverless-Authorization: Bearer $TOKEN"
+# both, and a model alias the config does not route: the gateway answers 404 model_not_found, no upstream call
+curl -s -X POST "$URL/v1/chat/completions" -H "X-Serverless-Authorization: Bearer $TOKEN" \
+    -H "Authorization: Bearer $GATEWAY_KEY" -H "content-type: application/json" \
+    -d '{"model":"no-such-alias","messages":[{"role":"user","content":"hello"}]}'
+```
+
+Then `terraform destroy` (after `deletion_protection = false`), and record what ran in
+[What was checked](#what-was-checked).
+
 Running it:
 
 - **Config or policy change:** `terraform apply` writes a new version of the file secret. The service
