@@ -209,7 +209,7 @@ hook only the analyzer, and the hook must give its usual answers when it runs wi
 | --- | --- | --- |
 | Code | Policy: the same answer every time, testable, cheap | The shell guard; the MCP gateway's policy; the LLM gateway's budgets and leak guard |
 | Classifier | Ambiguous cases that rules cannot see | Not built. [Known limits](#known-limits) lists it as a separate layer. |
-| LLM | Reading a situation and explaining it | Not used at runtime |
+| LLM | Reading a situation and explaining it | Not used at runtime. Planned: a local second reviewer that may only turn an allow into an ask ([ADR 0008](docs/adr/0008-second-reviewer-escalate-only.md); the rule is built and tested, the wiring is not). |
 
 The model reads the situation; the code holds the policy. What neither can decide goes to a human, and
 that threshold is code too: an approval bound to the exact call (`argsHash`) and used once.
@@ -1195,11 +1195,11 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 245 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 260 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
-controls, standing approvals and their bounds, the CLI's exit codes, its read-back before an approval, and what a decision leaves behind
+controls, standing approvals and their bounds, the escalate-only rule of a second reviewer, the CLI's exit codes, its read-back before an approval, and what a decision leaves behind
 (the record, the `approval-decided` line, `stats`), and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log.
@@ -1244,7 +1244,7 @@ the decision, with no model judging and no tolerance band. And it is evaluated o
 there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 245/245 MCP gateway tests, 173/173 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 260/260 MCP gateway tests, 173/173 LLM gateway tests, 7/7 for
 the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1259,6 +1259,7 @@ src/gateway/server.ts                         the MCP gateway: lists <server>__<
 src/gateway/policy.ts                         the policy engine (pure): evaluate(policy, call) -> verdict
 src/gateway/approvals.ts                      the approval queue in <stateDir>/approvals.json
 src/gateway/files.ts                          binds approvals to the content of the files a call names
+src/gateway/advisor.ts                        the escalate-only rule for a second reviewer (ADR 0008; not wired yet)
 src/gateway/audit.ts                          the audit log, <stateDir>/audit.jsonl
 src/gateway/config.ts                         loads and checks the gateway config
 src/gateway/validate.ts                       field-by-field checks for the configs and the policies
@@ -1312,6 +1313,7 @@ docs/adr/0004-decisions-in-code.md            why the guards decide in code, not
 docs/adr/0005-approvals-are-action-tokens.md  an approval is a server-side action token, not a yes in the chat
 docs/adr/0006-standing-approvals.md           bounded standing approvals, and why only some rules accept them
 docs/adr/0007-where-agent-gate-sits.md        a control plane in front of calls, not an agent host; production readiness
+docs/adr/0008-second-reviewer-escalate-only.md a second reviewer that can only make a decision stricter (partly built)
 tsconfig.json                                 compiles src/ and test/ into dist/
 AGENTS.md                                     build, layout and rules for coding agents
 CLAUDE.md                                     one line that points Claude Code to AGENTS.md

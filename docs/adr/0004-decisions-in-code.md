@@ -52,7 +52,7 @@ Each kind of work has a lane, and the guards keep to the first:
 | --- | --- | --- |
 | Code (rules) | Policy: the same answer every time, testable, cheap | All three guards |
 | Classifier (a model that returns a probability) | Ambiguous cases the rules cannot see, such as intent hidden in a script | Not built. The README lists it as a separate layer the guard needs. |
-| LLM (a model that writes text) | Reading a situation and explaining it | Not used at runtime. A second reviewer that could only make a decision stricter is one way it could join (see "Alternatives considered"). |
+| LLM (a model that writes text) | Reading a situation and explaining it | Not used at runtime. A second reviewer that can only make a decision stricter is how it would join (ADR 0008). |
 
 The model reads the situation; the code holds the policy. Where neither can decide, the threshold is
 a human: an approval in the queue, bound to the exact call (`argsHash`), used once.
