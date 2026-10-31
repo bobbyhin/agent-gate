@@ -52,8 +52,9 @@ run next to the agent, on its machine.
 - **Agent hosting, sessions and memory.** That is the runtime's job, and agent-gate has to work for
   agents that run anywhere: a coding agent on a laptop, a service on Cloud Run, a managed runtime.
   If it hosted the agent, it would also be the thing it is meant to check.
-- **Evaluation of the agent's work** (trajectories, answer quality, LLM judges). agent-gate evaluates
-  its own rules (the tables, the held-out set), not the agent's answers.
+- **Evaluation of the agent's work** (answer quality, LLM judges). agent-gate evaluates its own rules
+  (the tables, the held-out set) and checks its own log (`audit verify`); it can score which calls an
+  agent made against an expected list (`audit trajectory`), but it does not judge the agent's answers.
 
 ## What is next, if the gateway is deployed for real
 

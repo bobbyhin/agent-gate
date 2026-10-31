@@ -447,4 +447,31 @@ describe("gateway end to end", () => {
       [["ask", true, true], ["ask", false, false], ["ask", true, true], ["ask", false, false]],
     );
   });
+
+  it("audit verify finds nothing wrong in the whole run, and audit trajectory scores the calls that ran", () => {
+    const verified = cli("audit", "verify");
+    assert.equal(verified.code, 0, verified.out);
+    assert.match(verified.out, /^PASS: \d+ lines checked, no problems\n$/);
+    const expected = path.join(tmp, "expected.json");
+    fs.writeFileSync(
+      expected,
+      JSON.stringify({
+        calls: [
+          { tool: "demo__echo", args: { text: "hello gateway" } },
+          { tool: "demo__delete_file", args: { path: "notes/old.md" } },
+          { tool: "demo__run_command", args: { command: "ls -la" } },
+          { tool: "demo__execute_sql", args: { sql: "INSERT INTO events VALUES (1)" } },
+        ],
+      }),
+    );
+    const scored = cli("audit", "trajectory", "--expect", expected, "--json");
+    assert.equal(scored.code, 0, scored.out + scored.err);
+    const score = JSON.parse(scored.out);
+    assert.deepEqual([score.exact, score.inOrder, score.anyOrder, score.recall], [false, true, true, 1]);
+    const forwarded = fs.readFileSync(path.join(stateDir, "audit.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((l) => l.event === undefined && l.forwarded);
+    assert.equal(score.actual.length, forwarded.length, "the calls that ran");
+    assert.equal(received().length, forwarded.length - 1, "all of which reached the server, but the one to a tool it does not have");
+    fs.writeFileSync(expected, JSON.stringify({ calls: [{ tool: "demo__run_command", args: { command: "ls -la" } }, { tool: "demo__echo", args: { text: "hello gateway" } }] }));
+    assert.equal(cli("audit", "trajectory", "--expect", expected).code, 1, "out of order");
+  });
 });

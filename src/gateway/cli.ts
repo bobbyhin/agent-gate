@@ -13,7 +13,7 @@ import { openLedger, startLlmGateway } from "../llm/server.js";
 import { GROUP_FIELDS, groupUsage, readUsageLog, verifyUsage, type GroupField } from "../llm/usage-report.js";
 import { ApprovalError, ApprovalStore, canonicalJson, cleanNote, isLive, type Approval, type Confirmation, type StandingApproval } from "./approvals.js";
 import { AuditLog, type ApprovalEvent } from "./audit.js";
-import { auditStats, readAudit } from "./audit-tools.js";
+import { auditStats, loadExpected, readAudit, scoreTrajectory, trajectoryOf, verifyAudit } from "./audit-tools.js";
 import { loadConfig, loadPolicy, type GatewayConfig } from "./config.js";
 import { bindFiles } from "./files.js";
 import { createGateway, SEPARATOR } from "./server.js";
@@ -37,6 +37,11 @@ const USAGE = `Usage:
   agent-gate usage --verify [--json] [--config <file>] the usage log's dollars against the ledger, per
                                                       key, today and this month (exit 1 if they differ)
   agent-gate audit stats [--json] [--config <file>]   per tool: calls, decisions, errors, p50/p95 time
+  agent-gate audit verify [--json] [--config <file>]  check the log: nothing blocked ran, every approval
+                                                      came first, matched and was used once (exit 1 if not)
+  agent-gate audit trajectory --expect <file> [--mode exact|in-order|any-order] [--all] [--conn <id>]
+                             [--run <id>] [--json] [--config <file>]
+                                                      score the calls that ran against an expected list
   agent-gate tools list [--json] [--config <file>]    pinned tool definitions, and the changed ones withheld
   agent-gate tools show <server>__<tool> [--config <file>]    the pinned and the changed definition
   agent-gate tools accept <server>__<tool> [--config <file>]  pin the changed definition: the tool is listed again
@@ -67,6 +72,8 @@ const COMMANDS: Readonly<Record<string, { options: readonly string[]; required?:
   "llm serve": { options: [] },
   usage: { options: ["json", "by", "verify"] },
   "audit stats": { options: ["json"] },
+  "audit verify": { options: ["json"] },
+  "audit trajectory": { options: ["json", "expect", "mode", "all", "conn", "run"], required: ["expect"] },
   "tools list": { options: ["json"] },
   "tools show": { options: [], id: true },
   "tools accept": { options: [], id: true },
@@ -113,6 +120,10 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
         arg: { type: "string", multiple: true },
         by: { type: "string" },
         verify: { type: "boolean", default: false },
+        expect: { type: "string" },
+        mode: { type: "string" },
+        conn: { type: "string" },
+        run: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -156,6 +167,8 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
     const store = new ApprovalStore(config.stateDir, config.approvalTtlMs);
     const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"));
     if (name === "audit stats") return auditStatsCommand(audit.file, values.json, io);
+    if (name === "audit verify") return auditVerifyCommand(audit.file, store, values.json, io);
+    if (name === "audit trajectory") return auditTrajectoryCommand(audit.file, values, io);
     if (command === "tools") return toolsCommand(action as string, id, config, audit, values.json, io);
     if (action === "list") return list(store, values.all, values.json, io);
     if (action === "stats") return stats(store, audit.file, values.json, io);
@@ -370,6 +383,51 @@ function toolsCommand(action: string, name: string | undefined, config: GatewayC
   audit.writeTool({ event: "tool-accepted", server, tool, sha256: accepted.pinned.sha256, ...(accepted.pinned.acceptedBy ? { decidedBy: accepted.pinned.acceptedBy } : {}) });
   io.out(`accepted ${name}: its new definition (${accepted.pinned.sha256}) is pinned, and the agent sees the tool again the next time it lists tools.\n`);
   return 0;
+}
+
+/** audit verify: the log against the gateway's rules; exit 1 with the problems when there are any. */
+function auditVerifyCommand(file: string, store: ApprovalStore, json: boolean, io: Io): number {
+  const audit = readAudit(file);
+  const problems = verifyAudit(audit, store.list());
+  const checked = audit.lines.length + audit.unreadable.length;
+  if (json) io.out(`${JSON.stringify({ lines: checked, problems }, null, 2)}\n`);
+  else {
+    for (const p of problems) io.out(`FAIL line ${p.line}: ${p.why}\n`);
+    io.out(problems.length === 0 ? `PASS: ${checked} lines checked, no problems\n` : `FAIL: ${checked} lines checked, ${problems.length} problem(s)\n`);
+  }
+  return problems.length === 0 ? 0 : 1;
+}
+
+const MODES = ["exact", "in-order", "any-order"] as const;
+
+/** audit trajectory --expect <file>: exit 0 when the chosen mode (default in-order) passes. */
+function auditTrajectoryCommand(file: string, values: { expect?: string; mode?: string; all?: boolean; conn?: string; run?: string; json?: boolean }, io: Io): number {
+  const mode = values.mode ?? "in-order";
+  if (!(MODES as readonly string[]).includes(mode)) {
+    io.err(`agent-gate: --mode takes ${MODES.join(", ")}\n`);
+    return 2;
+  }
+  const expected = loadExpected(values.expect as string);
+  const actual = trajectoryOf(readAudit(file).lines, { all: values.all ?? false, ...(values.conn ? { conn: values.conn } : {}), ...(values.run ? { run: values.run } : {}) });
+  const score = scoreTrajectory(actual, expected);
+  const passed = mode === "exact" ? score.exact : mode === "in-order" ? score.inOrder : score.anyOrder;
+  if (values.json) io.out(`${JSON.stringify({ mode, passed, ...score }, null, 2)}\n`);
+  else {
+    const verdict = (ok: boolean) => (ok ? "PASS" : "FAIL");
+    io.out(
+      [
+        `${score.actual.length} call(s) ${values.all ? "recorded" : "ran"}, ${score.expected.length} expected`,
+        `  exact      ${verdict(score.exact)}`,
+        `  in order   ${verdict(score.inOrder)}`,
+        `  any order  ${verdict(score.anyOrder)}`,
+        `  precision  ${score.precision.toFixed(2)} (${score.matched} of the ${score.actual.length} calls were expected)`,
+        `  recall     ${score.recall.toFixed(2)} (${score.matched} of the ${score.expected.length} expected calls happened)`,
+        `${verdict(passed)} (${mode})`,
+        "",
+      ].join("\n"),
+    );
+  }
+  return passed ? 0 : 1;
 }
 
 /** 7 ms · 1.2 s · - for none */

@@ -527,6 +527,9 @@ agent-gate approvals grant <server>__<tool> --uses <n> --hours <h> [--arg <name>
                                                     a standing approval (deny sa-… revokes it)
 agent-gate approvals grants [--all] [--json]        standing approvals in force (--all: also used up, expired, revoked)
 agent-gate audit stats [--json]                     per tool: calls, decisions, errors, p50/p95 time (see Audit log)
+agent-gate audit verify [--json]                    the log checked against the gateway's rules (exit 1 on a problem)
+agent-gate audit trajectory --expect <file> [--mode exact|in-order|any-order] [--all] [--conn <id>] [--run <id>] [--json]
+                                                    the calls that ran, scored against an expected list
 agent-gate tools list [--json]                      pinned tool definitions, and the changed ones withheld (see Tool lists)
 agent-gate tools show <server>__<tool>              the pinned and the changed definition, to compare
 agent-gate tools accept <server>__<tool>            pin the changed definition, so the tool is listed again
@@ -779,7 +782,8 @@ errors too, so a typo cannot silently turn a rule off.
 Every call appends one JSON line to `<stateDir>/audit.jsonl` (mode 0600) before anything is
 forwarded, and a forwarded call gets a second line when it comes back. These lines are from a run of
 the steps above (with its own approval id, `ap-044ff37e`), in which the client also sent a trace
-context and an agent path, plus a blocked shell call; the user name is changed:
+context and an agent path, plus a blocked shell call; the user name is changed, and the
+`tool-pinned` lines of the first listing (see [Tool lists](#tool-lists)) are left out:
 
 ```json
 {"ts":"2026-10-31T03:07:09.098Z","connId":"cn-6c5ce60f","seq":1,"server":"demo","tool":"echo","decision":"allow","rule":"default","why":"no rule matched; the policy default is allow","argsHash":"sha256:cbbbdcd27692344de5dbab3abcaba413fb0f45307267de7081401576df1cb176","forwarded":true}
@@ -853,6 +857,44 @@ demo__run_command  1      0          0      1        0       -     -     -
 
 `errors` counts results with `isError` and calls that failed without a result; p50 and p95 are
 nearest-rank percentiles of `durationMs` over the call-result lines. `--json` prints the same rows.
+
+**Checking the log.** `agent-gate audit verify` reads the whole log (and `approvals.json`, where a
+record is still there) and checks it against the gateway's own rules, with no expected answers to
+compare against: a blocked call was never forwarded; every call that ran after an ask names an
+approval that an `approval-decided` line approved before it, for the same tool and the same
+arguments' hash, after a request for it, and used once; a standing approval was used within its
+uses, before it expired and not after it was revoked; every result line belongs to a forwarded call.
+It prints each problem with its line number, and exits 1 if there is one. A log edited by hand (a
+`forwarded` flipped, an approval id swapped, a second use) fails it; `test/gateway/audit-tools.test.ts`
+makes those edits. From the run above:
+
+```
+$ agent-gate audit verify
+PASS: 15 lines checked, no problems
+```
+
+**Scoring a trajectory.** `agent-gate audit trajectory --expect expected.json` compares the calls that
+ran with an expected list, `{ "calls": [ { "tool": "demo__echo", "args": { "text": "hello" } }, ... ] }`
+(`args` or `argsHash` may be left out to accept any arguments), in three ways: exact (the same calls in
+the same order and nothing else), in order (the expected calls appear in this order, other calls may
+come between) and in any order; with precision (how many of the calls that ran were expected) and
+recall (how many of the expected calls ran). It exits 0 when the mode chosen with `--mode` (default
+`in-order`) passes. The comparison uses argument hashes, so neither the log nor the expected file
+needs the values in the clear. `--all` also counts calls that were refused, `--conn` and `--run`
+pick one connection or one run. From the run above:
+
+```
+$ agent-gate audit trajectory --expect expected.json
+2 call(s) ran, 2 expected
+  exact      PASS
+  in order   PASS
+  any order  PASS
+  precision  1.00 (2 of the 2 calls were expected)
+  recall     1.00 (2 of the 2 expected calls happened)
+PASS (in-order)
+```
+
+The end-to-end test runs both on its own log.
 
 The CLI adds a second kind of line when a human approves or denies a request, or tries to after
 it expired. It has `"event": "approval-decided"`, the approval id, the rule, the decision
@@ -1537,7 +1579,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 346 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 365 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
@@ -1548,7 +1590,9 @@ the decisions are first match's), rewrite rules on their own and through a runni
 limits (their counts with a clock the test controls, and a loop through a running gateway), tool
 lists (a server that changes a tool's description mid-session, `expose`, tools the policy always
 blocks, a damaged pin file), the result guard (secrets withheld or redacted in text, resources and
-structured content, instruction-like text flagged, ordinary text left alone), and an end-to-end test. That test starts `agent-gate serve`
+structured content, instruction-like text flagged, ordinary text left alone), `audit verify` (a log
+the gateway wrote passes; each of ten hand edits fails it) and `audit trajectory` (the three modes,
+precision and recall), and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log,
 including a call-result line, with the hash of what came back, for every forwarded call.
@@ -1603,11 +1647,14 @@ thresholds, run by pytest):
 | the runner and the gate | `npm test`, in CI on Node 20 and 22; the deploy job does not start until it passes |
 
 The difference is the judge. The analyzer is deterministic, so a case is checked by an exact match on
-the decision, with no model judging and no tolerance band. And it is evaluated one call at a time:
-there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
+the decision, with no model judging and no tolerance band. And it is evaluated one call at a time.
+For a sequence of calls, `agent-gate audit trajectory` scores what an agent did through the MCP
+gateway against an expected list (exact, in order, in any order, precision and recall), from the
+audit log; the end-to-end test scores its own run that way. It checks which calls ran, not whether
+the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 346/346 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 365/365 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
 the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1627,7 +1674,7 @@ src/gateway/tool-pins.ts                      pinned tool definitions in <stateD
 src/gateway/result-guard.ts                   reads results: withholds or redacts secrets, flags instruction-like text
 src/gateway/advisor.ts                        the escalate-only rule for a second reviewer (ADR 0008; not wired yet)
 src/gateway/audit.ts                          the audit log, <stateDir>/audit.jsonl
-src/gateway/audit-tools.ts                    reads the audit log back: agent-gate audit ...
+src/gateway/audit-tools.ts                    reads the audit log back: audit stats, verify, trajectory
 src/gateway/context.ts                        correlation ids a client may send: trace, session, run, agent path
 src/gateway/config.ts                         loads and checks the gateway config
 src/gateway/validate.ts                       field-by-field checks for the configs and the policies
