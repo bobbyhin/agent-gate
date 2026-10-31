@@ -1128,7 +1128,9 @@ The gateway runs as one replica, because its budget ledger is a file with a sing
 [ADR 0003](docs/adr/0003-single-writer-state.md) says what it takes to run more. Nothing has been
 deployed to a real cloud project or cluster. The Terraform and the manifests are validated without
 credentials, locally and in CI; the image build and the compose demo run in CI only.
-deploy/README.md lists what ran where.
+deploy/README.md lists what ran where, and the shortcuts that cloud labs take which this setup does
+not. Where agent-gate sits next to a managed agent runtime, what of a production setup it has and
+what it lacks (tracing, metrics): [ADR 0007](docs/adr/0007-where-agent-gate-sits.md).
 
 ## Run the tests
 
@@ -1246,6 +1248,7 @@ docs/adr/0003-single-writer-state.md          why the gateway runs as one replic
 docs/adr/0004-decisions-in-code.md            why the guards decide in code, not in a prompt or a model
 docs/adr/0005-approvals-are-action-tokens.md  an approval is a server-side action token, not a yes in the chat
 docs/adr/0006-standing-approvals.md           bounded standing approvals, and why only some rules accept them
+docs/adr/0007-where-agent-gate-sits.md        a control plane in front of calls, not an agent host; production readiness
 tsconfig.json                                 compiles src/ and test/ into dist/
 AGENTS.md                                     build, layout and rules for coding agents
 CLAUDE.md                                     one line that points Claude Code to AGENTS.md
