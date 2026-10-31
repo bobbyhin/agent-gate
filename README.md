@@ -953,19 +953,25 @@ A rule can match on any of these, and all that are present must match:
 
 - `under`: the path stays inside one of the folders, however it is read. For allow rules.
 - `outside`: the opposite: some reading of the path may land outside them. For ask and block rules.
-- `touches`: some reading lands inside one of the folders. For protecting a folder.
+- `touches`: some reading lands inside one of the folders, or cannot be placed. For protecting a folder.
 
 The gateway does not know how the downstream server will read a path, so it reads it every way it
 knows: as written and with `%XX` escapes decoded (up to three times); lexically, with `.`, `..` and
 repeated `/` removed; and, unless the matcher says `"symlinks": "ignore"`, with symlinks resolved,
 twice: the real path of the lexical form, and the written form walked as the kernel walks it, where a
-`..` after a symlink leads to the parent of the link's target. A reading it cannot place counts against
-`under`: a relative path or one that starts with `~` (the server's working folder and home are not
-known here), a NUL character, an escape that does not decode, a `..` after a folder that does not
-exist, a loop of symlinks. A list of paths is `under` when every item is. The folders must be absolute;
-with symlinks resolved, they are resolved once, when the policy is loaded. This is the one matcher
-that reads the file system, so its answer follows the disk at the moment of the call; a server that
-opens the path a moment later can find it changed.
+`..` after a symlink leads to the parent of the link's target. Some readings it cannot place: a
+relative path or one that starts with `~` (the server's working folder and home are not known here),
+a `file:` URL, a NUL character, an escape that does not decode, a `..` after a folder that does not
+exist, a loop of symlinks, a value that is not a string. Such a path could be anywhere, so it fails
+closed both ways: it is never `under`, and it always `touches`. A block rule on `touches` therefore
+blocks every relative path, the harmless ones too; agents that send absolute paths are not affected.
+A list of paths is `under` when every item is, and `touches` when one item does. The folders must be
+absolute; with symlinks resolved, they are resolved once, when the policy is loaded. This is the one
+matcher that reads the file system, so its answer follows the disk at the moment of the call; a
+server that opens the path a moment later can find it changed. With `"symlinks": "ignore"`, paths are
+compared as text after the lexical step: on a file system that ignores case (the default on macOS and
+Windows), `/srv/STATE` is the folder `/srv/state`, but only resolving symlinks reads the disk's own
+spelling, so `"ignore"` misses that path.
 
 `test/gateway/filesystem-red-team.test.ts` runs the real filesystem server
 (`@modelcontextprotocol/server-filesystem` 1.0.0, a devDependency) behind the gateway, with the
@@ -980,16 +986,19 @@ rules (the server alone), with rules on the path's text (a glob for the workspac
 | an absolute path outside | refuses | asked | asked |
 | a symlink inside that points out | refuses | allowed; the server refused it | asked |
 | a percent-encoded `..` | fails: it reads `%2e%2e` as a name | allowed; the server failed | asked |
-| `~/` (the server's home) | refuses | asked | asked |
-| a relative path | runs: it reads it inside its folder | asked | asked |
+| `~/` (the server's home) | refuses | asked | blocked |
+| a relative path | runs: it reads it inside its folder | asked | blocked |
 | the gateway's state, by its name | runs: the state is inside its folder | blocked | blocked |
+| the gateway's state, by a relative path | runs: the state is inside its folder | blocked | blocked |
 | the gateway's state, through a symlink | runs | **allowed: the server overwrote `approvals.json`** | blocked |
 
 The server's own check keeps calls inside its folder, and it does that well; it cannot know which
-files in it belong to the gateway, and the text rules missed the symlink. The path matchers ask about
-a relative path that the server would have read inside its folder: when the gateway cannot see how a
-server reads a path, it asks. The example's `protect-gateway-state` matches `.agent-gate` in the text,
-because the example cannot know where your state folder is; with its absolute path, a rule with
+files in it belong to the gateway, and the text rules missed the symlink. The server reads a relative
+path inside its folder, where this test keeps the state, so `.agent-gate/approvals.json` reaches the
+queue; the path matchers block it, and every other relative or `~` path with it, because the gateway
+cannot see where the server will read them (a review of this code found that `touches` first let such
+a path through). The example's `protect-gateway-state` matches `.agent-gate` in the text, because the
+example cannot know where your state folder is; with its absolute path, a rule with
 `{ "touches": ["/srv/agent-gate-state"] }` also catches a symlink into it.
 
 A rule whose decision is `ask` may set `"standing": true`, so that a standing approval can answer it
@@ -1380,7 +1389,7 @@ time a client lists the tools.
   whose names it already has to trust.
 - Globs and regexes match text. The path matchers (`under`, `outside`, `touches`) resolve `..`,
   escapes and symlinks, but they cannot see a server's own way of reading a path: a relative path or
-  one that starts with `~` cannot be placed (so it is never `under`), and the disk can change between
+  one that starts with `~` cannot be placed (so it is never `under`, and it always `touches`), and the disk can change between
   the check and the moment the server opens the file. Approvals can be bound to a file's content
   (`fileBinding`).
 - An approval is only as safe as the place it is stored. Anyone who can run the CLI or write
@@ -2395,7 +2404,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 489 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 490 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
@@ -2510,7 +2519,7 @@ an evaluation set of whole runs, each replayed and checked step by step. It chec
 not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 489/489 MCP gateway tests, 323/323 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 490/490 MCP gateway tests, 323/323 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for each of the two demo pages, 2/2 for the load
 test), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see

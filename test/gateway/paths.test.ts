@@ -1,6 +1,7 @@
 // Path matchers in the policy: { under }, { outside } and { touches }. A path is read every way the
 // gateway knows (as written, decoded, lexically, with symlinks resolved like the kernel does), and a
-// reading it cannot place (relative, "~", NUL, a bad escape, a loop) counts against "under".
+// reading it cannot place (relative, "~", NUL, a bad escape, a loop) counts against "under" and for
+// "touches": it could be anywhere, so both fail closed.
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -72,16 +73,38 @@ describe("path matchers: under, outside and touches", () => {
     }
   });
 
-  it("touches: some way of reading the path lands inside, which is what protecting a folder needs", () => {
-    const table: Array<[string, string, boolean]> = [
+  it("touches: some way of reading the path lands inside, or cannot be placed, which is what protecting a folder needs", () => {
+    const table: Array<[string, unknown, boolean]> = [
       ["the state folder's file", path.join(state, "approvals.json"), true],
       ["through a symlink to it", path.join(root, "state-link", "approvals.json"), true],
       ['".." into it', `${root}/notes/../.agent-gate/approvals.json`, true],
       ["a percent-encoded way in that only a decoding server takes", `${root}/notes/%2e%2e/.agent-gate/approvals.json`, true],
       ["a file next to it", path.join(root, "notes", "old.md"), false],
-      ["a relative path", ".agent-gate/approvals.json", false],
+      ["an absolute path elsewhere", path.join(outside, "secret.txt"), false],
+      ["a list with no item inside", [path.join(root, "notes", "old.md"), path.join(outside, "secret.txt")], false],
+      ["a list with one item inside", [path.join(root, "notes", "old.md"), path.join(state, "approvals.json")], true],
+      ["an empty list: no path at all", [], false],
+      // Fail closed: a path the gateway cannot place could be inside. The real filesystem server reads a
+      // relative path inside its own folder, so ".agent-gate/approvals.json" reaches the state when the
+      // state is inside that folder (test/gateway/filesystem-red-team.test.ts does exactly that).
+      ["a relative path", ".agent-gate/approvals.json", true],
+      ["a relative path that looks harmless", "notes/old.md", true],
+      ['"~": the server\'s home is not known', "~/.agent-gate/approvals.json", true],
+      ["a file: URL, which some servers accept", `file://${state}/approvals.json`, true],
+      ["a NUL inside", `${root}/notes/old.md\0.txt`, true],
+      ["not a string", 42, true],
     ];
     for (const [what, value, expected] of table) assert.equal(matches({ touches: [state] }, value), expected, what);
+  });
+
+  it('"symlinks": "ignore" compares text after the lexical step: another spelling of the folder is not inside it', () => {
+    // On a case-insensitive file system (the default on macOS and Windows) .AGENT-GATE is the same folder
+    // as .agent-gate; only resolving symlinks (the default) reads the disk's own spelling. On a
+    // case-sensitive one they are two folders, and the text comparison is right.
+    const upper = path.join(root, ".AGENT-GATE", "approvals.json");
+    assert.equal(matches({ touches: [state], symlinks: "ignore" }, upper), false);
+    const foldsCase = fs.existsSync(path.join(root, ".AGENT-GATE"));
+    assert.equal(matches({ touches: [state] }, upper), foldsCase, "resolving reads the disk's spelling where the disk folds case");
   });
 
   it("reads a path as written, decoded, lexically and with symlinks resolved", () => {

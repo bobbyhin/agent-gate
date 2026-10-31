@@ -61,6 +61,8 @@ function attempts(f: Fixture): Array<{ id: string; tool: string; args: Record<st
     { id: '"~/" (the server\'s home)', tool: "read_text_file", args: read("~/notes/old.md") },
     { id: "a relative path", tool: "read_text_file", args: read("notes/old.md") },
     { id: "the gateway's state, by its name", tool: "write_file", args: write(path.join(f.state, "approvals.json")) },
+    // The server resolves a relative path against its own folder, where the state is.
+    { id: "the gateway's state, by a relative path", tool: "write_file", args: write(".agent-gate/approvals.json") },
     { id: "the gateway's state, through a symlink", tool: "write_file", args: write(path.join(f.work, "state-link", "approvals.json")) },
   ];
 }
@@ -143,9 +145,12 @@ describe("red team: path tricks against the real filesystem server, behind the g
       ["an absolute path outside", "server refused", "ask", "ask"],
       ["a symlink inside that points out", "server refused", "server refused", "ask"],
       ['a percent-encoded ".."', "server error", "server error", "ask"],
-      ['"~/" (the server\'s home)', "server refused", "ask", "ask"],
-      ["a relative path", "ran", "ask", "ask"],
+      // A path the gateway cannot place (the server's home, its working folder) counts as touching the
+      // state: the server may read it there. So the state rule blocks it, before the workspace rule asks.
+      ['"~/" (the server\'s home)', "server refused", "ask", "block"],
+      ["a relative path", "ran", "ask", "block"],
       ["the gateway's state, by its name", "ran", "block", "block"],
+      ["the gateway's state, by a relative path", "ran", "block", "block"],
       ["the gateway's state, through a symlink", "ran", "ran", "block"],
     ];
     assert.deepEqual(

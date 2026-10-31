@@ -553,12 +553,17 @@ function valueMatcher(value: unknown, at: string): ValueTest {
 // A reading is unknown when the gateway cannot place it: a relative path (the server's working
 // folder is not known here), a path that starts with "~" (the server's home is not known either), a
 // NUL, an escape that does not decode, a ".." after a folder that does not exist, a loop of symlinks.
+// An unknown reading could be anywhere, so it counts against what each matcher is for (fail closed):
 //   under     every reading is known and inside a folder: the path stays in, however it is read.
 //   outside   the opposite of under: some reading may land outside, or is unknown.
-//   touches   some known reading is inside a folder: the path may reach in.
-// A value that is not a string is not under and touches nothing. A list is under when it has items
-// and each one is, and touches when one item does. The folders must be absolute paths; with symlinks
-// resolved, they are resolved once, when the policy is loaded.
+//   touches   some reading is inside a folder, or is unknown: the path may reach in. A relative
+//             ".agent-gate/approvals.json" touches the state, because the server may read it there.
+// A value that is not a string cannot be placed either: it is not under, and it touches. A list is
+// under when it has items and each one is, and touches when one item does. The folders must be
+// absolute paths; with symlinks resolved, they are resolved once, when the policy is loaded.
+// With "symlinks": "ignore", folders and paths are compared as text after the lexical step: on a
+// case-insensitive file system "/srv/State" is the folder "/srv/state", but only resolving symlinks
+// (the default) reads the disk's own spelling, so "ignore" can miss such a path.
 
 const PATH_KINDS = ["under", "outside", "touches"] as const;
 type PathKind = (typeof PATH_KINDS)[number];
@@ -583,9 +588,10 @@ function pathMatcher(spec: Record<string, unknown>, at: string): ValueTest {
   const inside = (reading: string | undefined): boolean =>
     reading !== undefined && roots.some((root) => reading === root || reading.startsWith(root.endsWith(path.sep) ? root : root + path.sep));
   const one = (value: unknown): { under: boolean; touches: boolean } => {
-    if (typeof value !== "string") return { under: false, touches: false };
+    // A value the gateway cannot read as a path could name anything: fail closed both ways.
+    if (typeof value !== "string") return { under: false, touches: true };
     const readings = pathReadings(value, links);
-    return { under: readings.every(inside), touches: readings.some(inside) };
+    return { under: readings.every(inside), touches: readings.some((reading) => reading === undefined || inside(reading)) };
   };
   return (value) => {
     const items = Array.isArray(value) ? value.map(one) : [one(value)];
