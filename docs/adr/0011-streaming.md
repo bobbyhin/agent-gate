@@ -83,8 +83,11 @@ Stream, with the safe behaviour as the default.
    then cuts the upstream off and settles the call before it tries to send the end of the stream, and
    disconnects a client that has not taken it `streamIdleMs` later. (Waiting on the client without a
    deadline let a reservation expire while its call was still open, so the key could spend the same
-   money twice.) A relayed stream that is stopped or
-   breaks off ends with an error event in the gateway's own words and no `[DONE]`; a held one gets a
+   money twice.) The gateway ends those reads itself (`readChunk` in `src/llm/upstream.ts`) and does
+   not leave it to `fetch`: Node's `fetch` follows its caller's abort signal through a weak reference,
+   and after a garbage collection an abort no longer reached a body that was being read (Node 22.23,
+   undici 6.27), so a stream was read on to its end after the attempt's time was up. A relayed stream
+   that is stopped or breaks off ends with an error event in the gateway's own words and no `[DONE]`; a held one gets a
    502 or 504. A provider's own error frame is never passed on, because a provider's error can quote
    the key it was sent.
 7. **Booking.** A stream is settled from its usage chunk. A stream that ended without one (cut short,

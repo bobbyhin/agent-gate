@@ -219,6 +219,32 @@ describe("callUpstreams", () => {
     );
   });
 
+  it("ends an answer that stalls after its headers at the attempt's timeout, though fetch no longer reacts to the signal", { timeout: 20_000 }, async () => {
+    // Node's fetch follows its caller's signal through a weak reference that a garbage collection can drop once the
+    // response has been handed back (see readChunk in upstream.ts). This stand-in never reacts to the signal at all,
+    // so only the gateway's own read can end the wait.
+    let cancelled = false;
+    const fetchImpl = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          pull: () => new Promise<void>(() => undefined), // headers, then nothing, ever
+          cancel: () => {
+            cancelled = true;
+          },
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    // The signal's timer does not keep Node running, and a stand-in has no socket that would: this does.
+    const keepRunning = setInterval(() => undefined, 1000);
+    try {
+      const outcome = await callUpstreams(targets().slice(0, 1), { model: "large", messages: [] }, { timeoutMs: 100, retries: 0, backoffMs: 0, apiKey: () => "k", fetch: fetchImpl });
+      assert.deepEqual(outcome, { ok: false, failure: "timeout", attempts: 1, rateLimited: 0 });
+      assert.equal(cancelled, true, "the stalled body was cancelled, so its connection is let go");
+    } finally {
+      clearInterval(keepRunning);
+    }
+  });
+
   it("times out for real against an upstream that never answers", async () => {
     const hanging = http.createServer(() => {
       // never answers

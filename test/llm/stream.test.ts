@@ -485,8 +485,23 @@ describe("a held stream is passed on only as it was scanned", () => {
   });
 });
 
+/**
+ * Polls until `read` gives a value. The deadline is real time and generous: a busy machine is slow, not wrong,
+ * so a test waits for what it expects instead of guessing how long it takes.
+ */
+async function eventually<T>(read: () => T | undefined, what: string, deadlineMs = 30_000): Promise<T> {
+  const until = Date.now() + deadlineMs;
+  for (;;) {
+    const value = read();
+    if (value !== undefined) return value;
+    assert.ok(Date.now() < until, `gave up after ${deadlineMs} ms waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 describe("a relayed stream whose client stops reading", () => {
   it("is cut off at the attempt's timeout and settled then: no late orphan, no spend past the cap", async () => {
+    // About 20 MB for the gateway to relay at once: far more than the connections between the upstream and a client that reads nothing can hold.
     const fake = await startFakeUpstream({ mode: "ok", usage: USAGE, stream: { pieces: Array.from({ length: 2500 }, () => "x".repeat(8000)) } });
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-stall-"));
     const config = parseLlmConfig(
@@ -497,10 +512,12 @@ describe("a relayed stream whose client stops reading", () => {
         upstreams: [{ name: "u", baseUrl: `${fake.url}/v1`, apiKeyEnv: "STALL_KEY", models: { small: "m" }, pricePerMTok: PRICE }],
         routes: [{ id: "r", use: { upstream: "u" } }],
         keys: [{ name: "stall", sha256: hashKey(KEY), dailyUsd: 5, monthlyUsd: 50 }],
-        timeoutMs: 1000,
+        // The attempt's time is the only clock that can end this call (the idle limit is far longer). The test
+        // does not time the cut-off, it waits for it: a slow machine can make it late, not wrong.
+        timeoutMs: 2000,
         retries: 0,
         rateLimitWaitMs: 0,
-        streamIdleMs: 1000,
+        streamIdleMs: 20_000,
         scanResponses: false,
       },
       tmp,
@@ -513,18 +530,76 @@ describe("a relayed stream whose client stops reading", () => {
       const body = JSON.stringify({ model: "small", messages: [{ role: "user", content: "a long answer" }], max_tokens: 50, stream: true });
       socket.write(`POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${KEY}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
       const usageFile = path.join(config.stateDir, "usage.jsonl");
-      const line = () => (fs.existsSync(usageFile) ? (readUsageLog(usageFile).lines as Array<Record<string, any>>)[0] : undefined);
-      const started = Date.now();
-      for (let waited = 0; waited < 5000 && !line(); waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
-      const settled = line();
-      assert.ok(settled, "the call was settled and recorded while its client still was not reading");
-      assert.ok(Date.now() - started < 4000, "within the attempt's time, not when the client comes back");
+      const settled = await eventually(() => (fs.existsSync(usageFile) ? (readUsageLog(usageFile).lines as Array<Record<string, any>>)[0] : undefined), "the call to be settled and recorded");
+      // The line is there while the client has read nothing and is still connected: the gateway settled the call
+      // on its own, at the attempt's time, and not when the client came back.
+      assert.equal(socket.bytesRead, 0, "the client had read nothing");
+      assert.equal(socket.destroyed, false, "and was still connected");
       assert.deepEqual([settled.status, settled.streamEnd, settled.error, settled.settle], [200, "timeout", "upstream_timeout", undefined]);
       assert.equal(openLedger(config).usage(config.keys)[0]?.inFlight, 0, "no reservation left behind");
     } finally {
       socket.destroy();
       await gateway.close();
       await fake.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// Node's fetch follows its caller's abort signal through a weak reference, and a garbage collection can drop it
+// once the response has been handed back (Node 22, undici 6): an abort then no longer ends a read in progress,
+// and the attempt's timeout, the idle limit and a client that leaves all stopped working on a stream being read.
+// This stand-in for fetch never reacts to the signal at all, so only the gateway's own reads can end the stream.
+describe("a stream whose upstream goes quiet, when fetch does not react to the abort signal", () => {
+  it("is still stopped by the idle limit: the upstream is cut off, the call is booked at its estimate, the client gets the error event", { timeout: 30_000 }, async () => {
+    let upstreamCut = false;
+    const quiet = (async () => {
+      const first = new TextEncoder().encode(`data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta: { role: "assistant", content: "one " }, finish_reason: null }] })}\n\n`);
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start: (controller) => controller.enqueue(first),
+          pull: () => new Promise<void>(() => undefined), // then nothing, ever
+          cancel: () => {
+            upstreamCut = true;
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    }) as typeof fetch;
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-quiet-"));
+    const config = parseLlmConfig(
+      {
+        listen: { port: 0 },
+        stateDir: "state",
+        policy: path.join(ROOT, "llm-policy.example.json"),
+        upstreams: [{ name: "u", baseUrl: "http://127.0.0.1:9/v1", apiKeyEnv: "QUIET_KEY", models: { small: "m" }, pricePerMTok: PRICE }],
+        routes: [{ id: "r", use: { upstream: "u" } }],
+        keys: [{ name: "quiet", sha256: hashKey(KEY), dailyUsd: 5, monthlyUsd: 50 }],
+        timeoutMs: 600_000,
+        retries: 0,
+        rateLimitWaitMs: 0,
+        streamIdleMs: 100,
+        scanResponses: false,
+      },
+      tmp,
+    );
+    const gateway = await startLlmGateway(config, loadLeakPolicy(path.join(ROOT, "llm-policy.example.json")), { env: { QUIET_KEY: "fake-provider-key-quiet-0001" }, log: () => undefined, fetch: quiet });
+    try {
+      const res = await fetch(`${gateway.url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "small", messages: [{ role: "user", content: "a quiet answer" }], max_tokens: 20, stream: true }),
+      });
+      const text = await res.text(); // ends when the gateway ends the response, after the idle limit
+      assert.equal(res.status, 200);
+      assert.ok(text.includes("one "), "what came before the quiet was passed on");
+      assert.ok(text.includes("upstream_timeout") && !text.includes("[DONE]"), "then the gateway's own error event, and no [DONE]");
+      const settled = (readUsageLog(path.join(config.stateDir, "usage.jsonl")).lines as Array<Record<string, any>>)[0]!;
+      assert.deepEqual([settled.status, settled.streamEnd, settled.error, settled.usage, settled.settle], [200, "idle_timeout", "upstream_timeout", "estimate", undefined]);
+      await eventually(() => (upstreamCut ? true : undefined), "the gateway to cut the upstream off");
+      assert.equal(openLedger(config).usage(config.keys)[0]?.inFlight, 0, "no reservation left behind");
+    } finally {
+      await gateway.close();
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });

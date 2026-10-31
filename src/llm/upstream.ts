@@ -132,7 +132,7 @@ export async function callUpstreams(
         if (options.stream && response.status >= 200 && response.status < 300) {
           return { ok: true, target, status: response.status, body: "", response, attemptSignal, attempts, fallback: index > 0, rateLimited };
         }
-        const text = await response.text();
+        const text = await readText(response, attemptSignal);
         if (response.status === 429) {
           rateLimited++;
           const after = retryAfterMs(response.headers.get("retry-after"));
@@ -163,6 +163,51 @@ export async function callUpstreams(
     }
   }
   return { ok: false, ...last, attempts, rateLimited };
+}
+
+/**
+ * Reads the next piece of a response body, and gives up with `signal`'s reason if `signal` fires first.
+ *
+ * A body read must not be left to end on the signal that was given to fetch(). Node's fetch (undici) follows
+ * that signal through a weak reference, and once the response has been handed back a garbage collection can
+ * drop it: after that, aborting the signal no longer ends a read in progress. Seen on Node 22.23 (undici 6.27):
+ * the attempt's timeout fired and the stream was read on to its last byte. So the gateway ends its own reads
+ * at the deadline, and its callers cancel the body themselves (the reader is a strong way to the connection).
+ */
+export function readChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal?: AbortSignal): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (signal === undefined) return reader.read();
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    reader.read().then(
+      (result) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      },
+      (err: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** A response body as text, like response.text(), but read with readChunk(): it ends at `signal`, and the body is cancelled when it ends early. */
+export async function readText(response: Response, signal?: AbortSignal): Promise<string> {
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    for (;;) {
+      const { value, done } = await readChunk(reader, signal);
+      if (done) return text + decoder.decode();
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.cancel().catch(() => undefined); // a body that was read to its end has nothing left to cancel
+  }
 }
 
 /** Waits `ms`, or less when `signal` fires first. */

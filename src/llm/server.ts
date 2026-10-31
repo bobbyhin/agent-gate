@@ -40,7 +40,7 @@ import { CONTENT_TYPE, Metrics } from "./metrics.js";
 import { RepeatWindow, requestHash } from "./repeats.js";
 import { route, type ResolvedTarget } from "./routing.js";
 import { isUsageOnly, rebuildEvents, SseParser, StreamAssembler } from "./stream.js";
-import { backoffCeiling, callUpstreams } from "./upstream.js";
+import { backoffCeiling, callUpstreams, readChunk, readText } from "./upstream.js";
 import { UsageLog, type StreamEnd, type UsageEntry } from "./usage-log.js";
 
 export interface LlmGatewayOptions {
@@ -425,7 +425,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         }
         // An upstream that answered a streamed request with a whole JSON answer: handled like one.
         try {
-          outcome.body = await response.text();
+          outcome.body = await readText(response, outcome.attemptSignal);
         } catch (err) {
           // The client left, or the attempt ran out of time, while the answer was read. A 2xx was paid
           // for: booked at the estimate, as a stream that broke off is; anything else costs nothing.
@@ -586,7 +586,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     try {
       reading: for (;;) {
         idle = setTimeout(() => stop("idle_timeout"), config.streamIdleMs);
-        const { value, done } = await reader.read();
+        const { value, done } = await readChunk(reader, attemptSignal); // ends at the deadline by itself: fetch may no longer follow its signal
         clearTimeout(idle);
         if (done) break;
         for (const event of parser.push(decoder.decode(value, { stream: true }))) {
