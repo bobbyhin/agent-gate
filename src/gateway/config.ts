@@ -1,7 +1,8 @@
 // The gateway config file, for example gateway.config.example.json:
 //
 //   {
-//     "servers": [{ "name": "demo", "command": "node", "args": ["server.js"] }],
+//     "servers": [{ "name": "demo", "command": "node", "args": ["server.js"] },
+//                 { "name": "docs", "url": "https://mcp.example.com/mcp", "headersFromEnv": { "Authorization": "DOCS_MCP_AUTH" } }],
 //     "policy": "policy.example.json",
 //     "stateDir": ".agent-gate"
 //   }
@@ -16,19 +17,28 @@
 // variables; a downstream server otherwise gets only the SDK's short list of safe variables such as
 // PATH and HOME, not the gateway's whole environment).
 // Relative "policy", "stateDir" and fileBinding roots are resolved against the config file's directory.
-// "command" and "args" are passed to the downstream process unchanged.
+// "command" and "args" are passed to the downstream process unchanged. A server with "url" instead is
+// reached over Streamable HTTP; "headersFromEnv" names, for each header, the environment variable
+// that holds its value, so no token is ever in this file. Plain http:// is accepted only for a
+// server on this machine. "timeoutSeconds" (default 60) bounds each request to a server.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { FileBindingConfig } from "./files.js";
 import { parsePolicy, type Policy } from "./policy.js";
-import { array, ConfigError, fail, object, onlyKeys, text } from "./validate.js";
+import { array, ConfigError, fail, integerIn, object, onlyKeys, text } from "./validate.js";
 
 export interface ServerConfig {
   name: string;
-  command: string;
-  args: string[];
+  /** stdio: the command that starts the server (absent for a server with a url). */
+  command?: string;
+  args?: string[];
   env?: Record<string, string>;
+  /** Streamable HTTP: the server's endpoint, and header name to the environment variable that holds its value. */
+  url?: string;
+  headersFromEnv?: Record<string, string>;
+  /** How long one request to this server may take (timeoutSeconds). Absent: the SDK's 60 seconds. */
+  timeoutMs?: number;
   /** Globs of the tool names the agent may see and call. Absent: all of them. */
   expose?: string[];
 }
@@ -125,27 +135,62 @@ function fileBinding(raw: unknown, baseDir: string): FileBindingConfig {
   return { roots, arguments: list(spec.arguments, "arguments") };
 }
 
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
 function server(raw: unknown, at: string): ServerConfig {
   const s = object(raw, at);
-  onlyKeys(s, ["name", "command", "args", "env", "expose"], at);
+  onlyKeys(s, ["name", "command", "args", "env", "url", "headersFromEnv", "timeoutSeconds", "expose"], at);
   const name = text(s.name, `${at}.name`);
   if (!SERVER_NAME.test(name)) fail(`${at}.name must use letters, digits, "-" and single "_" between them (no "__")`);
-  const args = array(s.args ?? [], `${at}.args`).map((arg, i) => {
-    if (typeof arg !== "string") fail(`${at}.args[${i}] must be a string`);
-    return arg;
-  });
-  const result: ServerConfig = { name, command: text(s.command, `${at}.command`), args };
+  if (s.url !== undefined && (s.command !== undefined || s.args !== undefined || s.env !== undefined)) fail(`${at} has both "url" and a command; a server is either local (command) or remote (url)`);
+  const result: ServerConfig = s.url !== undefined ? remote(s, at, name) : { name, ...local(s, at) };
+  if (s.timeoutSeconds !== undefined) result.timeoutMs = integerIn(s.timeoutSeconds, `${at}.timeoutSeconds`, 1, 3600) * 1000;
   if (s.expose !== undefined) {
     const expose = array(s.expose, `${at}.expose`).map((glob, i) => text(glob, `${at}.expose[${i}]`));
     if (expose.length === 0) fail(`${at}.expose must list at least one glob; leave it out to expose every tool`);
     result.expose = expose;
   }
+  return result;
+}
+
+function local(s: Record<string, unknown>, at: string): { command: string; args: string[]; env?: Record<string, string> } {
+  const args = array(s.args ?? [], `${at}.args`).map((arg, i) => {
+    if (typeof arg !== "string") fail(`${at}.args[${i}] must be a string`);
+    return arg;
+  });
+  if (s.command === undefined) fail(`${at} needs "command" (a local server, over stdio) or "url" (a remote one, over Streamable HTTP)`);
+  const result: { command: string; args: string[]; env?: Record<string, string> } = { command: text(s.command, `${at}.command`), args };
   if (s.env !== undefined) {
     const env = object(s.env, `${at}.env`);
     for (const [key, value] of Object.entries(env)) {
       if (typeof value !== "string") fail(`${at}.env.${key} must be a string`);
     }
     result.env = env as Record<string, string>;
+  }
+  return result;
+}
+
+function remote(s: Record<string, unknown>, at: string, name: string): ServerConfig {
+  let url: URL;
+  try {
+    url = new URL(text(s.url, `${at}.url`));
+  } catch (err) {
+    if (err instanceof ConfigError) throw err;
+    return fail(`${at}.url is not a valid URL`);
+  }
+  if (url.username || url.password) fail(`${at}.url must not contain credentials; put them in a header with headersFromEnv`);
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  const local = host === "localhost" || host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) fail(`${at}.url must use https:// (plain http:// only for a server on this machine)`);
+  const result: ServerConfig = { name, url: url.toString() };
+  if (s.headersFromEnv !== undefined) {
+    const headers = object(s.headersFromEnv, `${at}.headersFromEnv`);
+    for (const [header, variable] of Object.entries(headers)) {
+      if (!HEADER_NAME.test(header)) fail(`${at}.headersFromEnv has a header name that is not valid: ${JSON.stringify(header)}`);
+      if (typeof variable !== "string" || !ENV_NAME.test(variable)) fail(`${at}.headersFromEnv.${header} must name an environment variable, such as DOCS_MCP_AUTH`);
+    }
+    result.headersFromEnv = headers as Record<string, string>;
   }
   return result;
 }

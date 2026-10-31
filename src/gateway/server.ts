@@ -25,6 +25,7 @@ import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -39,8 +40,9 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { ApprovalStore, hashArguments, type Approval } from "./approvals.js";
 import { AuditLog, hashJson } from "./audit.js";
-import type { GatewayConfig } from "./config.js";
+import type { GatewayConfig, ServerConfig } from "./config.js";
 import { contextFromMeta, type CallContext } from "./context.js";
+import { ConfigError } from "./validate.js";
 import { bindFiles } from "./files.js";
 import { alwaysBlocked, evaluate, globToRegExp, repeatLimitsFor, type Policy, type ToolCall, type Verdict } from "./policy.js";
 import { loadLeakPolicy } from "../llm/config.js";
@@ -62,7 +64,12 @@ export interface Gateway {
 export type Log = (message: string) => void;
 const stderrLog: Log = (message) => process.stderr.write(`[agent-gate] ${message}\n`);
 
-export async function createGateway(config: GatewayConfig, policy: Policy, log: Log = stderrLog): Promise<Gateway> {
+export interface GatewayOptions {
+  /** Where headersFromEnv values are read from (default: process.env). */
+  env?: NodeJS.ProcessEnv;
+}
+
+export async function createGateway(config: GatewayConfig, policy: Policy, log: Log = stderrLog, options: GatewayOptions = {}): Promise<Gateway> {
   fs.mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
   const approvals = new ApprovalStore(config.stateDir, config.approvalTtlMs);
   const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"), config.auditArguments);
@@ -81,7 +88,16 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
   // servers): a proxy republishes tools whose JSON Schemas come from other servers, while
   // McpServer only registers tools that it describes with zod itself.
   const server = new Server({ name: "agent-gate", version: VERSION }, { capabilities: { tools: { listChanged: true } } });
-  const downstream = await connectAll(config, () => server.sendToolListChanged().catch(() => undefined));
+  // Header values for remote servers, read once: a missing variable stops the gateway, naming it.
+  const env = options.env ?? process.env;
+  const missing = config.servers.flatMap((s) => Object.values(s.headersFromEnv ?? {}).filter((variable) => !env[variable]));
+  if (missing.length > 0) throw new ConfigError(`set the environment variables named by headersFromEnv: ${[...new Set(missing)].join(", ")}`);
+  const headers = new Map(config.servers.map((s) => [s.name, Object.fromEntries(Object.entries(s.headersFromEnv ?? {}).map(([header, variable]) => [header, env[variable] as string]))]));
+  // Secrets that must not appear in a log line or an error the agent sees, should a server quote them.
+  const secrets = [...headers.values()].flatMap((h) => Object.values(h)).filter((value) => value.length >= 4);
+  const scrub = (message: string): string => secrets.reduce((text, secret) => text.split(secret).join("[REDACTED:header]"), message);
+  const servers = new Map(config.servers.map((s) => [s.name, s]));
+  const downstream = await connectAll(config, headers, scrub, () => server.sendToolListChanged().catch(() => undefined));
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const lists = await Promise.all([...downstream].map(([name, client]) => visibleTools(name, client)));
@@ -90,7 +106,7 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
 
   /** A server's tools as the agent sees them: exposed, not always blocked, not changed since pinned; with the prefix. */
   async function visibleTools(name: string, client: Client): Promise<Tool[]> {
-    let shown = (await listTools(name, client, log)).filter((tool) => isExposed(name, tool.name) && !alwaysBlocked(policy, name, tool.name));
+    let shown = (await listTools(name, client, log, servers.get(name)?.timeoutMs, scrub)).filter((tool) => isExposed(name, tool.name) && !alwaysBlocked(policy, name, tool.name));
     if (pins) {
       try {
         const checked = pins.check(name, shown);
@@ -199,6 +215,7 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
           argsHash,
           forwarded,
           ...(approvalId ? { approvalId } : {}),
+          ...(servers.get(call.server)?.url ? { transport: "http" as const } : {}),
           ...rewritten,
           ...(verdict.alsoMatched ? { alsoMatched: verdict.alsoMatched.map((m) => m.rule) } : {}),
           ...context,
@@ -269,7 +286,7 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
     };
     let result: CallToolResult;
     try {
-      result = await forward(client, call.server, call.tool, rawArgs, signal);
+      result = await forward(client, call.server, call.tool, rawArgs, signal, servers.get(call.server)?.timeoutMs, scrub);
     } catch (err) {
       record({ isError: true, errorCode: err instanceof McpError ? err.code : ErrorCode.InternalError });
       throw err;
@@ -312,14 +329,20 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
   };
 }
 
-// ponytail: every downstream server is started once, at startup. If one fails to start, the
-// gateway does not start; if one dies later, its calls fail until the gateway is restarted.
-async function connectAll(config: GatewayConfig, onToolListChanged: () => void): Promise<Map<string, Client>> {
+// ponytail: every downstream server is started (or, for a url, connected to) once, at startup. If
+// one fails, the gateway does not start; if one dies later, its calls fail until the gateway is
+// restarted.
+async function connectAll(
+  config: GatewayConfig,
+  headers: ReadonlyMap<string, Record<string, string>>,
+  scrub: (message: string) => string,
+  onToolListChanged: () => void,
+): Promise<Map<string, Client>> {
   const results = await Promise.allSettled(
     config.servers.map(async (s) => {
       const client = new Client({ name: "agent-gate", version: VERSION });
       client.setNotificationHandler(ToolListChangedNotificationSchema, async () => onToolListChanged());
-      await client.connect(new StdioClientTransport({ command: s.command, args: s.args, env: s.env, stderr: "inherit" }));
+      await client.connect(transportFor(s, headers.get(s.name) ?? {}), s.timeoutMs === undefined ? {} : { timeout: s.timeoutMs });
       return [s.name, client] as const;
     }),
   );
@@ -327,7 +350,7 @@ async function connectAll(config: GatewayConfig, onToolListChanged: () => void):
   const failures: string[] = [];
   results.forEach((result, i) => {
     if (result.status === "fulfilled") connected.set(result.value[0], result.value[1]);
-    else failures.push(`"${config.servers[i]?.name}": ${errorText(result.reason)}`);
+    else failures.push(`"${config.servers[i]?.name}": ${scrub(errorText(result.reason))}`);
   });
   if (failures.length > 0) {
     await Promise.allSettled([...connected.values()].map((client) => client.close()));
@@ -336,40 +359,54 @@ async function connectAll(config: GatewayConfig, onToolListChanged: () => void):
   return connected;
 }
 
-async function listTools(name: string, client: Client, log: Log): Promise<Tool[]> {
+/** stdio for a local server; Streamable HTTP for one with a url, with its headers, and no redirects (a token must not travel). */
+function transportFor(s: ServerConfig, headers: Record<string, string>): StdioClientTransport | StreamableHTTPClientTransport {
+  if (s.url) return new StreamableHTTPClientTransport(new URL(s.url), { requestInit: { headers, redirect: "error" } });
+  return new StdioClientTransport({ command: s.command as string, args: s.args ?? [], ...(s.env ? { env: s.env } : {}), stderr: "inherit" });
+}
+
+async function listTools(name: string, client: Client, log: Log, timeoutMs?: number, scrub: (message: string) => string = (m) => m): Promise<Tool[]> {
   const tools: Tool[] = [];
   try {
     let cursor: string | undefined;
     for (let page = 0; page < MAX_LIST_PAGES; page++) {
-      const result = await client.request({ method: "tools/list", params: cursor === undefined ? {} : { cursor } }, ListToolsResultSchema);
+      const result = await client.request({ method: "tools/list", params: cursor === undefined ? {} : { cursor } }, ListToolsResultSchema, timeoutMs === undefined ? {} : { timeout: timeoutMs });
       tools.push(...result.tools); // the server's own names; visibleTools() adds the prefix
       cursor = result.nextCursor;
       if (cursor === undefined) break;
     }
   } catch (err) {
     // One broken server should not hide the tools of the others.
-    log(`could not list the tools of "${name}": ${errorText(err)}`);
+    log(`could not list the tools of "${name}": ${scrub(errorText(err))}`);
   }
   return tools;
 }
 
-async function forward(client: Client, server: string, tool: string, args: Record<string, unknown> | undefined, signal: AbortSignal): Promise<CallToolResult> {
+async function forward(
+  client: Client,
+  server: string,
+  tool: string,
+  args: Record<string, unknown> | undefined,
+  signal: AbortSignal,
+  timeoutMs: number | undefined,
+  scrub: (message: string) => string,
+): Promise<CallToolResult> {
   // client.request rather than client.callTool: callTool would also check the result against the
   // tool's output schema. The gateway passes results through as they are; checking them is the
   // job of the agent's own client.
-  // ponytail: the SDK's default 60 s request timeout applies and progress notifications are not
-  // relayed, so a tool that runs longer than a minute fails through the gateway.
+  // ponytail: the request timeout is the server's timeoutSeconds, else the SDK's default 60 s, and
+  // progress notifications are not relayed, so a tool that runs longer than that fails through the gateway.
   try {
     return await client.request(
       { method: "tools/call", params: args === undefined ? { name: tool } : { name: tool, arguments: args } },
       CallToolResultSchema,
-      { signal },
+      { signal, ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }) },
     );
   } catch (err) {
     // Keep the downstream error's code and data; drop the "MCP error <code>: " prefix that the
     // SDK adds, because the agent's client adds it again.
-    if (err instanceof McpError) throw new McpError(err.code, err.message.replace(/^MCP error -?\d+: /, ""), err.data);
-    throw new McpError(ErrorCode.InternalError, `downstream server "${server}" failed: ${errorText(err)}`);
+    if (err instanceof McpError) throw new McpError(err.code, scrub(err.message.replace(/^MCP error -?\d+: /, "")), err.data);
+    throw new McpError(ErrorCode.InternalError, `downstream server "${server}" failed: ${scrub(errorText(err))}`);
   }
 }
 

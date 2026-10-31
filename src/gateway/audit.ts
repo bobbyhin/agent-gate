@@ -64,6 +64,8 @@ export interface AuditEntry extends CallContext {
   /** True when the call was sent on to the downstream server. */
   forwarded: boolean;
   approvalId?: string;
+  /** "http" for a server reached over Streamable HTTP; absent for one started over stdio. */
+  transport?: "http";
   /** Set when rewrite rules edited the arguments: argsHash is then the edited call's, this the agent's. */
   originalArgsHash?: string;
   rewrittenBy?: string[];

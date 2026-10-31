@@ -340,8 +340,9 @@ analyze("ls");
 The shell guard only sees shell commands. Spending money and posting usually happen through tools
 instead: an MCP server for payments, email, chat or a code host. The MCP gateway is the layer for
 those. It is a stdio MCP server that sits between the agent and one or more downstream MCP
-servers. The agent sees every downstream tool as `<server>__<tool>`, and before a call is
-forwarded, a policy decides one of four things:
+servers: local ones that it starts over stdio, or remote ones that it reaches over Streamable HTTP.
+The agent sees every downstream tool as `<server>__<tool>`, and before a call is forwarded, a
+policy decides one of four things:
 
 | Decision | What happens |
 | --- | --- |
@@ -388,6 +389,16 @@ relative, so run the gateway from the repository root. For real use, list real s
 example `{ "name": "files", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/srv/agent-work"] }`.
 
 - `name` becomes the tool prefix. It may use letters, digits, `-` and single `_`, never `__`.
+- A remote server has `url` instead of `command`, for example
+  `{ "name": "docs", "url": "https://mcp.example.com/mcp", "headersFromEnv": { "Authorization": "DOCS_MCP_AUTH" } }`.
+  The gateway reaches it over Streamable HTTP. `headersFromEnv` maps each header to the environment
+  variable that holds its value (here the whole `Bearer ...` string), so no token is ever in the
+  config; a variable that is not set stops the gateway at startup, naming the variable. The URL must
+  use `https://` unless the server is on this machine (`localhost`, `127.0.0.1`, `[::1]`), it may not
+  carry credentials, and redirects are refused, so the header is never sent anywhere else. A header
+  value that a server quotes back in an error is cut out of the gateway's log and of what the agent
+  sees. Call lines in the audit log for such a server have `"transport": "http"`.
+- `timeoutSeconds` (optional, per server, default 60) is how long one request to the server may take.
 - `command` and `args` start the server. A server gets only a short list of safe environment
   variables (such as `PATH` and `HOME`), not the gateway's whole environment. Add an `env` object
   for the variables it needs.
@@ -981,10 +992,13 @@ data:
   decides is the agent's next call:
   if the agent obeys and tries to upload a secret through a shell tool, the shell rule blocks it, as
   the end-to-end test shows.
-- Downstream servers are started once. If one fails to start, the gateway does not start; if one
-  dies later, its calls fail until the gateway is restarted.
-- Downstream calls use the SDK's default 60-second request timeout, and progress notifications
-  are not relayed, so a tool that runs longer than a minute fails through the gateway.
+- Downstream servers are started (or, with a `url`, connected to) once. If one fails, the gateway
+  does not start; if one dies or goes away later, its calls fail until the gateway is restarted, and
+  the other servers' calls go on.
+- A downstream call may take `timeoutSeconds` (default 60), and progress notifications are not
+  relayed, so a tool that runs longer fails through the gateway with the request-timeout error.
+- Remote servers authenticate with headers from the environment only: there is no OAuth flow. The
+  gateway is a client of them; it does not listen on the network itself.
 
 ## LLM gateway
 
@@ -1579,7 +1593,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 365 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 379 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
@@ -1592,7 +1606,9 @@ lists (a server that changes a tool's description mid-session, `expose`, tools t
 blocks, a damaged pin file), the result guard (secrets withheld or redacted in text, resources and
 structured content, instruction-like text flagged, ordinary text left alone), `audit verify` (a log
 the gateway wrote passes; each of ten hand edits fails it) and `audit trajectory` (the three modes,
-precision and recall), and an end-to-end test. That test starts `agent-gate serve`
+precision and recall), a remote server over Streamable HTTP on 127.0.0.1 (its header from the
+environment, a timeout, a 401 at startup whose quoted header value stays out of the log, a server
+that goes away), and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log,
 including a call-result line, with the hash of what came back, for every forwarded call.
@@ -1654,7 +1670,7 @@ audit log; the end-to-end test scores its own run that way. It checks which call
 the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 365/365 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 379/379 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
 the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1713,6 +1729,7 @@ test/command-guard.test.js                    table tests over both case files, 
 test/generated-commands.js                    20,594 generated commands for the differential test against v5.1
 test/gateway/*.test.ts                        gateway tests: policy, config, approvals, CLI, end to end
 test/gateway/fake-downstream.ts               the fake MCP server for the end-to-end test
+test/gateway/fake-http-downstream.ts          a fake remote MCP server over Streamable HTTP, on 127.0.0.1
 test/llm/*.test.ts                            LLM gateway tests: routing, budget, leak guard, upstream, end to end, deploy configs
 test/llm/fake-upstream.ts                     a fake OpenAI-compatible provider for the tests, the example and the demo
 test/llm/fake-secrets.ts                      every fake secret the tests use, in one file
