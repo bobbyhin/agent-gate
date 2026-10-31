@@ -369,6 +369,11 @@ describe("LLM gateway end to end", () => {
       [tasked.length, Math.round(tasked.reduce((sum, l) => sum + l.costUsd, 0) * 1e9) / 1e9],
     );
 
+    // The gateway wrote both files; they agree to the billionth of a dollar.
+    const verified = spawnSync(process.execPath, [BIN, "usage", "--verify", "--json", "--config", configFile], { encoding: "utf8" });
+    assert.equal(verified.status, 0, verified.stdout + verified.stderr);
+    assert.deepEqual(JSON.parse(verified.stdout).map((r: Record<string, unknown>) => [r.key, r.ok]), [["team-a", true], ["team-b", true]]);
+
     const text = spawnSync(process.execPath, [BIN, "usage", "--config", configFile], { encoding: "utf8" });
     assert.equal(text.status, 0, text.stderr);
     assert.match(text.stdout, /^key\s+today \(\d{4}-\d{2}-\d{2} UTC\)\s+this month \(\d{4}-\d{2}\)\s+in flight\n/);

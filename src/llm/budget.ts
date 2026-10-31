@@ -1,4 +1,6 @@
-// Budgets: a daily and a monthly cap in US dollars for every gateway key.
+// Budgets: a daily and a monthly cap in US dollars for every gateway key, and three optional stop
+// rules per key: calls per minute (maxCallsPerMinute), and calls and dollars per run (runMaxCalls,
+// runMaxUsd), where a run is what a client names in its x-run-id header.
 //
 // Before a call, the gateway reserves an estimate of its cost; the reservation is refused if the
 // key's settled spend plus everything still reserved plus this estimate would pass a cap. After
@@ -6,6 +8,10 @@
 // if the call failed. Concurrent calls each hold their reservation while they run, so together
 // they cannot pass a cap by more than their estimates were off. Why reserve-then-settle:
 // docs/adr/0002-reserve-then-settle-budgets.md.
+//
+// Each reservation is settled at most once: the ledger remembers settled reservation ids for as long as
+// a reservation lives, so a second settle of the same id books nothing ("duplicate"), and a settle
+// whose reservation is gone (it expired first) books the cost once and says so ("orphan").
 //
 // The ledger is one JSON file, <stateDir>/ledger.json, changed with the same locked
 // read-modify-write and atomic rename as the MCP gateway's approvals.json (state-file.ts).
@@ -22,6 +28,10 @@ const FILE_VERSION = 1;
 
 export type Cap = "daily" | "monthly";
 
+/** How long a run's calls and spend are remembered after its last call. */
+export const RUN_MEMORY_MS = 24 * 60 * 60 * 1000;
+const MINUTE_MS = 60_000;
+
 export interface KeySpend {
   /** The UTC day that dayUsd belongs to, "YYYY-MM-DD". */
   day: string;
@@ -31,13 +41,31 @@ export interface KeySpend {
   monthUsd: number;
   /** Calls in flight: reservation id to its estimate. */
   reservations: Record<string, Reservation>;
+  /** Reservations settled lately: id to when it is forgotten. A second settle of one books nothing. */
+  settled?: Record<string, string>;
+  /** maxCallsPerMinute: when the calls of the last minute were let through (ms since the epoch). */
+  recent?: number[];
+  /** runMaxCalls and runMaxUsd: each run's calls and settled dollars, by the client's run id. */
+  runs?: Record<string, RunSpend>;
 }
 
 export interface Reservation {
   usd: number;
   /** After this the reservation is dropped, in case the process that made it died mid-call. */
   expiresAt: string;
+  /** The run the call belongs to, when the key has a run cap. */
+  runId?: string;
 }
+
+export interface RunSpend {
+  calls: number;
+  usd: number;
+  /** The run is forgotten RUN_MEMORY_MS after this. */
+  lastSeen: string;
+}
+
+/** What settle() did: booked the reservation; booked one it no longer had ("orphan"); or nothing, because it was settled before. */
+export type SettleOutcome = "booked" | "orphan" | "duplicate";
 
 export type ReserveOutcome =
   | { ok: true; id: string; usd: number }
@@ -52,7 +80,13 @@ export type ReserveOutcome =
       requestedUsd: number;
       /** Seconds until the request could fit: the end of the period, or 1 when in-flight calls are what is in the way. */
       retryAfterSeconds: number;
-    };
+    }
+  /** The key made maxCallsPerMinute calls in the last 60 seconds. */
+  | { ok: false; cap: "maxCallsPerMinute"; limit: number; retryAfterSeconds: number }
+  /** The run made runMaxCalls calls. Waiting does not help: the run has to stop. */
+  | { ok: false; cap: "runMaxCalls"; runId: string; limit: number; calls: number }
+  /** The run's settled spend, plus what its calls in flight hold, plus this call, would pass runMaxUsd. */
+  | { ok: false; cap: "runMaxUsd"; runId: string; limit: number; spentUsd: number; reservedUsd: number; requestedUsd: number };
 
 export interface KeyUsage {
   key: string;
@@ -113,9 +147,32 @@ export class Ledger {
     this.lockDir = path.join(dir, "ledger.lock");
   }
 
-  reserve(key: GatewayKey, usd: number): ReserveOutcome {
-    return this.update((spend, now) => {
+  /**
+   * Holds `usd` for a call, or refuses it. In this order: the key's calls per minute, the run's
+   * calls, the run's dollars, the key's daily cap, its monthly cap. `runId` counts only for a key
+   * with a run cap; a client that sends none is held to the other limits only.
+   */
+  reserve(key: GatewayKey, usd: number, runId?: string): ReserveOutcome {
+    return this.update((spend, now): ReserveOutcome => {
       const entry = account(spend, key.name, now);
+      const recent = (entry.recent ?? []).filter((t) => t > now - MINUTE_MS);
+      if (key.maxCallsPerMinute !== undefined && recent.length >= key.maxCallsPerMinute) {
+        const oldest = recent[recent.length - key.maxCallsPerMinute] ?? now;
+        return { ok: false, cap: "maxCallsPerMinute", limit: key.maxCallsPerMinute, retryAfterSeconds: Math.max(1, Math.ceil((oldest + MINUTE_MS - now) / 1000)) };
+      }
+      const capsRun = runId !== undefined && (key.runMaxCalls !== undefined || key.runMaxUsd !== undefined);
+      const run = capsRun && entry.runs && Object.prototype.hasOwnProperty.call(entry.runs, runId) ? entry.runs[runId] : undefined;
+      if (capsRun) {
+        const calls = run?.calls ?? 0;
+        if (key.runMaxCalls !== undefined && calls >= key.runMaxCalls) return { ok: false, cap: "runMaxCalls", runId, limit: key.runMaxCalls, calls };
+        if (key.runMaxUsd !== undefined) {
+          const held = roundUsd(Object.values(entry.reservations).reduce((sum, r) => sum + (r.runId === runId ? r.usd : 0), 0));
+          const spent = run?.usd ?? 0;
+          if (roundUsd(spent + held + usd) > key.runMaxUsd) {
+            return { ok: false, cap: "runMaxUsd", runId, limit: key.runMaxUsd, spentUsd: spent, reservedUsd: held, requestedUsd: usd };
+          }
+        }
+      }
       const reservedUsd = roundUsd(Object.values(entry.reservations).reduce((sum, r) => sum + r.usd, 0));
       const checks: Array<[Cap, number, number, number]> = [
         ["daily", key.dailyUsd, entry.dayUsd, nextUtcDay(now)],
@@ -129,18 +186,34 @@ export class Ledger {
         }
       }
       const id = newId(entry.reservations);
-      entry.reservations[id] = { usd, expiresAt: new Date(now + this.reservationTtlMs).toISOString() };
+      entry.reservations[id] = { usd, expiresAt: new Date(now + this.reservationTtlMs).toISOString(), ...(capsRun ? { runId } : {}) };
+      if (key.maxCallsPerMinute !== undefined) entry.recent = [...recent, now];
+      if (capsRun) {
+        entry.runs ??= {};
+        entry.runs[runId] = { calls: (run?.calls ?? 0) + 1, usd: run?.usd ?? 0, lastSeen: new Date(now).toISOString() };
+      }
       return { ok: true, id, usd };
     });
   }
 
-  /** Books the real cost of a finished call and drops its reservation. */
-  settle(keyName: string, reservationId: string, usd: number): void {
-    this.update((spend, now) => {
+  /**
+   * Books the real cost of a finished call and drops its reservation, once per reservation id. A
+   * second settle of the same id books nothing ("duplicate"). A settle whose reservation is gone, because
+   * it expired before the call ended, books the cost (it was spent) and says "orphan" so it can be flagged.
+   */
+  settle(keyName: string, reservationId: string, usd: number): SettleOutcome {
+    return this.update((spend, now): SettleOutcome => {
       const entry = account(spend, keyName, now);
+      entry.settled ??= {};
+      if (Object.prototype.hasOwnProperty.call(entry.settled, reservationId)) return "duplicate";
+      const reservation = Object.prototype.hasOwnProperty.call(entry.reservations, reservationId) ? entry.reservations[reservationId] : undefined;
       delete entry.reservations[reservationId];
       entry.dayUsd = roundUsd(entry.dayUsd + usd);
       entry.monthUsd = roundUsd(entry.monthUsd + usd);
+      entry.settled[reservationId] = new Date(now + this.reservationTtlMs).toISOString();
+      const run = reservation?.runId !== undefined && entry.runs ? entry.runs[reservation.runId] : undefined;
+      if (run) run.usd = roundUsd(run.usd + usd);
+      return reservation ? "booked" : "orphan";
     });
   }
 
@@ -217,6 +290,19 @@ function account(spend: Record<string, KeySpend>, name: string, now: number): Ke
   }
   for (const [id, r] of Object.entries(entry.reservations)) {
     if (!(Date.parse(r.expiresAt) > now)) delete entry.reservations[id];
+  }
+  // The other memories are kept only while they can still matter, and left out when empty.
+  if (entry.settled) {
+    for (const [id, until] of Object.entries(entry.settled)) if (!(Date.parse(until) > now)) delete entry.settled[id];
+    if (Object.keys(entry.settled).length === 0) delete entry.settled;
+  }
+  if (entry.recent) {
+    entry.recent = entry.recent.filter((t) => t > now - MINUTE_MS);
+    if (entry.recent.length === 0) delete entry.recent;
+  }
+  if (entry.runs) {
+    for (const [id, run] of Object.entries(entry.runs)) if (!(Date.parse(run.lastSeen) + RUN_MEMORY_MS > now)) delete entry.runs[id];
+    if (Object.keys(entry.runs).length === 0) delete entry.runs;
   }
   return entry;
 }

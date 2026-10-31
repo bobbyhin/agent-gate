@@ -63,6 +63,10 @@ export interface GatewayKey {
   sha256: string;
   dailyUsd: number;
   monthlyUsd: number;
+  /** Stop rules (optional): calls in any 60 seconds, and calls and dollars per run (x-run-id). */
+  maxCallsPerMinute?: number;
+  runMaxCalls?: number;
+  runMaxUsd?: number;
 }
 
 /** Who may read GET /metrics (src/llm/metrics.ts). Absent: nobody, it is not served. */
@@ -293,7 +297,7 @@ function globs(value: unknown, at: string): (candidate: string) => boolean {
 
 function parseKey(raw: unknown, at: string): GatewayKey {
   const k = object(raw, at);
-  onlyKeys(k, ["name", "sha256", "dailyUsd", "monthlyUsd"], at);
+  onlyKeys(k, ["name", "sha256", "dailyUsd", "monthlyUsd", "maxCallsPerMinute", "runMaxCalls", "runMaxUsd"], at);
   const name = text(k.name, `${at}.name`);
   if (!NAME.test(name)) fail(`${at}.name must be 1 to 64 letters, digits, ".", "_" or "-", starting with a letter or digit`);
   const sha256 = text(k.sha256, `${at}.sha256`);
@@ -303,6 +307,9 @@ function parseKey(raw: unknown, at: string): GatewayKey {
     sha256,
     dailyUsd: positiveNumber(k.dailyUsd, `${at}.dailyUsd`),
     monthlyUsd: positiveNumber(k.monthlyUsd, `${at}.monthlyUsd`),
+    ...(k.maxCallsPerMinute === undefined ? {} : { maxCallsPerMinute: integerIn(k.maxCallsPerMinute, `${at}.maxCallsPerMinute`, 1, 100_000) }),
+    ...(k.runMaxCalls === undefined ? {} : { runMaxCalls: integerIn(k.runMaxCalls, `${at}.runMaxCalls`, 1, 1_000_000) }),
+    ...(k.runMaxUsd === undefined ? {} : { runMaxUsd: positiveNumber(k.runMaxUsd, `${at}.runMaxUsd`) }),
   };
 }
 

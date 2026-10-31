@@ -10,7 +10,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { formatUsd } from "../llm/budget.js";
 import { loadLeakPolicy, loadLlmConfig } from "../llm/config.js";
 import { openLedger, startLlmGateway } from "../llm/server.js";
-import { GROUP_FIELDS, groupUsage, readUsageLog, type GroupField } from "../llm/usage-report.js";
+import { GROUP_FIELDS, groupUsage, readUsageLog, verifyUsage, type GroupField } from "../llm/usage-report.js";
 import { ApprovalError, ApprovalStore, canonicalJson, cleanNote, isLive, type Approval, type Confirmation, type StandingApproval } from "./approvals.js";
 import { AuditLog, type ApprovalEvent } from "./audit.js";
 import { auditStats, readAudit } from "./audit-tools.js";
@@ -33,6 +33,8 @@ const USAGE = `Usage:
   agent-gate usage --by <field> [--json] [--config <file>]
                                                       the usage log summed by task, key, route, upstream,
                                                       model, session or runId
+  agent-gate usage --verify [--json] [--config <file>] the usage log's dollars against the ledger, per
+                                                      key, today and this month (exit 1 if they differ)
   agent-gate audit stats [--json] [--config <file>]   per tool: calls, decisions, errors, p50/p95 time
 
 "list" shows the requests that are waiting; --all also shows decided, used and expired ones.
@@ -59,7 +61,7 @@ const COMMANDS: Readonly<Record<string, { options: readonly string[]; required?:
   "approvals grant": { options: ["uses", "hours", "arg", "note"], required: ["uses", "hours"], id: true },
   "approvals grants": { options: ["all", "json"] },
   "llm serve": { options: [] },
-  usage: { options: ["json", "by"] },
+  usage: { options: ["json", "by", "verify"] },
   "audit stats": { options: ["json"] },
 };
 
@@ -103,6 +105,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
         hours: { type: "string" },
         arg: { type: "string", multiple: true },
         by: { type: "string" },
+        verify: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -134,7 +137,14 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
   try {
     if (name === "serve") return await serve(configFile);
     if (name === "llm serve") return await serveLlm(llmConfigFile);
-    if (name === "usage") return values.by === undefined ? usage(llmConfigFile, values.json, io) : usageBy(llmConfigFile, values.by, values.json, io);
+    if (name === "usage") {
+      if (values.by !== undefined && values.verify) {
+        io.err(`agent-gate: --by and --verify are two different reports; pick one\n\n${USAGE}`);
+        return 2;
+      }
+      if (values.verify) return usageVerify(llmConfigFile, values.json, io);
+      return values.by === undefined ? usage(llmConfigFile, values.json, io) : usageBy(llmConfigFile, values.by, values.json, io);
+    }
     const config = loadConfig(configFile);
     const store = new ApprovalStore(config.stateDir, config.approvalTtlMs);
     const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"));
@@ -257,6 +267,31 @@ function usageBy(configFile: string, by: string, json: boolean, io: Io): number 
     );
   }
   if (unreadable.length > 0) io.err(`agent-gate: ${unreadable.length} line(s) of ${file} are not JSON and were skipped\n`);
+  return 0;
+}
+
+/** usage --verify: the usage log's dollars against the ledger, per key; exit 1 when any differ. */
+function usageVerify(configFile: string, json: boolean, io: Io): number {
+  const config = loadLlmConfig(configFile);
+  const file = path.join(config.stateDir, "usage.jsonl");
+  const { lines, unreadable } = readUsageLog(file);
+  const rows = verifyUsage(lines, openLedger(config).usage(config.keys));
+  if (json) io.out(`${JSON.stringify(rows, null, 2)}\n`);
+  else {
+    printTable(
+      [
+        ["key", "day", "ledger", "usage log", "month", "ledger", "usage log", "result"],
+        ...rows.map((r) => [r.key, r.day, `$${formatUsd(r.ledgerDayUsd)}`, `$${formatUsd(r.logDayUsd)}`, r.month, `$${formatUsd(r.ledgerMonthUsd)}`, `$${formatUsd(r.logMonthUsd)}`, r.ok ? "ok" : "DIFFERENT"]),
+      ],
+      io,
+    );
+  }
+  if (unreadable.length > 0) io.err(`agent-gate: ${unreadable.length} line(s) of ${file} are not JSON and were skipped\n`);
+  const different = rows.filter((r) => !r.ok);
+  if (different.length > 0) {
+    io.err(`agent-gate: the usage log and the ledger differ for ${different.map((r) => `"${r.key}"`).join(", ")}: a usage line was lost, a cost was booked twice, or a file was edited\n`);
+    return 1;
+  }
   return 0;
 }
 

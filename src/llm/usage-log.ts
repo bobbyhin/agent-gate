@@ -42,6 +42,8 @@ export interface UsageEntry {
   fallback?: boolean;
   /** Leak-guard rules that redacted text in this call. */
   redacted?: string[];
+  /** How the ledger booked the cost when it was not the usual way: "orphan" (the reservation had expired) or "duplicate". */
+  settle?: "orphan" | "duplicate";
   latencyMs: number;
 }
 

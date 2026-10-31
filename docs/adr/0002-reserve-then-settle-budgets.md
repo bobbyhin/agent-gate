@@ -69,6 +69,12 @@ crashes mid-call does not hold budget forever.
   billed a call it cut off. Booking the whole estimate would charge teams for the provider's
   outages; if a provider does bill cut-off calls, the ledger under-counts them.
 - **A crashed gateway leaves reservations behind** until they expire.
+- **A reservation is settled at most once.** The ledger remembers settled reservation ids for as long
+  as a reservation lives. A second settle of the same id books nothing; a settle that comes after its
+  reservation expired books the cost once (the money was spent) and is flagged as an orphan in the
+  usage line. Without that memory, a bug that settled twice would not fail: it would quietly double
+  a key's spend and refuse calls it should allow. `agent-gate usage --verify` checks the result from
+  outside: today's and this month's dollars in the usage log must equal the ledger's.
 - **One host.** The ledger is one JSON file behind a lock directory, which is enough for one
   gateway and the CLI on one machine. Several gateway hosts sharing a budget would need a shared
   store with an atomic conditional increment, for example a database update of the form
@@ -81,7 +87,8 @@ crashes mid-call does not hold budget forever.
 - **A fixed per-call limit** (refuse any call whose estimate is above some amount). It bounds a
   single call, not a day's or a month's total.
 - **Rate limits** (requests or tokens per minute). They bound how fast money is spent, not how
-  much. They are worth having next to budgets, and this gateway does not have them yet.
+  much. They are worth having next to budgets, so a key may also set `maxCallsPerMinute` (calls, not
+  tokens), checked under the same lock as the caps; tokens per minute are not built.
 - **The provider's own spend limits.** They work per organization or project, usually per month,
   and stop everything at once. They are a good last line, but they cannot tell one agent or team
   from another.

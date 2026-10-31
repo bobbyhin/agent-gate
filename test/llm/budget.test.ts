@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { costUsd, estimateInputTokens, formatUsd, Ledger, roundUsd, type ReserveOutcome } from "../../src/llm/budget.js";
+import { costUsd, estimateInputTokens, formatUsd, Ledger, roundUsd, RUN_MEMORY_MS, type Cap, type ReserveOutcome } from "../../src/llm/budget.js";
 import type { GatewayKey } from "../../src/llm/config.js";
 
 const KEY: GatewayKey = { name: "team-a", sha256: "a".repeat(64), dailyUsd: 1, monthlyUsd: 3 };
@@ -15,9 +15,18 @@ function ok(outcome: ReserveOutcome): string {
   return (outcome as { id: string }).id;
 }
 
-function refused(outcome: ReserveOutcome): Extract<ReserveOutcome, { ok: false }> {
+/** A refusal by the daily or monthly cap. */
+function refused(outcome: ReserveOutcome): Extract<ReserveOutcome, { ok: false; cap: Cap }> {
   assert.equal(outcome.ok, false, JSON.stringify(outcome));
-  return outcome as Extract<ReserveOutcome, { ok: false }>;
+  assert.ok(outcome.ok === false && (outcome.cap === "daily" || outcome.cap === "monthly"), JSON.stringify(outcome));
+  return outcome as Extract<ReserveOutcome, { ok: false; cap: Cap }>;
+}
+
+/** A refusal by a stop rule: calls per minute or a run cap. */
+function stopped(outcome: ReserveOutcome): Exclude<Extract<ReserveOutcome, { ok: false }>, { cap: Cap }> {
+  assert.equal(outcome.ok, false, JSON.stringify(outcome));
+  assert.ok(outcome.ok === false && outcome.cap !== "daily" && outcome.cap !== "monthly", JSON.stringify(outcome));
+  return outcome as Exclude<Extract<ReserveOutcome, { ok: false }>, { cap: Cap }>;
 }
 
 describe("budget math", () => {
@@ -168,6 +177,71 @@ describe("Ledger", () => {
     assert.equal(file.version, 1);
     assert.deepEqual(Object.keys(file.keys["team-a"]), ["day", "dayUsd", "month", "monthUsd", "reservations"]);
     if (process.platform !== "win32") assert.equal(fs.statSync(ledger.file).mode & 0o777, 0o600);
+  });
+
+  it("settles a reservation once: the same id again books nothing and says duplicate", () => {
+    const id = ok(ledger.reserve(KEY, 0.4));
+    assert.equal(ledger.settle(KEY.name, id, 0.25), "booked");
+    assert.equal(ledger.settle(KEY.name, id, 0.25), "duplicate");
+    assert.deepEqual([usage().dayUsd, usage().monthUsd], [0.25, 0.25]);
+  });
+
+  it("books a settle whose reservation expired first once, as an orphan; a repeat is a duplicate", () => {
+    const id = ok(ledger.reserve(KEY, 0.4));
+    now += TTL + 1; // the call ran longer than its reservation lives
+    ok(ledger.reserve(KEY, 0.1)); // any change drops the expired reservation
+    assert.equal(usage().inFlight, 1);
+    assert.equal(ledger.settle(KEY.name, id, 0.3), "orphan");
+    assert.equal(ledger.settle(KEY.name, id, 0.3), "duplicate");
+    assert.deepEqual([usage().dayUsd, usage().inFlight], [0.3, 1], "the money was spent, so it is booked, once");
+  });
+
+  it("forgets settled ids once a reservation could no longer exist, and leaves no trace of them", () => {
+    ledger.settle(KEY.name, ok(ledger.reserve(KEY, 0.1)), 0.1);
+    assert.equal(Object.keys(JSON.parse(fs.readFileSync(ledger.file, "utf8")).keys["team-a"].settled).length, 1);
+    now += TTL + 1;
+    ok(ledger.reserve(KEY, 0.1));
+    assert.equal("settled" in JSON.parse(fs.readFileSync(ledger.file, "utf8")).keys["team-a"], false);
+  });
+
+  it("maxCallsPerMinute: a call past the limit waits until the oldest of the minute's calls leaves the window", () => {
+    const limited: GatewayKey = { ...KEY, maxCallsPerMinute: 3 };
+    for (let i = 0; i < 3; i++) {
+      ok(ledger.reserve(limited, 0.001));
+      now += 10_000;
+    }
+    // calls at :00, :10 and :20; it is :30
+    const no = stopped(ledger.reserve(limited, 0.001));
+    assert.deepEqual(no, { ok: false, cap: "maxCallsPerMinute", limit: 3, retryAfterSeconds: 30 });
+    now += 30_000; // :60, the first call is a minute old
+    ok(ledger.reserve(limited, 0.001));
+    assert.equal(stopped(ledger.reserve(limited, 0.001)).cap, "maxCallsPerMinute", "refused calls do not count, admitted ones do");
+    assert.equal(ok(ledger.reserve(KEY, 0.001)).length, 11, "the same key without the limit is not held to it");
+  });
+
+  it("runMaxCalls: a run is cut at its limit; another run, or a call with no run id, is not", () => {
+    const capped: GatewayKey = { ...KEY, runMaxCalls: 3 };
+    for (let i = 0; i < 3; i++) ledger.settle(KEY.name, ok(ledger.reserve(capped, 0.01, "run-1")), 0.01);
+    assert.deepEqual(stopped(ledger.reserve(capped, 0.01, "run-1")), { ok: false, cap: "runMaxCalls", runId: "run-1", limit: 3, calls: 3 });
+    ok(ledger.reserve(capped, 0.01, "run-2"));
+    ok(ledger.reserve(capped, 0.01));
+    now += RUN_MEMORY_MS + 1; // a day after its last call, the run is forgotten
+    ok(ledger.reserve(capped, 0.01, "run-1"));
+  });
+
+  it("runMaxUsd: a run's settled spend, plus what its calls in flight hold, plus this call, may not pass it", () => {
+    const capped: GatewayKey = { ...KEY, runMaxUsd: 0.5 };
+    ledger.settle(KEY.name, ok(ledger.reserve(capped, 0.3, "loop")), 0.2);
+    ok(ledger.reserve(capped, 0.2, "loop")); // in flight
+    const no = stopped(ledger.reserve(capped, 0.2, "loop"));
+    assert.deepEqual(no, { ok: false, cap: "runMaxUsd", runId: "loop", limit: 0.5, spentUsd: 0.2, reservedUsd: 0.2, requestedUsd: 0.2 });
+    ok(ledger.reserve(capped, 0.1, "loop")); // exactly 0.5: fits
+    ok(ledger.reserve(capped, 0.4, "other-run"));
+  });
+
+  it("keeps no run or rate memory for a key without those limits", () => {
+    ok(ledger.reserve(KEY, 0.1, "run-1"));
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(ledger.file, "utf8")).keys["team-a"]), ["day", "dayUsd", "month", "monthUsd", "reservations"]);
   });
 
   it("fails closed on a damaged ledger instead of starting from zero", () => {

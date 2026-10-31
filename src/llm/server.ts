@@ -31,7 +31,7 @@ import { performance } from "node:perf_hooks";
 import { cleanNote } from "../gateway/approvals.js";
 import { contextFromHeaders, parseTraceparent } from "../gateway/context.js";
 import { ConfigError } from "../gateway/validate.js";
-import { costUsd, estimateInputTokens, formatUsd, Ledger, roundUsd } from "./budget.js";
+import { costUsd, estimateInputTokens, formatUsd, Ledger, roundUsd, type ReserveOutcome, type SettleOutcome } from "./budget.js";
 import { hashKey, type GatewayKey, type LlmConfig } from "./config.js";
 import { guardMessages, messageTexts, type LeakPolicy } from "./leak-guard.js";
 import { CONTENT_TYPE, Metrics } from "./metrics.js";
@@ -57,7 +57,7 @@ export interface LlmGateway {
 }
 
 type ExtraHeaders = Record<string, string | number>;
-type Outcome = Partial<Pick<UsageEntry, "error" | "rule" | "inputTokens" | "outputTokens" | "costUsd" | "usage" | "attempts" | "fallback">>;
+type Outcome = Partial<Pick<UsageEntry, "error" | "rule" | "inputTokens" | "outputTokens" | "costUsd" | "usage" | "attempts" | "fallback" | "settle">>;
 
 /** The x-agent-task header is kept in the usage line on one line, at most this long. */
 const TASK_MAX_CHARS = 100;
@@ -168,6 +168,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         costUsd: outcome.costUsd ?? 0,
         ...(outcome.usage === undefined ? {} : { usage: outcome.usage }),
         ...(outcome.attempts === undefined ? {} : { attempts: outcome.attempts, fallback: outcome.fallback ?? false }),
+        ...(outcome.settle === undefined ? {} : { settle: outcome.settle }),
         ...(where.redacted === undefined ? {} : { redacted: where.redacted }),
         latencyMs: Math.round(performance.now() - started),
         traceId,
@@ -193,7 +194,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     };
 
     try {
-      await chat(req, key, where, finish, traceparent);
+      await chat(req, key, where, finish, traceparent, context.runId);
     } catch (err) {
       log(`${id} failed: ${errorText(err)}`);
       if (res.headersSent) res.destroy();
@@ -207,6 +208,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     where: { route?: string; upstream?: string; model?: string; redacted?: string[] },
     finish: (status: number, body: unknown, outcome?: Outcome, headers?: ExtraHeaders) => void,
     traceparent: string,
+    runId: string | undefined,
   ): Promise<void> {
     let raw: string;
     try {
@@ -262,21 +264,10 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     const targets = chosen.fallback ? [chosen.primary, chosen.fallback] : [chosen.primary];
     const estimate = Math.max(...targets.map((t) => costUsd(t.upstream.pricePerMTok, inputTokens, outputTokens)));
 
-    const reservation = ledger.reserve(key, estimate);
+    const reservation = ledger.reserve(key, estimate, runId);
     if (!reservation.ok) {
-      const left = Math.max(0, roundUsd(reservation.capUsd - reservation.spentUsd - reservation.reservedUsd));
-      return finish(
-        429,
-        apiError(
-          "budget_exceeded",
-          `agent-gate: this call could cost up to $${formatUsd(reservation.requestedUsd)}, and key "${key.name}" has $${formatUsd(left)} left ` +
-            `of its ${reservation.cap} budget of $${formatUsd(reservation.capUsd)} ($${formatUsd(reservation.spentUsd)} spent, ` +
-            `$${formatUsd(reservation.reservedUsd)} held by calls in flight). Try again later, or with a lower max_tokens.`,
-          { type: "insufficient_quota", cap: reservation.cap },
-        ),
-        { error: "budget_exceeded", rule: reservation.cap },
-        { "retry-after": reservation.retryAfterSeconds },
-      );
+      const refused = refusal(reservation, key.name);
+      return finish(429, refused.body, refused.outcome, refused.headers);
     }
 
     // 6. Call. Without a limit from the client, the default is sent, so the reservation covers the answer.
@@ -338,12 +329,22 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
       const used = readUsage(json);
       const cost = used ? costUsd(outcome.target.upstream.pricePerMTok, used.input, used.output) : reservation.usd;
       open = false;
+      let settled: SettleOutcome = "booked";
       try {
-        ledger.settle(key.name, reservation.id, cost);
+        settled = ledger.settle(key.name, reservation.id, cost);
       } catch (err) {
         log(`could not settle ${reservation.id} for key "${key.name}" ($${formatUsd(cost)}): ${errorText(err)}; its reservation stays until it expires`);
       }
-      const spent: Outcome = { inputTokens: used?.input ?? inputTokens, outputTokens: used?.output ?? outputTokens, costUsd: cost, usage: used ? "upstream" : "estimate", ...via };
+      // "orphan": the call outlived its reservation, so the cost was booked without one.
+      if (settled !== "booked") log(`settled ${reservation.id} for key "${key.name}" ($${formatUsd(cost)}) as ${settled}`);
+      const spent: Outcome = {
+        inputTokens: used?.input ?? inputTokens,
+        outputTokens: used?.output ?? outputTokens,
+        costUsd: cost,
+        usage: used ? "upstream" : "estimate",
+        ...via,
+        ...(settled === "booked" ? {} : { settle: settled }),
+      };
       if (typeof json !== "object" || json === null) {
         return finish(502, apiError("bad_upstream_response", "agent-gate: the upstream's answer was not JSON", { type: "api_error" }), { ...spent, error: "bad_upstream_response" });
       }
@@ -414,6 +415,58 @@ function closeServer(server: http.Server): Promise<void> {
     server.close(() => resolve());
     server.closeAllConnections();
   });
+}
+
+/** The 429 for a call the ledger refused: which limit, in words the caller can act on. */
+function refusal(r: Extract<ReserveOutcome, { ok: false }>, keyName: string): { body: unknown; outcome: Outcome; headers: ExtraHeaders } {
+  const stop = "Retrying will not help: the run should stop.";
+  switch (r.cap) {
+    case "maxCallsPerMinute":
+      return {
+        body: apiError("rate_limited", `agent-gate: key "${keyName}" has made ${r.limit} calls in the last minute, its limit (maxCallsPerMinute). Try again in ${r.retryAfterSeconds} s.`, {
+          type: "rate_limit_error",
+          cap: r.cap,
+        }),
+        outcome: { error: "rate_limited", rule: r.cap },
+        headers: { "retry-after": r.retryAfterSeconds },
+      };
+    case "runMaxCalls":
+      return {
+        body: apiError("run_limit_reached", `agent-gate: run ${JSON.stringify(r.runId)} of key "${keyName}" has made ${r.calls} calls, its limit (runMaxCalls). ${stop}`, {
+          type: "insufficient_quota",
+          cap: r.cap,
+        }),
+        outcome: { error: "run_limit_reached", rule: r.cap },
+        headers: {},
+      };
+    case "runMaxUsd": {
+      const left = Math.max(0, roundUsd(r.limit - r.spentUsd - r.reservedUsd));
+      return {
+        body: apiError(
+          "run_limit_reached",
+          `agent-gate: this call could cost up to $${formatUsd(r.requestedUsd)}, and run ${JSON.stringify(r.runId)} of key "${keyName}" has $${formatUsd(left)} left of its ` +
+            `budget of $${formatUsd(r.limit)} ($${formatUsd(r.spentUsd)} spent, $${formatUsd(r.reservedUsd)} held by its calls in flight). ${stop}`,
+          { type: "insufficient_quota", cap: r.cap },
+        ),
+        outcome: { error: "run_limit_reached", rule: r.cap },
+        headers: {},
+      };
+    }
+    default: {
+      const left = Math.max(0, roundUsd(r.capUsd - r.spentUsd - r.reservedUsd));
+      return {
+        body: apiError(
+          "budget_exceeded",
+          `agent-gate: this call could cost up to $${formatUsd(r.requestedUsd)}, and key "${keyName}" has $${formatUsd(left)} left ` +
+            `of its ${r.cap} budget of $${formatUsd(r.capUsd)} ($${formatUsd(r.spentUsd)} spent, ` +
+            `$${formatUsd(r.reservedUsd)} held by calls in flight). Try again later, or with a lower max_tokens.`,
+          { type: "insufficient_quota", cap: r.cap },
+        ),
+        outcome: { error: "budget_exceeded", rule: r.cap },
+        headers: { "retry-after": r.retryAfterSeconds },
+      };
+    }
+  }
 }
 
 /** The ledger in the config's stateDir. A reservation outlives the longest possible call by a minute. */

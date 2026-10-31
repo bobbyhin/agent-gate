@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { main } from "../../src/gateway/cli.js";
+import { Ledger } from "../../src/llm/budget.js";
 
 async function run(...argv: string[]): Promise<{ code: number; out: string; err: string }> {
   let out = "";
@@ -38,7 +39,7 @@ describe("agent-gate llm serve and usage", () => {
   });
   after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
-  for (const argv of [["llm"], ["llm", "frobnicate"], ["llm", "serve", "now"], ["usage", "extra"], ["usage", "--by"], ["llm", "serve", "--by", "task"]]) {
+  for (const argv of [["llm"], ["llm", "frobnicate"], ["llm", "serve", "now"], ["usage", "extra"], ["usage", "--by"], ["llm", "serve", "--by", "task"], ["usage", "--by", "task", "--verify"], ["llm", "serve", "--verify"]]) {
     it(`exits 2 for: ${argv.join(" ")}`, async () => {
       const r = await run(...argv, "--config", "/nonexistent/llm-gateway.config.json");
       assert.equal(r.code, 2);
@@ -93,6 +94,40 @@ describe("agent-gate llm serve and usage", () => {
     const bad = await run("usage", "--by", "colour", "--config", configFile);
     assert.deepEqual([bad.code, bad.err], [2, "agent-gate: --by takes one of task, key, route, upstream, model, session, runId\n"]);
     fs.rmSync(path.join(tmp, "state", "usage.jsonl"));
+  });
+
+  it("usage --verify compares the usage log's dollars with the ledger, per key, today and this month", async () => {
+    const stateDir = path.join(tmp, "state");
+    fs.mkdirSync(stateDir, { recursive: true });
+    const ledger = new Ledger(stateDir, 60_000);
+    const key = { name: "search-agent", sha256: "a".repeat(64), dailyUsd: 2, monthlyUsd: 40 };
+    const now = new Date().toISOString();
+    const lines: string[] = [];
+    for (const usd of [0.25, 0.125]) {
+      const r = ledger.reserve(key, 0.5);
+      assert.ok(r.ok);
+      ledger.settle(key.name, r.id, usd);
+      lines.push(JSON.stringify({ ts: now, key: key.name, status: 200, costUsd: usd }));
+    }
+    // a line from last year and a refused call: neither counts toward today
+    lines.push(JSON.stringify({ ts: "2025-01-01T00:00:00.000Z", key: key.name, status: 200, costUsd: 9 }), JSON.stringify({ ts: now, key: key.name, status: 429, costUsd: 0 }));
+    fs.writeFileSync(path.join(stateDir, "usage.jsonl"), `${lines.join("\n")}\n`);
+    const good = await run("usage", "--verify", "--json", "--config", configFile);
+    assert.equal(good.code, 0, good.err);
+    const rows = JSON.parse(good.out) as Array<Record<string, unknown>>;
+    assert.deepEqual(rows.map((r) => [r.key, r.ledgerDayUsd, r.logDayUsd, r.ledgerMonthUsd, r.logMonthUsd, r.ok]), [
+      ["search-agent", 0.375, 0.375, 0.375, 0.375, true],
+      ["ops", 0, 0, 0, 0, true],
+    ]);
+
+    // A lost usage line: the ledger booked $0.125 that the log does not have.
+    fs.writeFileSync(path.join(stateDir, "usage.jsonl"), `${lines.slice(0, 1).join("\n")}\n`);
+    const lost = await run("usage", "--verify", "--config", configFile);
+    assert.equal(lost.code, 1);
+    assert.match(lost.out, /^key {11}day {9}ledger {2}usage log {2}month {4}ledger {2}usage log {2}result\n/);
+    assert.match(lost.out, /\nsearch-agent {2}\d{4}-\d{2}-\d{2} {2}\$0\.375 {2}\$0\.25 {6}\d{4}-\d{2} {2}\$0\.375 {2}\$0\.25 {6}DIFFERENT\n/);
+    assert.match(lost.err, /the usage log and the ledger differ for "search-agent"/);
+    fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
   it("usage shows every configured key, at zero before any call", async () => {

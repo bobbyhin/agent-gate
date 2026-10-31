@@ -1,11 +1,16 @@
-// Reading the usage log back: what "agent-gate usage --by <field>" prints.
+// Reading the usage log back: what "agent-gate usage --by <field>" and "usage --verify" print.
 //
 // The usage log has one line per authenticated call (usage-log.ts). Grouping it by the x-agent-task
 // header answers "which kind of work spends the money, and which one trips the leak guard"; by key,
 // route, upstream, model, session or run, the same question for those.
+//
+// --verify adds up the log's dollars for today and this month, per key, and compares them with the
+// ledger, which is what the caps are enforced from. The two are written separately (the ledger when a
+// call is settled, the log line just after), so they should agree to the billionth of a dollar; a
+// difference means a line was lost, a cost was booked twice, or a file was edited.
 
 import * as fs from "node:fs";
-import { roundUsd } from "./budget.js";
+import { roundUsd, type KeyUsage } from "./budget.js";
 
 export const GROUP_FIELDS = ["task", "key", "route", "upstream", "model", "session", "runId"] as const;
 export type GroupField = (typeof GROUP_FIELDS)[number];
@@ -68,4 +73,40 @@ export function groupUsage(lines: ReadonlyArray<Record<string, unknown>>, by: Gr
     if (Array.isArray(line.redacted) && line.redacted.length > 0) g.leakRedacted++;
   }
   return [...groups.values()].sort((a, b) => b.costUsd - a.costUsd || a.group.localeCompare(b.group));
+}
+
+export interface VerifyRow {
+  key: string;
+  day: string;
+  ledgerDayUsd: number;
+  logDayUsd: number;
+  month: string;
+  ledgerMonthUsd: number;
+  logMonthUsd: number;
+  /** Both pairs agree. */
+  ok: boolean;
+}
+
+/** Each configured key's spend today and this month: in the ledger (`ledger`), and summed from the usage log. */
+export function verifyUsage(lines: ReadonlyArray<Record<string, unknown>>, ledger: readonly KeyUsage[]): VerifyRow[] {
+  return ledger.map((row) => {
+    let logDayUsd = 0;
+    let logMonthUsd = 0;
+    for (const line of lines) {
+      if (line.key !== row.key || typeof line.ts !== "string" || typeof line.costUsd !== "number") continue;
+      if (line.ts.startsWith(row.month)) logMonthUsd = roundUsd(logMonthUsd + line.costUsd);
+      if (line.ts.startsWith(row.day)) logDayUsd = roundUsd(logDayUsd + line.costUsd);
+    }
+    const same = (a: number, b: number) => Math.abs(a - b) < 1e-9;
+    return {
+      key: row.key,
+      day: row.day,
+      ledgerDayUsd: row.dayUsd,
+      logDayUsd,
+      month: row.month,
+      ledgerMonthUsd: row.monthUsd,
+      logMonthUsd,
+      ok: same(row.dayUsd, logDayUsd) && same(row.monthUsd, logMonthUsd),
+    };
+  });
 }
