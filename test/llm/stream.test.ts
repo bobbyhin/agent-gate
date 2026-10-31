@@ -6,6 +6,8 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as http from "node:http";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { costUsd } from "../../src/llm/budget.js";
@@ -356,5 +358,223 @@ describe("SseParser and StreamAssembler", () => {
         { index: 1, message: { role: "assistant", content: "Bb" }, finish_reason: "stop" },
       ],
     });
+  });
+});
+
+// A held stream sends only what was scanned. The upstream here sends exactly the shapes under test:
+// pieces the gateway cannot put together (no index), content as text parts, text in reasoning or in
+// a field nobody defined, and the gateway's own upstream key split across two chunks.
+describe("a held stream is passed on only as it was scanned", () => {
+  const UPSTREAM_KEY = "fake-provider-key-shapes-0001";
+  const [keyStart, keyEnd] = half(UPSTREAM_KEY);
+  const base = { id: "c1", object: "chat.completion.chunk", created: 1, model: "m" };
+  const CASES: Record<string, Array<Record<string, unknown>>> = {
+    toolNoIndex: [{ index: 0, delta: { role: "assistant", tool_calls: [{ id: "t1", type: "function", function: { name: "save", arguments: `{"t":"${SECRET}"}` } }] } }],
+    choiceNoIndex: [{ delta: { role: "assistant", content: `token ${SECRET}` } }],
+    contentParts: [{ index: 0, delta: { role: "assistant", content: [{ type: "text", text: `token ${SECRET}` }] } }],
+    contentPartsClean: [{ index: 0, delta: { role: "assistant", content: [{ type: "text", text: "plain " }, { type: "text", text: "words" }] } }],
+    reasoning: [{ index: 0, delta: { role: "assistant", reasoning_content: `thinking about ${SECRET}`, content: "ok" } }],
+    unknownField: [{ index: 0, delta: { role: "assistant", content: "ok", audio: { transcript: `say ${SECRET}` } } }],
+    unknownFieldKeyLine: [{ index: 0, delta: { role: "assistant", content: "ok", notes: `api_key = "${FAKE.apiKeyValue}"` } }],
+    upstreamKeySplit: [
+      { index: 0, delta: { role: "assistant", content: `my key is ${keyStart}` } },
+      { index: 0, delta: { content: `${keyEnd}, keep it` } },
+    ],
+  };
+  const NON_STREAM: Record<string, Record<string, unknown>> = {
+    toolNoIndex: { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function", function: { name: "save", arguments: `{"t":"${SECRET}"}` } }] },
+    contentParts: { role: "assistant", content: [{ type: "text", text: `token ${SECRET}` }] },
+    reasoning: { role: "assistant", reasoning_content: `thinking about ${SECRET}`, content: "ok" },
+  };
+  let upstream: http.Server;
+  let gateway: LlmGateway;
+  let tmp: string;
+
+  before(async () => {
+    upstream = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (c: Buffer) => (raw += c.toString("utf8")));
+      req.on("end", () => {
+        const body = JSON.parse(raw) as { stream?: boolean; messages: Array<{ content: string }> };
+        const name = body.messages[0]!.content;
+        const usage = { prompt_tokens: 5, completion_tokens: 5, total_tokens: 10 };
+        if (!body.stream) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ id: "x", object: "chat.completion", created: 1, model: "m", choices: [{ index: 0, message: NON_STREAM[name], finish_reason: "stop" }], usage }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        for (const choice of CASES[name]!) res.write(`data: ${JSON.stringify({ ...base, choices: [choice] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ ...base, choices: [], usage })}\n\n`);
+        res.end("data: [DONE]\n\n");
+      });
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-shapes-"));
+    const config = parseLlmConfig(
+      {
+        listen: { port: 0 },
+        stateDir: "state",
+        policy: path.join(ROOT, "llm-policy.example.json"),
+        upstreams: [{ name: "u", baseUrl: `http://127.0.0.1:${(upstream.address() as net.AddressInfo).port}/v1`, apiKeyEnv: "SHAPES_KEY", models: { small: "m" }, pricePerMTok: PRICE }],
+        routes: [{ id: "r", use: { upstream: "u" } }],
+        keys: [{ name: "shapes", sha256: hashKey(KEY), dailyUsd: 5, monthlyUsd: 50 }],
+      },
+      tmp,
+    );
+    gateway = await startLlmGateway(config, loadLeakPolicy(path.join(ROOT, "llm-policy.example.json")), { env: { SHAPES_KEY: UPSTREAM_KEY }, log: () => undefined });
+  });
+  after(async () => {
+    await gateway?.close();
+    upstream?.closeAllConnections();
+    await new Promise<void>((resolve) => upstream?.close(() => resolve()));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const ask = async (name: string, stream = true) => {
+    const res = await fetch(`${gateway.url}/v1/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({ model: "small", messages: [{ role: "user", content: name }], max_tokens: 20, stream }),
+    });
+    return { status: res.status, headers: res.headers, text: await res.text() };
+  };
+
+  it("refuses pieces it cannot put together (a tool call or a choice without an index): 502, nothing passed on", async () => {
+    for (const name of ["toolNoIndex", "choiceNoIndex"]) {
+      const r = await ask(name);
+      assert.equal(r.status, 502, name);
+      assert.equal(JSON.parse(r.text).error.code, "bad_upstream_response", name);
+      assert.equal(r.text.includes(SECRET), false, name);
+    }
+  });
+
+  it("reads content sent as text parts, reasoning text and fields nobody defined, as it reads content", async () => {
+    for (const name of ["contentParts", "reasoning", "unknownField"]) {
+      const r = await ask(name);
+      assert.deepEqual([r.status, JSON.parse(r.text).error.code, JSON.parse(r.text).error.rule], [502, "response_blocked", "github-token"], name);
+      assert.equal(r.text.includes(SECRET), false, name);
+    }
+    const clean = await ask("contentPartsClean");
+    assert.equal(clean.status, 200);
+    assert.ok(clean.text.includes('"text":"plain "') && clean.text.includes("[DONE]"), "a clean answer in text parts is passed on as it came");
+  });
+
+  it("redacts in a field nobody defined, in its own event, and names the rule", async () => {
+    const r = await ask("unknownFieldKeyLine");
+    assert.equal(r.status, 200);
+    assert.equal(r.text.includes(FAKE.apiKeyValue), false);
+    assert.ok(r.text.includes("[REDACTED:api-key-assignment]"));
+    assert.equal(r.headers.get("x-agent-gate-response-redacted"), "api-key-assignment");
+  });
+
+  it("an upstream key split across two chunks is cut out of the answer, which is then sent whole", async () => {
+    const r = await ask("upstreamKeySplit");
+    assert.equal(r.status, 200);
+    assert.equal(r.text.includes(UPSTREAM_KEY), false);
+    assert.ok(r.text.includes("[REDACTED:upstream-key]"));
+  });
+
+  it("a non-streamed answer is read the same way: tool calls, text parts and reasoning", async () => {
+    for (const name of Object.keys(NON_STREAM)) {
+      const r = await ask(name, false);
+      assert.deepEqual([r.status, JSON.parse(r.text).error.code], [502, "response_blocked"], name);
+      assert.equal(r.text.includes(SECRET), false, name);
+    }
+  });
+});
+
+describe("a relayed stream whose client stops reading", () => {
+  it("is cut off at the attempt's timeout and settled then: no late orphan, no spend past the cap", async () => {
+    const fake = await startFakeUpstream({ mode: "ok", usage: USAGE, stream: { pieces: Array.from({ length: 2500 }, () => "x".repeat(8000)) } });
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-stall-"));
+    const config = parseLlmConfig(
+      {
+        listen: { port: 0 },
+        stateDir: "state",
+        policy: path.join(ROOT, "llm-policy.example.json"),
+        upstreams: [{ name: "u", baseUrl: `${fake.url}/v1`, apiKeyEnv: "STALL_KEY", models: { small: "m" }, pricePerMTok: PRICE }],
+        routes: [{ id: "r", use: { upstream: "u" } }],
+        keys: [{ name: "stall", sha256: hashKey(KEY), dailyUsd: 5, monthlyUsd: 50 }],
+        timeoutMs: 1000,
+        retries: 0,
+        rateLimitWaitMs: 0,
+        streamIdleMs: 1000,
+        scanResponses: false,
+      },
+      tmp,
+    );
+    const gateway = await startLlmGateway(config, loadLeakPolicy(path.join(ROOT, "llm-policy.example.json")), { env: { STALL_KEY: "fake-provider-key-stall-0001" }, log: () => undefined });
+    const socket = net.connect(Number(new URL(gateway.url).port), "127.0.0.1");
+    try {
+      // A client that sends a streamed request and never reads the answer.
+      socket.pause();
+      const body = JSON.stringify({ model: "small", messages: [{ role: "user", content: "a long answer" }], max_tokens: 50, stream: true });
+      socket.write(`POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer ${KEY}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+      const usageFile = path.join(config.stateDir, "usage.jsonl");
+      const line = () => (fs.existsSync(usageFile) ? (readUsageLog(usageFile).lines as Array<Record<string, any>>)[0] : undefined);
+      const started = Date.now();
+      for (let waited = 0; waited < 5000 && !line(); waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
+      const settled = line();
+      assert.ok(settled, "the call was settled and recorded while its client still was not reading");
+      assert.ok(Date.now() - started < 4000, "within the attempt's time, not when the client comes back");
+      assert.deepEqual([settled.status, settled.streamEnd, settled.error, settled.settle], [200, "timeout", "upstream_timeout", undefined]);
+      assert.equal(openLedger(config).usage(config.keys)[0]?.inFlight, 0, "no reservation left behind");
+    } finally {
+      socket.destroy();
+      await gateway.close();
+      await fake.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("a streamed request answered with a whole JSON answer that never ends", () => {
+  it("runs out of time like a stream does: 504, booked at its estimate, nothing left reserved", async () => {
+    // An upstream that ignores "stream", answers 200 with JSON, and stops halfway through the body.
+    const upstream = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.write('{"id":"x","choices":[');
+      });
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-json-stall-"));
+    const config = parseLlmConfig(
+      {
+        listen: { port: 0 },
+        stateDir: "state",
+        policy: path.join(ROOT, "llm-policy.example.json"),
+        upstreams: [{ name: "u", baseUrl: `http://127.0.0.1:${(upstream.address() as net.AddressInfo).port}/v1`, apiKeyEnv: "JSON_KEY", models: { small: "m" }, pricePerMTok: PRICE }],
+        routes: [{ id: "r", use: { upstream: "u" } }],
+        keys: [{ name: "json", sha256: hashKey(KEY), dailyUsd: 5, monthlyUsd: 50 }],
+        timeoutMs: 500,
+        retries: 0,
+        rateLimitWaitMs: 0,
+      },
+      tmp,
+    );
+    const gateway = await startLlmGateway(config, loadLeakPolicy(path.join(ROOT, "llm-policy.example.json")), { env: { JSON_KEY: "fake-provider-key-json-0001" }, log: () => undefined });
+    try {
+      const res = await fetch(`${gateway.url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${KEY}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "small", messages: [{ role: "user", content: "hello" }], max_tokens: 20, stream: true }),
+      });
+      const body = (await res.json()) as { error: { code: string; message: string } };
+      assert.deepEqual([res.status, body.error.code], [504, "upstream_timeout"]);
+      assert.match(body.error.message, /booked at its estimate/);
+      const line = (readUsageLog(path.join(config.stateDir, "usage.jsonl")).lines as Array<Record<string, any>>)[0]!;
+      assert.deepEqual([line.status, line.error, line.streamEnd, line.usage], [504, "upstream_timeout", "timeout", "estimate"]);
+      assert.ok(line.costUsd > 0, "the 2xx answer was paid for");
+      assert.equal(openLedger(config).usage(config.keys)[0]?.inFlight, 0);
+    } finally {
+      await gateway.close();
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

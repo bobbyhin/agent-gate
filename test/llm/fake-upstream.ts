@@ -25,7 +25,7 @@ export interface FakeUpstreamOptions {
   mode: "ok" | "fail" | "limited";
   /** Mode "limited": the Retry-After header, in seconds (default "1"). */
   retryAfter?: string;
-  /** Mode "ok": answer with this text instead of "fake answer <n> from <model>". */
+  /** Mode "ok": answer with this text instead of "fake answer <n> from <model>" (streamed as one piece, unless stream.pieces says otherwise). */
   content?: string;
   /** Mode "ok": also answer with one tool call whose arguments are this string. */
   toolCallArguments?: string;
@@ -142,7 +142,7 @@ export async function startFakeUpstream(options: FakeUpstreamOptions): Promise<F
   function streamAnswer(res: http.ServerResponse, received: ReceivedRequest, body: Record<string, unknown>, key: string, n: number, model: string, usage: Record<string, number>): void {
     const s = options.stream ?? {};
     const base = { id: `chatcmpl-fake-${n}`, object: "chat.completion.chunk", created: 1760400000, model };
-    const pieces = s.pieces ?? [`fake answer ${n}`, ` from ${model}`];
+    const pieces = s.pieces ?? (options.content !== undefined ? [options.content] : [`fake answer ${n}`, ` from ${model}`]);
     const frame = (data: unknown): string => `data: ${JSON.stringify(data)}\n\n`;
     const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     let finished = false;

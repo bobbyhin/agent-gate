@@ -58,6 +58,8 @@ export type UpstreamOutcome =
       body: string;
       /** A streamed request's 2xx answer, its body not read yet; the attempt's timeout and `signal` still apply to it. */
       response?: Response;
+      /** With `response`: the signal that ends the attempt (its timeout, or `signal`), for whatever the caller does while it lasts. */
+      attemptSignal?: AbortSignal;
       attempts: number;
       /** True when the fallback answered. */
       fallback: boolean;
@@ -89,7 +91,8 @@ export async function callUpstreams(
   options: UpstreamOptions,
 ): Promise<UpstreamOutcome> {
   const doFetch = options.fetch ?? fetch;
-  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  // The default wait ends early when `signal` fires: a client that left does not hold the call for a backoff.
+  const sleep = options.sleep ?? ((ms: number) => abortableSleep(ms, options.signal));
   const random = options.random ?? Math.random;
   const maxWait = options.rateLimitWaitMs ?? 0;
   let attempts = 0;
@@ -111,6 +114,7 @@ export async function callUpstreams(
       attempts++;
       try {
         const timeout = AbortSignal.timeout(options.timeoutMs);
+        const attemptSignal = options.signal ? anySignal([timeout, options.signal]) : timeout;
         const response = await doFetch(`${target.upstream.baseUrl}/chat/completions`, {
           method: "POST",
           headers: {
@@ -123,10 +127,10 @@ export async function callUpstreams(
           // An API does not redirect; following one could send the key somewhere else.
           redirect: "error",
           // Covers reading the body too, a stream's included.
-          signal: options.signal ? anySignal([timeout, options.signal]) : timeout,
+          signal: attemptSignal,
         });
         if (options.stream && response.status >= 200 && response.status < 300) {
-          return { ok: true, target, status: response.status, body: "", response, attempts, fallback: index > 0, rateLimited };
+          return { ok: true, target, status: response.status, body: "", response, attemptSignal, attempts, fallback: index > 0, rateLimited };
         }
         const text = await response.text();
         if (response.status === 429) {
@@ -159,6 +163,20 @@ export async function callUpstreams(
     }
   }
   return { ok: false, ...last, attempts, rateLimited };
+}
+
+/** Waits `ms`, or less when `signal` fires first. */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 }
 
 /** A signal that aborts when any of `signals` does, with that one's reason. (AbortSignal.any needs Node 20.3.) */

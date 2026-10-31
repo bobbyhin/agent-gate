@@ -421,10 +421,28 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         const response = outcome.response;
         if ((response.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream") && response.body) {
           open = false; // relayStream() settles the reservation itself
-          return await relayStream(res, response.body, outcome.target, chosen.rule, key.name, reservation, { input: inputTokens, output: outputTokens }, via, clientWantsUsage, where, record, finish, stop, () => stopped);
+          return await relayStream(res, response.body, outcome.attemptSignal, outcome.target, chosen.rule, key.name, reservation, { input: inputTokens, output: outputTokens }, via, clientWantsUsage, where, record, finish, stop, () => stopped);
         }
         // An upstream that answered a streamed request with a whole JSON answer: handled like one.
-        outcome.body = await response.text();
+        try {
+          outcome.body = await response.text();
+        } catch (err) {
+          // The client left, or the attempt ran out of time, while the answer was read. A 2xx was paid
+          // for: booked at the estimate, as a stream that broke off is; anything else costs nothing.
+          const why: StreamEnd = stopped ?? ((err as { name?: unknown } | null)?.name === "TimeoutError" ? "timeout" : "upstream_error");
+          if (outcome.status < 200 || outcome.status >= 300) {
+            release();
+            if (why === "client_closed") return record(499, { error: "client_closed", ...via, streamEnd: why });
+            const failedRead = streamFailure(why, false, false);
+            return finish(failedRead.status, failedRead.body, { error: failedRead.code, ...via, streamEnd: why });
+          }
+          open = false;
+          const settledLate = settleOrLog(key.name, reservation, reservation.usd);
+          const spentLate: Outcome = { inputTokens, outputTokens, costUsd: reservation.usd, usage: "estimate", ...via, ...(settledLate === "booked" ? {} : { settle: settledLate }), streamEnd: why };
+          if (why === "client_closed") return record(499, { ...spentLate, error: "client_closed" });
+          const failedLate = streamFailure(why, false);
+          return finish(failedLate.status, failedLate.body, { ...spentLate, error: failedLate.code });
+        }
       }
       if (outcome.status >= 400) {
         release();
@@ -452,14 +470,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
       const used = readUsage(json);
       const cost = used ? costUsd(outcome.target.upstream.pricePerMTok, used.input, used.output) : reservation.usd;
       open = false;
-      let settled: SettleOutcome = "booked";
-      try {
-        settled = ledger.settle(key.name, reservation.id, cost);
-      } catch (err) {
-        log(`could not settle ${reservation.id} for key "${key.name}" ($${formatUsd(cost)}): ${errorText(err)}; its reservation stays until it expires`);
-      }
-      // "orphan": the call outlived its reservation, so the cost was booked without one.
-      if (settled !== "booked") log(`settled ${reservation.id} for key "${key.name}" ($${formatUsd(cost)}) as ${settled}`);
+      const settled = settleOrLog(key.name, reservation, cost);
       const spent: Outcome = {
         inputTokens: used?.input ?? inputTokens,
         outputTokens: used?.output ?? outputTokens,
@@ -476,7 +487,8 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
       let answer = outcome.body;
       let responseRedacted: string[] | undefined;
       if (config.scanResponses) {
-        const scanned = guardResponse(policy, json as Record<string, unknown>);
+        // A diverted call's answer is read with the rules its prompt was read with.
+        const scanned = guardResponse(where.diverted ? guardPolicy : policy, json as Record<string, unknown>);
         if (scanned.action === "block") {
           return finish(
             502,
@@ -513,6 +525,22 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
   }
 
   /**
+   * Books a finished call's cost, once. A settle that cannot be written is reported, and its reservation
+   * stays until it expires; "orphan" (the call outlived its reservation, so the cost was booked without
+   * one) is reported too.
+   */
+  function settleOrLog(keyName: string, reservation: { id: string }, cost: number): SettleOutcome {
+    let settled: SettleOutcome = "booked";
+    try {
+      settled = ledger.settle(keyName, reservation.id, cost);
+    } catch (err) {
+      log(`could not settle ${reservation.id} for key "${keyName}" ($${formatUsd(cost)}): ${errorText(err)}; its reservation stays until it expires`);
+    }
+    if (settled !== "booked") log(`settled ${reservation.id} for key "${keyName}" ($${formatUsd(cost)}) as ${settled}`);
+    return settled;
+  }
+
+  /**
    * A streamed answer, from step 7 on. With scanResponses (the default) the whole stream is read
    * first and scanned like a non-streamed answer; only then is it sent, so the client gets every event
    * at once, at the end. Without it, events are passed on as they arrive and the answer is not
@@ -523,6 +551,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
   async function relayStream(
     res: http.ServerResponse,
     body: ReadableStream<Uint8Array>,
+    attemptSignal: AbortSignal | undefined,
     target: ResolvedTarget,
     routeId: string,
     keyName: string,
@@ -540,7 +569,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     const parser = new SseParser();
     const assembler = new StreamAssembler();
     const decoder = new TextDecoder();
-    const kept: string[] = []; // the events to send, when buffering; each without its blank line
+    const kept: Array<{ text: string; chunk: Record<string, unknown> }> = []; // when buffering: each event (without its blank line) and its chunk
     let usageChunk: Record<string, unknown> | undefined;
     const headers: ExtraHeaders = {
       "content-type": "text/event-stream; charset=utf-8",
@@ -584,8 +613,9 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
             if (!clientWantsUsage) continue;
           }
           const text = scrub(event.raw, apiKeys);
-          if (relay) await write(res, `${text}\n\n`);
-          else kept.push(text);
+          // A client that does not read holds this loop only until the attempt's time is up.
+          if (relay) await write(res, `${text}\n\n`, attemptSignal);
+          else kept.push({ text, chunk });
         }
       }
       // The body ended without [DONE]: whole if every choice has finished, else cut short.
@@ -601,13 +631,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
 
     const used = readUsage({ usage: assembler.usage });
     const cost = used ? costUsd(target.upstream.pricePerMTok, used.input, used.output) : reservation.usd;
-    let settled: SettleOutcome = "booked";
-    try {
-      settled = ledger.settle(keyName, reservation.id, cost);
-    } catch (err) {
-      log(`could not settle ${reservation.id} for key "${keyName}" ($${formatUsd(cost)}): ${errorText(err)}; its reservation stays until it expires`);
-    }
-    if (settled !== "booked") log(`settled ${reservation.id} for key "${keyName}" ($${formatUsd(cost)}) as ${settled}`);
+    const settled = settleOrLog(keyName, reservation, cost);
     const spent: Outcome = {
       inputTokens: used?.input ?? estimate.input,
       outputTokens: used?.output ?? estimate.output,
@@ -620,36 +644,65 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     const failed = end === "done" || end === "client_closed" ? undefined : streamFailure(end, used !== undefined);
 
     if (relay) {
-      // The client already has a 200 and the events so far: the end of the stream says how it ended.
-      if (end === "done") await write(res, "data: [DONE]\n\n");
-      else if (failed) await write(res, `data: ${JSON.stringify(failed.body)}\n\n`);
+      // The call is settled and recorded first: a client that stops reading cannot hold that up.
       record(200, { ...spent, ...(failed ? { error: failed.code } : end === "client_closed" ? { error: "client_closed" } : {}) });
-      if (!res.destroyed) res.end();
-      return;
+      // The client already has a 200 and the events so far: the end of the stream says how it ended.
+      if (end === "done") res.write("data: [DONE]\n\n");
+      else if (failed) res.write(`data: ${JSON.stringify(failed.body)}\n\n`);
+      return endWithin(res, config.streamIdleMs);
     }
     // Buffered: nothing has been sent yet.
     if (end === "client_closed") return record(499, { ...spent, error: "client_closed" });
     if (failed) return finish(failed.status, failed.body, { ...spent, error: failed.code });
-    const scanned = guardResponse(policy, assembler.answer());
-    if (scanned.action === "block") {
+    // A shape the gateway cannot read is not guessed at: what it would pass on could not be scanned.
+    if (assembler.unreadable) {
+      return finish(
+        502,
+        apiError("bad_upstream_response", `agent-gate: the upstream's stream had ${assembler.unreadable}, which the gateway cannot read and scan, so it was not passed on. The call was paid for.`, {
+          type: "api_error",
+        }),
+        { ...spent, error: "bad_upstream_response" },
+      );
+    }
+    // The answer put back together (a match can span chunks) and every chunk on its own (every field of
+    // it, the ones the answer does not put together included). A diverted call's answer is read with the
+    // rules its prompt was read with.
+    const rules = where.diverted ? guardPolicy : policy;
+    const whole = guardResponse(rules, assembler.answer());
+    let blockedBy = whole.action === "block" ? whole.rule : undefined;
+    const events: string[] = [];
+    const redactedBy = new Set(whole.action === "pass" ? whole.redactions.map((r) => r.rule) : []);
+    for (const { text, chunk } of blockedBy ? [] : kept) {
+      const one = guardResponse(rules, chunk);
+      if (one.action === "block") {
+        blockedBy = one.rule;
+        break;
+      }
+      for (const r of one.redactions) redactedBy.add(r.rule);
+      events.push(one.body === chunk ? text : scrub(`data: ${JSON.stringify(one.body)}`, apiKeys));
+    }
+    if (blockedBy) {
       return finish(
         502,
         apiError(
           "response_blocked",
-          `agent-gate: the model's answer contains text that looks like a secret (rule ${scanned.rule}), so it was not passed on. The call was paid for; if the secret is real, rotate it.`,
-          { type: "api_error", rule: scanned.rule },
+          `agent-gate: the model's answer contains text that looks like a secret (rule ${blockedBy}), so it was not passed on. The call was paid for; if the secret is real, rotate it.`,
+          { type: "api_error", rule: blockedBy },
         ),
-        { ...spent, error: "response_blocked", rule: scanned.rule, side: "response" },
+        { ...spent, error: "response_blocked", rule: blockedBy, side: "response" },
       );
     }
-    let events = [...kept, "data: [DONE]"];
-    let responseRedacted: string[] | undefined;
-    if (scanned.redactions.length > 0) {
-      // The pieces cannot be replayed: a match can span several of them. Each choice is sent whole.
-      responseRedacted = scanned.redactions.map((r) => r.rule);
+    events.push("data: [DONE]");
+    // A redaction in the answer put together, or an upstream key split across chunks (each event is
+    // scrubbed on its own): the pieces cannot be replayed, so each choice is sent whole, from what was scanned.
+    const answer = whole.action === "pass" ? whole : undefined;
+    const keySplit = [...apiKeys.values()].some((k) => JSON.stringify(assembler.answer()).includes(k));
+    let sent = events;
+    if (answer && (answer.redactions.length > 0 || keySplit)) {
       const usage = clientWantsUsage ? (usageChunk ?? (assembler.usage ? { ...assembler.meta, object: "chat.completion.chunk", choices: [], usage: assembler.usage } : undefined)) : undefined;
-      events = rebuildEvents(assembler.meta, scanned.body.choices as Array<{ index: number; message: unknown; finish_reason: unknown }>, usage).map((e) => scrub(e, apiKeys));
+      sent = rebuildEvents(assembler.meta, answer.body.choices as Array<{ index: number; message: unknown; finish_reason: unknown }>, usage).map((e) => scrub(e, apiKeys));
     }
+    const responseRedacted = redactedBy.size > 0 ? [...redactedBy] : undefined;
     record(200, { ...spent, ...(responseRedacted ? { responseRedacted } : {}) });
     if (res.destroyed) return;
     res.writeHead(200, {
@@ -657,11 +710,12 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
       "x-agent-gate-cost-usd": formatUsd(cost),
       ...(responseRedacted ? { "x-agent-gate-response-redacted": responseRedacted.join(",") } : {}),
     });
-    res.end(events.map((e) => `${e}\n\n`).join(""));
+    res.write(sent.map((e) => `${e}\n\n`).join(""));
+    endWithin(res, config.streamIdleMs);
   }
 
   /** How a stream that broke off is reported: the gateway's own words, never the provider's. */
-  function streamFailure(end: StreamEnd, usageKnown: boolean): { status: number; code: string; body: unknown } {
+  function streamFailure(end: StreamEnd, usageKnown: boolean, booked = true): { status: number; code: string; body: unknown } {
     const timedOut = end === "timeout" || end === "idle_timeout";
     const what =
       end === "idle_timeout"
@@ -669,7 +723,11 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         : end === "timeout"
           ? `the upstream's stream took longer than ${config.timeoutMs} ms, so it was stopped`
           : "the upstream's stream broke off before it finished";
-    const charged = usageKnown ? "It was booked from the usage the upstream reported." : "It was booked at its estimate, because the provider bills what it generated.";
+    const charged = !booked
+      ? "Nothing was charged to this key."
+      : usageKnown
+        ? "It was booked from the usage the upstream reported."
+        : "It was booked at its estimate, because the provider bills what it generated.";
     const code = timedOut ? "upstream_timeout" : "upstream_error";
     return { status: timedOut ? 504 : 502, code, body: apiError(code, `agent-gate: ${what}. ${charged}`, { type: "api_error" }) };
   }
@@ -854,19 +912,35 @@ function send(res: http.ServerResponse, status: number, body: unknown, headers: 
   res.end(text);
 }
 
-/** Writes to a client, waiting while its connection is full; nothing once it is gone. */
-async function write(res: http.ServerResponse, text: string): Promise<void> {
+/**
+ * Writes to a client, waiting while its connection is full; nothing once it is gone. The wait ends when
+ * `deadline` fires too, so that a client that does not read holds a call no longer than its attempt may last.
+ */
+async function write(res: http.ServerResponse, text: string, deadline?: AbortSignal): Promise<void> {
   if (res.destroyed || res.writableEnded) return;
-  if (res.write(text)) return;
+  if (res.write(text) || deadline?.aborted) return;
   await new Promise<void>((resolve) => {
     const done = (): void => {
       res.off("drain", done);
       res.off("close", done);
+      deadline?.removeEventListener("abort", done);
       resolve();
     };
     res.once("drain", done);
     res.once("close", done);
+    deadline?.addEventListener("abort", done, { once: true });
   });
+}
+
+/** Ends a response, and cuts the connection if the client has not taken what is left within `ms`. */
+function endWithin(res: http.ServerResponse, ms: number): void {
+  if (res.destroyed) return;
+  res.end();
+  if (res.writableFinished) return;
+  const timer = setTimeout(() => res.destroy(), ms);
+  timer.unref();
+  res.once("close", () => clearTimeout(timer));
+  res.once("finish", () => clearTimeout(timer));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

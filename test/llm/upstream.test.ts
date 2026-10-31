@@ -157,10 +157,23 @@ describe("callUpstreams", () => {
     for (const steps of failures) {
       for (const r of [0, 0.25, 0.5, 0.75, 0.999999]) {
         const s = scripted(steps);
-        const outcome = await callUpstreams(targets(), { model: "large", messages: [] }, { ...s.options, ...config, random: () => r });
+        // Each failure is logged with its upstream; the wait after the n-th failure on an upstream is a
+        // backoff with ceiling min(maxBackoffMs, backoffMs x 2^(n-1)), or after a 429 the one capped wait.
+        const failures = new Map<string, number>();
+        let last: { upstream: string; is429: boolean } | undefined;
+        const log = (message: string): void => {
+          const upstream = /upstream "([^"]+)"/.exec(message)?.[1] ?? "?";
+          failures.set(upstream, (failures.get(upstream) ?? 0) + 1);
+          last = { upstream, is429: / answered 429 /.test(message) };
+        };
+        const sleep = async (ms: number): Promise<void> => {
+          s.sleeps.push(ms);
+          assert.ok(last, "a wait comes after a failure");
+          const ceiling = last.is429 ? config.rateLimitWaitMs : backoffCeiling(config.backoffMs, config.maxBackoffMs, failures.get(last.upstream) as number);
+          assert.ok(ms <= ceiling, `a wait of ${ms} ms after failure ${failures.get(last.upstream)} on ${last.upstream} is above its ceiling of ${ceiling} ms (random ${r})`);
+        };
+        const outcome = await callUpstreams(targets(), { model: "large", messages: [] }, { ...s.options, ...config, random: () => r, log, sleep });
         assert.equal(outcome.ok, false);
-        const ceilings = s.sleeps.every((ms) => ms <= Math.max(config.maxBackoffMs, config.rateLimitWaitMs));
-        assert.ok(ceilings, `a wait above its ceiling: ${s.sleeps.join(", ")}`);
         // Every attempt timing out is the worst case for the attempts themselves.
         const worst = s.calls.length * config.timeoutMs + s.sleeps.reduce((a, b) => a + b, 0);
         assert.ok(worst <= longestCallMs(config), `${worst} ms > ${longestCallMs(config)} ms with random ${r}`);
@@ -168,6 +181,21 @@ describe("callUpstreams", () => {
     }
     // With the defaults the bound is what Cloud Run's request timeout is set against (test/llm/deploy.test.ts).
     assert.equal(longestCallMs({ timeoutMs: 60_000, retries: 1, backoffMs: 250, maxBackoffMs: 10_000, rateLimitWaitMs: 2000 }), 242_500);
+  });
+
+  it("a client that leaves during a wait ends the wait at once: the call does not sleep out its backoff", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      return new Response("{}", { status: 500 });
+    }) as typeof fetch;
+    setTimeout(() => controller.abort(), 50);
+    const started = Date.now();
+    // No sleep is passed in: the gateway's own wait, here up to 5 s, is the one under test.
+    const outcome = await callUpstreams(targets().slice(0, 1), { model: "large", messages: [] }, { timeoutMs: 1000, retries: 1, backoffMs: 5000, random: () => 0.99, apiKey: () => "k", fetch: fetchImpl, signal: controller.signal });
+    assert.deepEqual([outcome.ok, !outcome.ok && outcome.failure, calls], [false, "cancelled", 1]);
+    assert.ok(Date.now() - started < 2000, `the wait was cut short (${Date.now() - started} ms)`);
   });
 
   it("with no fallback and retries 0, makes exactly one attempt", async () => {

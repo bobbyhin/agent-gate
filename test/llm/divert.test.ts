@@ -116,6 +116,35 @@ describe("divert: personal data goes to the local model only", () => {
     assert.deepEqual([listed.status, listed.headers.get("x-agent-gate-diverted")], [200, "aws-access-key-id"]);
   });
 
+  it("reads a diverted call's answer with the rules its prompt was read with: a listed block rule does not withhold it", async () => {
+    // A local model that repeats the key id it was asked about, and also writes a token.
+    const echo = await startFakeUpstream({ mode: "ok", content: `The key id ${FAKE.awsAccessKeyId} looks active.` });
+    const leaky = await startFakeUpstream({ mode: "ok", content: `Here is a token: ${FAKE.githubToken}` });
+    const tmp3 = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-divert-answer-"));
+    try {
+      for (const [fake, expected] of [
+        [echo, [200, null]],
+        [leaky, [502, "github-token"]],
+      ] as const) {
+        const c = parseLlmConfig(raw(`${fake.url}/v1`, { rules: ["aws-access-key-id"], to: { upstream: "local", model: "small" } }), fs.mkdtempSync(path.join(tmp3, "g-")));
+        const g = await startLlmGateway(c, policy, { env, log: () => undefined });
+        try {
+          for (const stream of [false, true]) {
+            const r = await chat(`Is this key id still active? ${FAKE.awsAccessKeyId}`, { stream }, g);
+            assert.deepEqual([r.status, r.status === 200 ? null : JSON.parse(r.text).error.rule], expected, `stream ${stream}`);
+            assert.equal(r.text.includes(FAKE.githubToken), false, "a rule that is not diverted still holds on the way back");
+          }
+        } finally {
+          await g.close();
+        }
+      }
+    } finally {
+      await echo.close();
+      await leaky.close();
+      fs.rmSync(tmp3, { recursive: true, force: true });
+    }
+  });
+
   it("streams a diverted call from the local upstream too", async () => {
     const r = await chat(`Card ${PII.card}: is it a test card?`, { stream: true });
     assert.equal(r.status, 200);

@@ -18,8 +18,8 @@ export function requestHash(body: Record<string, unknown>): string {
 }
 
 export class RepeatWindow {
-  /** Key name -> request hash -> when calls with that hash were let through (ms, oldest first). */
-  private readonly seen = new Map<string, Map<string, number[]>>();
+  /** Key name -> its window and, by request hash, when calls with that hash were let through (ms, oldest first). */
+  private readonly seen = new Map<string, { windowMs: number; byHash: Map<string, number[]> }>();
   private calls = 0;
 
   /**
@@ -34,16 +34,28 @@ export class RepeatWindow {
   }
 
   admit(key: string, hash: string, windowMs: number, now: number): void {
-    let byHash = this.seen.get(key);
-    if (!byHash) this.seen.set(key, (byHash = new Map()));
-    byHash.set(hash, [...this.recent(key, hash, windowMs, now), now]);
-    // Now and then, forget the requests of this key that have left the window.
+    let entry = this.seen.get(key);
+    if (!entry) this.seen.set(key, (entry = { windowMs, byHash: new Map() }));
+    entry.windowMs = windowMs;
+    entry.byHash.set(hash, [...this.recent(key, hash, windowMs, now), now]);
+    // Now and then, forget every request that has left its key's window, for every key: a key that
+    // went quiet does not keep its requests in memory.
     if (++this.calls % 256 === 0) {
-      for (const [h, times] of byHash) if (!times.some((t) => t > now - windowMs)) byHash.delete(h);
+      for (const [name, { windowMs: window, byHash }] of this.seen) {
+        for (const [h, times] of byHash) if (!times.some((t) => t > now - window)) byHash.delete(h);
+        if (byHash.size === 0) this.seen.delete(name);
+      }
     }
   }
 
+  /** How many request hashes are held, over every key. */
+  size(): number {
+    let n = 0;
+    for (const { byHash } of this.seen.values()) n += byHash.size;
+    return n;
+  }
+
   private recent(key: string, hash: string, windowMs: number, now: number): number[] {
-    return (this.seen.get(key)?.get(hash) ?? []).filter((t) => t > now - windowMs);
+    return (this.seen.get(key)?.byHash.get(hash) ?? []).filter((t) => t > now - windowMs);
   }
 }

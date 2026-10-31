@@ -148,8 +148,8 @@
    "upstreamCalls": 1,
    "usage": [
     {
-     "ts": "2026-10-31T11:22:12.967Z",
-     "id": "req-1ab3fe7d",
+     "ts": "2026-10-31T11:36:24.427Z",
+     "id": "req-80dec9e3",
      "key": "demo-agent",
      "task": "classify",
      "route": "classify-is-cheap",
@@ -163,8 +163,8 @@
      "attempts": 1,
      "fallback": false,
      "latencyMs": 18,
-     "traceId": "7648f0db1e4ade74ca6d1728f38066f4",
-     "spanId": "7b26ce96b7d89f60"
+     "traceId": "af2205494820e7c99a029a56536004e9",
+     "spanId": "c5d8d34baffe91ca"
     }
    ],
    "ledger": [
@@ -177,7 +177,7 @@
     }
    ],
    "log": [
-    "200 req-1ab3fe7d key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 18ms"
+    "200 req-80dec9e3 key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 18ms"
    ],
    "title": "A classification goes to the cheap model",
    "note": "The agent asks for the large model, but its x-agent-task header says classify, and the first route that applies sends that to the cheap upstream. The cost is reserved first and settled from the provider's own token count.",
@@ -212,8 +212,8 @@
    "upstreamCalls": 0,
    "usage": [
     {
-     "ts": "2026-10-31T11:22:12.969Z",
-     "id": "req-fa474b65",
+     "ts": "2026-10-31T11:36:24.429Z",
+     "id": "req-eeff5a77",
      "key": "demo-agent",
      "route": "cheap-models",
      "upstream": "cheap",
@@ -226,8 +226,8 @@
      "outputTokens": 0,
      "costUsd": 0,
      "latencyMs": 0,
-     "traceId": "c105a1fdaa714b00f212c3483e12108f",
-     "spanId": "1dc7b1acf43e52b4"
+     "traceId": "cf4e14c30893214951f29bf12f98ac34",
+     "spanId": "21dca4ea5b226860"
     }
    ],
    "ledger": [
@@ -240,7 +240,7 @@
     }
    ],
    "log": [
-    "400 req-fa474b65 key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0 error=secret_detected 0ms"
+    "400 req-eeff5a77 key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0 error=secret_detected 0ms"
    ],
    "title": "A secret in the prompt never leaves",
    "note": "The leak guard reads the messages before anything is sent. A block rule matched, so the request is refused with the rule's name, never the text it matched, and the provider gets nothing.",
@@ -269,7 +269,7 @@
    "response": {
     "status": 429,
     "headers": {
-     "retry-after": "45468",
+     "retry-after": "44616",
      "content-type": "application/json"
     },
     "body": "{\"error\":{\"message\":\"agent-gate: this call could cost up to $0.01503, and key \\\"demo-agent\\\" has $0.00999115 left of its daily budget of $0.01 ($0.00000885 spent, $0 held by calls in flight). Try again later, or with a lower max_tokens.\",\"type\":\"insufficient_quota\",\"param\":null,\"code\":\"budget_exceeded\",\"cap\":\"daily\"}}"
@@ -277,8 +277,8 @@
    "upstreamCalls": 0,
    "usage": [
     {
-     "ts": "2026-10-31T11:22:12.976Z",
-     "id": "req-8d7978e2",
+     "ts": "2026-10-31T11:36:24.437Z",
+     "id": "req-32b834eb",
      "key": "demo-agent",
      "route": "strong-models",
      "upstream": "strong",
@@ -290,8 +290,8 @@
      "outputTokens": 0,
      "costUsd": 0,
      "latencyMs": 5,
-     "traceId": "fb521771fe45670c8e04d5348b011966",
-     "spanId": "ff16536ef35dee37"
+     "traceId": "d8e19820c85547869d3fb78c33590adf",
+     "spanId": "bb9456e5c32d4d05"
     }
    ],
    "ledger": [
@@ -304,7 +304,7 @@
     }
    ],
    "log": [
-    "429 req-8d7978e2 key=demo-agent route=strong-models upstream=strong model=fake-large-1 cost=$0 error=budget_exceeded 5ms"
+    "429 req-32b834eb key=demo-agent route=strong-models upstream=strong model=fake-large-1 cost=$0 error=budget_exceeded 5ms"
    ],
    "title": "A call that could pass the budget is refused before it is sent",
    "note": "This call could produce 1000 output tokens at $15 per million, more than the key's whole daily cap of $0.01. The gateway reserves the most a call can cost before sending it, so it refuses now, with the numbers and a Retry-After, and nothing is charged.",
@@ -343,8 +343,8 @@
    "upstreamCalls": 1,
    "usage": [
     {
-     "ts": "2026-10-31T11:22:12.989Z",
-     "id": "req-094b3b11",
+     "ts": "2026-10-31T11:36:24.452Z",
+     "id": "req-60d67c17",
      "key": "demo-agent",
      "route": "cheap-models",
      "upstream": "cheap",
@@ -358,9 +358,9 @@
      "fallback": false,
      "stream": true,
      "streamEnd": "done",
-     "latencyMs": 11,
-     "traceId": "8ae81450b6772dd68196420ee04c3b50",
-     "spanId": "3c80accd1ac4b8b2"
+     "latencyMs": 12,
+     "traceId": "7d3f521a3883af835dbb6ed755c1faae",
+     "spanId": "f7e4467020815e54"
     }
    ],
    "ledger": [
@@ -373,7 +373,7 @@
     }
    ],
    "log": [
-    "200 req-094b3b11 key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0.00000855 stream=done 11ms"
+    "200 req-60d67c17 key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0.00000855 stream=done 12ms"
    ],
    "title": "A streamed answer is held until it has been read",
    "note": "With stream: true the client gets server-sent events. The gateway asks the provider for a usage chunk, reads the whole stream, runs the leak guard over the answer, and only then sends the events, with the cost settled from the provider's count.",
@@ -420,7 +420,7 @@
   "guardMessages": {
    "id": "guardMessages",
    "file": "src/llm/leak-guard.ts",
-   "line": 166,
+   "line": 168,
    "text": "export function guardMessages(policy: LeakPolicy, messages: readonly unknown[]): GuardResult {\n  const texts = messageTexts(messages);\n  for (const rule of policy.rules) {\n    if (rule.action === \"block\" && texts.some((t) => rule.pattern.test(t))) return { action: \"block\", rule: rule.id };\n  }"
   },
   "estimate": {
@@ -438,14 +438,14 @@
   "streamHeld": {
    "id": "streamHeld",
    "file": "src/llm/server.ts",
-   "line": 630,
-   "text": "    // Buffered: nothing has been sent yet.\n    if (end === \"client_closed\") return record(499, { ...spent, error: \"client_closed\" });\n    if (failed) return finish(failed.status, failed.body, { ...spent, error: failed.code });\n    const scanned = guardResponse(policy, assembler.answer());\n    if (scanned.action === \"block\") {\n      return finish(\n        502,\n        apiError(\n          \"response_blocked\",\n          `agent-gate: the model's answer contains text that looks like a secret (rule ${scanned.rule}), so it was not passed on. The call was paid for; if the secret is real, rotate it.`,\n          { type: \"api_error\", rule: scanned.rule },\n        ),\n        { ...spent, error: \"response_blocked\", rule: scanned.rule, side: \"response\" },\n      );"
+   "line": 654,
+   "text": "    // Buffered: nothing has been sent yet.\n    if (end === \"client_closed\") return record(499, { ...spent, error: \"client_closed\" });\n    if (failed) return finish(failed.status, failed.body, { ...spent, error: failed.code });\n    // A shape the gateway cannot read is not guessed at: what it would pass on could not be scanned.\n    if (assembler.unreadable) {\n      return finish(\n        502,\n        apiError(\"bad_upstream_response\", `agent-gate: the upstream's stream had ${assembler.unreadable}, which the gateway cannot read and scan, so it was not passed on. The call was paid for.`, {\n          type: \"api_error\",\n        }),\n        { ...spent, error: \"bad_upstream_response\" },\n      );\n    }\n    // The answer put back together (a match can span chunks) and every chunk on its own (every field of"
   },
   "settle": {
    "id": "settle",
    "file": "src/llm/server.ts",
-   "line": 602,
-   "text": "    const used = readUsage({ usage: assembler.usage });\n    const cost = used ? costUsd(target.upstream.pricePerMTok, used.input, used.output) : reservation.usd;\n    let settled: SettleOutcome = \"booked\";\n    try {\n      settled = ledger.settle(keyName, reservation.id, cost);\n    } catch (err) {\n      log(`could not settle ${reservation.id} for key \"${keyName}\" ($${formatUsd(cost)}): ${errorText(err)}; its reservation stays until it expires`);\n    }\n    if (settled !== \"booked\") log(`settled ${reservation.id} for key \"${keyName}\" ($${formatUsd(cost)}) as ${settled}`);"
+   "line": 632,
+   "text": "    const used = readUsage({ usage: assembler.usage });\n    const cost = used ? costUsd(target.upstream.pricePerMTok, used.input, used.output) : reservation.usd;\n    const settled = settleOrLog(keyName, reservation, cost);\n    const spent: Outcome = {\n      inputTokens: used?.input ?? estimate.input,\n      outputTokens: used?.output ?? estimate.output,\n      costUsd: cost,\n      usage: used ? \"upstream\" : \"estimate\",\n      ...via,"
   }
  }
 }

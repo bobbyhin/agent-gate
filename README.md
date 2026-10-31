@@ -1805,17 +1805,17 @@ x-agent-gate-redacted: api-key-assignment
 
 The upstream received `Is this config line right? api_key = "[REDACTED:api-key-assignment]"`.
 
-The guard scans message `content` (a string, or the `text` of text parts) and the `arguments` of
-assistant tool calls. It does not scan image, audio or file parts, tool definitions or other request
-fields. A rule is `{ "id", "regex", "flags", "action", "description", "validator" }` (the last two
+The guard scans message `content` (a string, or the `text` of text parts), the `arguments` of
+assistant tool calls (and of the older `function_call`), and `reasoning_content`, `reasoning` and
+`refusal`. It does not scan image, audio or file parts, tool definitions or other request fields. A rule is `{ "id", "regex", "flags", "action", "description", "validator" }` (the last two
 optional); `flags` may use `i`, `m`,
 `s` and `u`, as in the MCP policy, and a regex that matches empty text is refused at startup.
 
 **The answer goes through the same rules.** A model can write a secret it was never sent in the
 text the guard read: one it read off an image or a file part, one it repeats from earlier in a long
-context, or one it makes up in a known shape. So after a call is settled, the message of every
-choice in the answer (its `content` and the `arguments` of its tool calls) is scanned like a
-request. A block rule withholds the answer: the client gets 502 `response_blocked` with the rule's
+context, or one it makes up in a known shape. So after a call is settled, every string in the
+answer is scanned: the content and tool-call arguments of every choice, its reasoning or refusal text,
+and any field a provider adds, so nothing the client gets is left unread. A block rule withholds the answer: the client gets 502 `response_blocked` with the rule's
 name and never the text, and the call stays booked, because the provider was paid. A redact rule
 edits the answer, and `x-agent-gate-response-redacted` names the rules. The usage line says which
 side a block was on (`"side": "prompt"` or `"response"`) and lists redactions in the answer as
@@ -1845,13 +1845,14 @@ every other call goes to as before.
   upstream. If the upstream lacks the alias (`to.model`, else the one the client asked for) or does not
   answer, the call fails; it is never sent to the cloud instead.
 - Block rules still come first: a private key next to a card number is refused, not diverted. A block
-  rule that `rules` lists diverts instead of blocking.
+  rule that `rules` lists diverts instead of blocking, and does not withhold the local model's answer
+  either: the answer is read with the rules the prompt was read with.
 - The target must look local: a loopback address or `localhost`, a private IPv4 range (10/8,
   172.16/12, 192.168/16), an IPv6 unique local address, or a name with no dot in it (a container or a
   service). Anything else stops the gateway at startup. Only the address is checked; what answers
   there is the operator's to vouch for.
-- The answer goes through the response guard like any other, so a number the model repeats is
-  redacted on its way back.
+- The answer goes through the response guard like any other, with those rules, so a number the model
+  repeats is redacted on its way back, and a secret that no divert rule lists is withheld.
 - The response names the rules in `x-agent-gate-diverted`, and the usage line in `diverted`, with no
   text.
 
@@ -1923,22 +1924,32 @@ data: [DONE]
 - Retries, the fallback and the 429 handling work as for any call until an upstream answers. Once one
   has answered with a stream, nothing is retried.
 - **Held until it is scanned.** With `scanResponses` on (the default), the gateway reads the whole
-  stream before it sends any of it, puts each choice's message back together (the content, and each
-  tool call's arguments, which arrive in fragments), and runs the leak guard over it as over any
-  answer. A block rule withholds it: 502 `response_blocked`, booked. A redact rule edits it, and the
-  stream is rebuilt: one chunk per choice with the whole edited message, one with its finish reason,
-  then the usage chunk if the client asked for it, and `[DONE]`. Otherwise the upstream's events go
-  out as they came. The client keeps the format and loses the speed: the first token arrives with the
-  last, which is why the answer above came with its cost in a header.
+  stream before it sends any of it and runs the leak guard twice: over each choice's message put back
+  together (the content, text parts, reasoning and refusal text, and each tool call's arguments, which
+  arrive in fragments), so that a secret split across chunks is found; and over every string of every
+  chunk, fields the gateway does not put together included. A chunk it cannot put together (a choice
+  or a tool call without an index, content that is not text) is not guessed at: 502
+  `bad_upstream_response`, booked. A block rule withholds the answer: 502 `response_blocked`, booked.
+  A redact rule edits it: a match inside one chunk's own field is replaced in that chunk; a match in
+  the message put together means the stream is rebuilt from what was scanned: one chunk per choice
+  with the whole edited message, one with its finish reason, then the usage chunk if the client asked
+  for it, and `[DONE]`. The same rebuild happens when one of the gateway's upstream keys appears split
+  across chunks, so that it can be cut out. Otherwise the upstream's events go out as they came. The
+  client keeps the format and loses the speed: the first token arrives with the last, which is why the
+  answer above came with its cost in a header.
 - **Relayed.** With `"scanResponses": false`, events go to the client as they arrive, and nothing
   reads the answer first, so a key that a model writes reaches the client. `test/llm/stream.test.ts`
   sends a token split across two chunks through both modes.
 - **Stopped.** When the client goes away, the upstream request is aborted at once, so the model stops
   generating. A stream that sends nothing for `streamIdleMs` (30 seconds by default) is stopped too,
-  and `timeoutMs` still bounds the whole answer. A relayed stream that is stopped or breaks off ends
-  with an error event in the gateway's own words (`upstream_error` or `upstream_timeout`) and no
-  `[DONE]`; a held one gets 502 or 504. A provider's own error event is never passed on, because it
-  can quote the key it was sent.
+  and `timeoutMs` still bounds the whole answer, also for a relayed stream whose client stops reading:
+  the gateway waits for such a client only until the attempt's time is up, then cuts the upstream off
+  and settles the call, and a client that still has not taken the end of the stream `streamIdleMs`
+  later is disconnected. A relayed stream that is stopped or breaks off ends with an error event in
+  the gateway's own words (`upstream_error` or `upstream_timeout`) and no `[DONE]`; a held one gets 502
+  or 504. A provider's own error event is never passed on, because it can quote the key it was sent.
+  In a relayed stream, the gateway's upstream keys are cut out of each event on its own, so a key that
+  a model writes across two events is not.
 - **Booked.** A stream that ends without a usage chunk (cut short, stopped, its client gone, or from a
   provider that ignores `include_usage`) is booked at its estimate, the most it could have cost: the
   provider bills what it generated, which the gateway cannot see. A request that never got an answer
@@ -2426,7 +2437,7 @@ obeys, and the gateway blocks the call before it reaches the server. Another den
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 313 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 323 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file, a settle that comes
 twice or after its reservation expired, calls per minute and run caps); a leak-guard table
@@ -2465,7 +2476,11 @@ on as they came, the usage chunk asked for and kept from a client that did not a
 across two chunks (withheld when held, passed when relayed), tool-call fragments put back together, a
 redaction rebuilt into the stream, a client that leaves mid-stream or before the answer (the fake sees
 its request closed), a stream cut short, an error event that quotes the key, a quiet upstream, and the
-usage log and the ledger in agreement afterwards. Six more check the
+usage log and the ledger in agreement afterwards; then chunks in shapes the gateway cannot put together
+(refused), text parts, reasoning text and fields nobody defined (read, and a secret in them withheld,
+streamed or not), an upstream key split across chunks (cut out), a relayed client that stops reading
+(settled at the attempt's timeout, not later), and a streamed request answered with JSON that never
+ends (504, booked at its estimate). Six more check the
 gateway configs under `deploy/`: they load, they use the container's paths, the deployable one
 refuses the demo key, the Kubernetes copy of the leak-guard policy matches the example, and Cloud
 Run's request timeout is longer than the gateway's longest call. Every
@@ -2495,7 +2510,7 @@ an evaluation set of whole runs, each replayed and checked step by step. It chec
 not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 489/489 MCP gateway tests, 313/313 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 489/489 MCP gateway tests, 323/323 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for each of the two demo pages, 2/2 for the load
 test), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see

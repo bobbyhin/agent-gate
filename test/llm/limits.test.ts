@@ -10,6 +10,7 @@ import { parseLeakPolicy } from "../../src/llm/leak-guard.js";
 import { startLlmGateway, type LlmGateway } from "../../src/llm/server.js";
 import { FAKE_GATEWAY_KEYS } from "./fake-secrets.js";
 import { startFakeUpstream, type FakeUpstream } from "./fake-upstream.js";
+import { RepeatWindow } from "../../src/llm/repeats.js";
 
 const KEY_A = FAKE_GATEWAY_KEYS.teamA;
 const KEY_B = FAKE_GATEWAY_KEYS.teamB;
@@ -215,5 +216,21 @@ describe("stop rules: the same request again and again (repeatMax)", () => {
         ["looper", "loop_suspected", "repeatMax", 0],
       ],
     );
+  });
+});
+
+describe("RepeatWindow: the memory of repeated requests", () => {
+  it("forgets the requests of a key that went quiet, not only of the key that is calling", () => {
+    const window = new RepeatWindow();
+    const windowMs = 60_000;
+    for (let i = 0; i < 1000; i++) window.admit("quiet-key", `hash-${i}`, windowMs, 1_000);
+    assert.equal(window.size(), 1000);
+    // Ten windows later another key calls; the periodic sweep drops what left every key's window.
+    const later = 1_000 + 10 * windowMs;
+    for (let i = 0; i < 256; i++) window.admit("busy-key", "same-request", windowMs, later + i);
+    assert.equal(window.size(), 1, "only the busy key's one request is still held");
+    // What is still inside its window is kept, and counted.
+    assert.deepEqual(window.check("busy-key", "same-request", 300, windowMs, later + 300), { ok: true });
+    assert.equal(window.check("busy-key", "same-request", 256, windowMs, later + 300).ok, false);
   });
 });

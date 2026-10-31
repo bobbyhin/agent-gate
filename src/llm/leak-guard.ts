@@ -17,10 +17,12 @@
 // Japanese text often writes numbers) as their ASCII forms; the fold keeps every character in its
 // place, so a redaction lands on the original text.
 //
-// Scanned: message "content" (a string, or the "text" of text parts) and the "arguments" string of
-// assistant tool calls. Not scanned: images, audio and file parts, tool definitions, and any other
-// request field. guardResponse() runs the same rules over an answer: the message of every choice,
-// read the same way, so one rule catches a secret on either side.
+// Scanned in a request: message "content" (a string, or the "text" of text parts), the "arguments"
+// string of assistant tool calls (and of the older function_call), and "reasoning_content",
+// "reasoning" and "refusal". Not scanned: images, audio and file parts, tool definitions, and any
+// other request field. guardResponse() runs the same rules over an answer, or over one chunk of a
+// streamed answer: every string in it, wherever it is, so one rule catches a secret on either side
+// and nothing a client gets is left unread.
 // ponytail: the rules run on JavaScript's backtracking regex engine. The request body size limit
 // (maxBodyBytes) bounds the work, but a badly written rule can still be slow; keep rules anchored
 // on a literal prefix, as the shipped ones are.
@@ -221,17 +223,37 @@ export type ResponseGuardResult =
   | { action: "pass"; body: Record<string, unknown>; redactions: Array<{ rule: string; count: number }> };
 
 /**
- * The leak guard on an OpenAI-style answer: `choices[].message`, scanned like a request's messages.
- * With redactions, `body` is a copy with those messages replaced; otherwise it is `answer` itself.
+ * The leak guard on an answer (or on one chunk of a streamed one): every string in it, wherever it is
+ * (a message's content and tool-call arguments, a reasoning or refusal field, a field some provider
+ * adds), so that nothing the client gets is left unread. Block rules first, then redact rules. With
+ * redactions, `body` is a copy; otherwise it is `answer` itself.
  */
 export function guardResponse(policy: LeakPolicy, answer: Record<string, unknown>): ResponseGuardResult {
-  const choices = Array.isArray(answer.choices) ? answer.choices : [];
-  const messages = choices.map((choice) => (isRecord(choice) ? choice.message : undefined));
-  const guarded = guardMessages(policy, messages);
-  if (guarded.action === "block") return guarded;
-  if (guarded.redactions.length === 0) return { action: "pass", body: answer, redactions: [] };
-  const redacted = choices.map((choice, i) => (isRecord(choice) && guarded.messages[i] !== messages[i] ? { ...choice, message: guarded.messages[i] } : choice));
-  return { action: "pass", body: { ...answer, choices: redacted }, redactions: guarded.redactions };
+  const texts: string[] = [];
+  mapStrings(answer, (t) => {
+    texts.push(t);
+    return t;
+  });
+  for (const rule of policy.rules) {
+    if (rule.action === "block" && texts.some((t) => rule.pattern.test(t))) return { action: "block", rule: rule.id };
+  }
+  const counts = new Map<string, number>();
+  const rules = redactRules(policy);
+  const body = rules.length > 0 ? (mapStrings(answer, (t) => redactText(rules, t, counts)) as Record<string, unknown>) : answer;
+  return { action: "pass", body: counts.size > 0 ? body : answer, redactions: [...counts].map(([rule, count]) => ({ rule, count })) };
+}
+
+/** Calls `fn` on every string in `value`, inside objects and arrays too; what does not change is returned as it is (not copied). */
+function mapStrings(value: unknown, fn: (text: string) => string): unknown {
+  if (typeof value === "string") return fn(value);
+  if (Array.isArray(value)) return mapEach(value, (item) => mapStrings(item, fn));
+  if (!isRecord(value)) return value;
+  let copy: Record<string, unknown> | undefined;
+  for (const [key, item] of Object.entries(value)) {
+    const next = mapStrings(item, fn);
+    if (next !== item) (copy ??= { ...value })[key] = next;
+  }
+  return copy ?? value;
 }
 
 /**
@@ -260,6 +282,17 @@ function mapTexts(messages: readonly unknown[], fn: (text: string) => string): u
         return fnPart === call.function ? call : { ...call, function: fnPart };
       });
       if (calls !== message.tool_calls) copy = { ...(copy ?? message), tool_calls: calls };
+    }
+    // The older function_call, and the text some providers send next to the content.
+    if (isRecord(message.function_call) && typeof message.function_call.arguments === "string") {
+      const fnPart = withField(message.function_call, "arguments", fn(message.function_call.arguments));
+      if (fnPart !== message.function_call) copy = { ...(copy ?? message), function_call: fnPart };
+    }
+    for (const field of ["reasoning_content", "reasoning", "refusal"]) {
+      const value = message[field];
+      if (typeof value !== "string") continue;
+      const next = fn(value);
+      if (next !== value) copy = { ...(copy ?? message), [field]: next };
     }
     return copy ?? message;
   });

@@ -56,20 +56,34 @@ Stream, with the safe behaviour as the default.
 3. Retries, the fallback and the 429 handling work as for any call until an upstream answers with a
    status and headers. Once an upstream has answered with a stream, nothing is retried: part of the
    answer may already be with the client, and the provider has started to bill it.
-4. **With `scanResponses` on (the default), the stream is held.** The gateway reads it to the end,
-   puts each choice's message back together, and runs the leak guard over it exactly as over a
-   non-streamed answer. A block rule withholds it (502 `response_blocked`, booked, since the
-   provider was paid). A redact rule edits it, and the stream is rebuilt: one chunk per choice with
-   the whole edited message, one with its finish reason, the usage chunk if the client asked for it,
-   and `[DONE]`. Otherwise the upstream's events are sent as they came. The client keeps the
-   streaming format and loses its speed: the first token arrives with the last.
+4. **With `scanResponses` on (the default), the stream is held, and only what was scanned is
+   sent.** The gateway reads it to the end and runs the leak guard twice: over each choice's message
+   put back together (the content, text parts, reasoning and refusal text, tool-call and
+   function-call arguments), which finds a secret split across chunks; and over every string of every
+   chunk, which finds a whole secret in a field the gateway does not put together. A chunk it cannot
+   put together (a choice or a tool call without an index, content that is not text) is not guessed
+   at: the answer is refused with 502 `bad_upstream_response`, because sending events the gateway
+   could not read would send text it did not scan. A block rule withholds the answer (502
+   `response_blocked`, booked, since the provider was paid). A redact rule edits it: a match within
+   one chunk's own field is replaced in that chunk, and a match in the message put together means
+   the stream is rebuilt from what was scanned: one chunk per choice with the whole edited message,
+   one with its finish reason, the usage chunk if the client asked for it, and `[DONE]`; an upstream
+   key split across chunks is cut out the same way. Otherwise the upstream's events are sent as they
+   came. A non-streamed answer is read with the same rules over every string it holds. What a stream
+   still escapes: a secret split across chunks in a field the gateway does not put together. The
+   client keeps the streaming format and loses its speed: the first token arrives with the last.
 5. **With `"scanResponses": false`, events are relayed as they arrive** and the answer is not read.
    That is the choice for a deployment that wants tokens on screen as they are written and accepts
    that the answers are not checked.
 6. **Stopping.** When the client goes away, the upstream request is aborted at once, so it stops
    generating. A stream that sends nothing for `streamIdleMs` (30 s by default) is stopped, and the
    per-attempt `timeoutMs` still bounds the whole response, a stream included, so the longest a call
-   can take, and the life of its reservation, are unchanged. A relayed stream that is stopped or
+   can take, and the life of its reservation, are unchanged. That holds for a relayed stream whose
+   client stops reading too: the gateway waits for such a client only until the attempt's time is up,
+   then cuts the upstream off and settles the call before it tries to send the end of the stream, and
+   disconnects a client that has not taken it `streamIdleMs` later. (Waiting on the client without a
+   deadline let a reservation expire while its call was still open, so the key could spend the same
+   money twice.) A relayed stream that is stopped or
    breaks off ends with an error event in the gateway's own words and no `[DONE]`; a held one gets a
    502 or 504. A provider's own error frame is never passed on, because a provider's error can quote
    the key it was sent.
