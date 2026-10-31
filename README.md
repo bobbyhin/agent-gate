@@ -80,9 +80,10 @@ same points, from outside the agent:
 | `before_tool_callback` | before a tool runs | The Claude Code hook (the shell guard) and the MCP gateway's policy: allow, warn, ask a human or block; the gateway writes its audit line before anything runs. |
 | `after_tool_callback` | after a tool returns | The MCP gateway's result line with the result's hash, and its optional result guard (secrets withheld or redacted, instruction-like text flagged). |
 
-The difference is where the code runs. A callback runs inside the agent's process, with the agent's
-credentials, and only in agents whose authors added it (for security policies, ADK's documentation
-recommends plugins: the same hooks, shared by many agents). agent-gate runs outside: the hook inside
+The difference is where the code runs. A callback is a field set on the agent itself (the model and
+tool callbacks on `LlmAgent`), so it runs as part of the agent, and only in agents whose authors set
+it; for security policies, ADK's documentation recommends plugins, which it describes as reusable
+across multiple agents ([ADK safety](https://adk.dev/safety/)). agent-gate runs outside: the hook inside
 Claude Code's permission system, and the two gateways as the only addresses the agent has for its
 tools and its model. When the provider keys live in the LLM gateway's environment and the tool
 servers' credentials in the MCP gateway's, an agent that skips a gateway reaches neither the tools
@@ -2317,7 +2318,7 @@ agent-gate is small next to the gateways it is usually compared with, and it doe
 | Main job | decide each call: a policy, a human, a record | run MCP servers safely: containers, a catalog, signed images | one API in front of many model providers | a managed entry and exit point for an agent's traffic (tools, other agents, its model) on Gemini Enterprise Agent Platform |
 | How calls are decided | a JSON policy on tool names and arguments; approvals bound to the arguments' hash, used once | interceptors: your own code before or after a call | budgets, rate limits, guardrails | IAM allow and deny rules on the agent's identity and the tool's name; Model Armor filters; plain-language rules that an LLM checks (Preview) |
 | A human in the loop | an approval queue answered at a CLI | not described in its documentation | no approval queue in the proxy | not described in the Govern pages read on 31 Oct 2026 |
-| Record | an audit line before each call (no line, no call), hashes instead of values, `audit verify` | logs of tool names and argument shapes; OpenTelemetry | spend in its database; OpenTelemetry; audit logs in its Enterprise tier | allow and deny decisions in Cloud Logging, with the tool's name; access decisions in Cloud Audit Logs |
+| Record | an audit line before each call (no line, no call), hashes instead of values, `audit verify` | logs of tool names and argument shapes; OpenTelemetry | spend in its database; OpenTelemetry; audit logs in its Enterprise tier | allow and deny decisions can be logged to Cloud Logging, with the tool's name; access decisions to Cloud Audit Logs |
 | Streamed answers | held until the leak guard has read them (the default) | (tool calls only) | depends on the guardrail: some hold the stream, some read it after the client has it | Model Armor does not screen streaming chat completions; the LLM-checked rules do not support streamed responses |
 
 What agent-gate does not do: run servers in containers, keep a catalog of servers, verify image

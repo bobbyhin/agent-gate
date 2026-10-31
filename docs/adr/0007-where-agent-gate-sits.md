@@ -6,10 +6,12 @@ Date: 2026-10-31
 ## Context
 
 Cloud platforms offer two things an agent project might reach for. A container platform such as
-Cloud Run runs a service. A managed agent runtime (Google Cloud's is Agent Runtime, formerly Agent
-Engine, in Gemini Enterprise Agent Platform, which Vertex AI became part of in April 2026) runs the
-agent itself: it hosts the agent's loop, keeps its sessions and long-term memory, scales it, and
-adds tracing and evaluation around it. The usual comparison: an agent deployed on a container
+Cloud Run runs a service. A managed agent runtime runs the agent itself: in general, such a runtime
+hosts the agent's loop and, depending on the product, keeps its sessions and memory, scales it, and
+adds tracing and evaluation around it. (Google Cloud's was called Agent Engine; since 22 April 2026
+it is Agent Runtime, part of Gemini Enterprise Agent Platform, which Vertex AI also became part of:
+[release notes](https://docs.cloud.google.com/gemini-enterprise-agent-platform/release-notes). This
+ADR does not describe that product's features.) The usual comparison: an agent deployed on a container
 platform, where you build the HTTP wrapper, the container, the infrastructure code, CI, health
 checks, tracing and dashboards yourself, and one on a managed runtime, which gives you most of that.
 
