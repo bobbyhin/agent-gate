@@ -1697,8 +1697,10 @@ an estimate of its cost; after the call, it settles the reservation with the rea
   answered. A 2xx answer without `usage` is booked at the estimate. A call that fails releases its
   reservation and costs nothing.
 
-Days and months are UTC. Because calls in flight hold their reservations, concurrent calls cannot
-pass a cap together; the price is that an estimate can refuse a call that would have fit. Why it
+Days and months are UTC. Because calls in flight hold their reservations, concurrent calls can pass
+a cap together only by how far their estimates were low: input is counted as characters / 4 and
+image or audio parts not at all, so a settled cost can be higher than its reservation (output is
+bounded by `max_tokens`). The price is that an estimate can refuse a call that would have fit. Why it
 works this way: [docs/adr/0002-reserve-then-settle-budgets.md](docs/adr/0002-reserve-then-settle-budgets.md).
 The ledger is exact for the same reason as the approval queue (see Why the state is exact under
 [Approval rules](#approval-rules)): a cap is checked against dollars booked, never against a guess
@@ -2314,7 +2316,7 @@ agent-gate is small next to the gateways it is usually compared with, and it doe
 | --- | --- | --- | --- | --- |
 | Main job | decide each call: a policy, a human, a record | run MCP servers safely: containers, a catalog, signed images | one API in front of many model providers | a managed entry and exit point for an agent's traffic (tools, other agents, its model) on Gemini Enterprise Agent Platform |
 | How calls are decided | a JSON policy on tool names and arguments; approvals bound to the arguments' hash, used once | interceptors: your own code before or after a call | budgets, rate limits, guardrails | IAM allow and deny rules on the agent's identity and the tool's name; Model Armor filters; plain-language rules that an LLM checks (Preview) |
-| A human in the loop | an approval queue answered at a CLI | not described in its documentation | no approval queue in the proxy | not described in its governance documentation |
+| A human in the loop | an approval queue answered at a CLI | not described in its documentation | no approval queue in the proxy | not described in the Govern pages read on 31 Oct 2026 |
 | Record | an audit line before each call (no line, no call), hashes instead of values, `audit verify` | logs of tool names and argument shapes; OpenTelemetry | spend in its database; OpenTelemetry; audit logs in its Enterprise tier | allow and deny decisions in Cloud Logging, with the tool's name; access decisions in Cloud Audit Logs |
 | Streamed answers | held until the leak guard has read them (the default) | (tool calls only) | depends on the guardrail: some hold the stream, some read it after the client has it | Model Armor does not screen streaming chat completions; the LLM-checked rules do not support streamed responses |
 
@@ -2324,11 +2326,12 @@ Docker's gateway does that well; agent-gate decides which calls may run and who 
 record that can be checked.
 
 **Where this fits.** On Google Cloud, for agents hosted on its platform, the managed gateway is where
-identity, network rules and content filters belong, and agent-gate does not replace it. What its
-governance documentation does not describe, and agent-gate does, is a human's yes for one exact call,
-spent once; budgets that hold every call in flight against a cap (Google's token budgets are announced
-as coming soon, and its page says requests admitted together can exceed them); and streamed answers
-held until they are read. Where no managed gateway reaches, as with a coding agent on a laptop, or
+identity, network rules and content filters belong, and agent-gate does not replace it. What the
+Govern pages read on 31 Oct 2026 do not describe, and agent-gate does, is a human's yes for one exact
+call, spent once, and streamed answers held until they are read. Its dollar caps per key are in force
+now, where Google's token budgets are announced as coming soon; calls in flight hold their estimates,
+so together they can pass a cap only by how far those estimates were low
+([ADR 0002](docs/adr/0002-reserve-then-settle-budgets.md)). Where no managed gateway reaches, as with a coding agent on a laptop, or
 where a team wants its own, agent-gate covers the same points on one host, with its state in files
 ([ADR 0003](docs/adr/0003-single-writer-state.md)): a gateway for one team's agents, not for a whole
 company. [docs/related-work.md](docs/related-work.md) has the details, with a source for every claim

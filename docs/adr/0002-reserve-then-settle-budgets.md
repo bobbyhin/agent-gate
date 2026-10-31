@@ -44,7 +44,7 @@ crashes mid-call does not hold budget forever.
 
 ## Why
 
-- **Concurrent calls cannot overspend a cap.** Every call in flight holds its estimate, so the
+- **Concurrent calls can pass a cap only by how far their estimates were low.** Every call in flight holds its estimate, so the
   settled spend plus all reservations never passes the cap at the moment a call is admitted.
   Output tokens are bounded by `max_tokens`, which the provider enforces; the only slack left is
   how far the input estimate is off.
