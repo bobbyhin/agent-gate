@@ -1,0 +1,7 @@
+{
+  "window": "30d",
+  "objectives": [
+    { "name": "jobs finish on time", "target": 0.99, "actual": 0.994 },
+    { "name": "jobs succeed", "target": 0.995, "actual": 0.987 }
+  ]
+}

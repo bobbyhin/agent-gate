@@ -1,0 +1,11 @@
+{
+  "servers": [
+    {
+      "name": "status",
+      "command": "node",
+      "args": ["examples/status-mcp/server.js", "--dir", "examples/status-mcp/sample-status"]
+    }
+  ],
+  "policy": "policy.json",
+  "stateDir": ".agent-gate"
+}

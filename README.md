@@ -1510,6 +1510,69 @@ provider key appears in any response, in the state files or in the gateway's log
 - Cancellation. A client that disconnects does not cancel the upstream call; the call finishes and
   is booked.
 
+## Example: a status server behind the MCP gateway
+
+`examples/status-mcp/server.js` is a small, real MCP server (plain Node on the official SDK) to put
+behind the gateway in place of the tests' fake. It reads a status folder, `sample-status/` (the
+service-level objectives of some scheduled jobs, when each job last ran, an inbox of notices), and
+answers with structured JSON, so an agent reads a few fields instead of long log files:
+
+| Tool | Kind | What it gives |
+| --- | --- | --- |
+| `slo_now` | read | each objective's target, actual value and whether it is met |
+| `bot_status` | read | each job's last run, whether it went well, and whether it is overdue |
+| `inbox_unread_count` | read | how many notices are unread, and the oldest one |
+| `mark_inbox_read` | write | marks one notice read by id, or every notice with `"all": true` |
+
+The server changes nothing unless it is started with `--writable`. `examples/status-mcp/policy.json`
+lets the reads through, asks a human before a write, and blocks marking the whole inbox read at once;
+`examples/status-mcp/gateway.config.json` puts the server and the policy together. From the
+repository root, after `npm run build`:
+
+```
+node bin/agent-gate.js serve --config examples/status-mcp/gateway.config.json
+```
+
+A real run with that config, an MCP client making the calls and a human answering at the CLI (`>`
+is a call and the text the agent got back):
+
+```
+> status__slo_now {}
+{"window":"30d","objectives":[{"name":"jobs finish on time","target":0.99,"actual":0.994,"met":true},{"name":"jobs succeed","target":0.995,"actual":0.987,"met":false}]}
+> status__inbox_unread_count {}
+{"unread":2,"oldest":{"id":"n-101","subject":"A watched item dropped below its target price"}}
+> status__mark_inbox_read {"id":"n-101"}
+agent-gate: this call needs a human decision, so it was not run.
+Reason: This changes the inbox, so a human says yes first. (rule inbox-writes)
+Approval id: ap-26592ba2 (expires 2026-11-01T04:51:39.697Z)
+A human can approve it with: agent-gate approvals approve ap-26592ba2
+Once it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.
+Do not try to get the same result another way.   (isError)
+$ agent-gate approvals approve ap-26592ba2 --yes
+approved ap-26592ba2: status__mark_inbox_read {"id":"n-101"}
+The agent can now make this exact call once, until 2026-11-01T04:51:39.697Z.
+
+> status__mark_inbox_read {"id":"n-101"}
+{"marked":0,"wouldMark":["n-101"],"note":"this server was started without --writable, so it changed nothing"}
+> status__mark_inbox_read {"all":true}
+agent-gate blocked this call, so it was not run: Marking the whole inbox read hides what nobody looked at; mark items one by one. (rule no-bulk-mark)
+Blocked calls cannot be approved. Do not try to get the same result another way.   (isError)
+```
+
+The call lines it left in the audit log, with each line cut down to these fields:
+
+```json
+{"seq":1,"tool":"slo_now","decision":"allow","rule":"default","forwarded":true}
+{"seq":2,"tool":"inbox_unread_count","decision":"allow","rule":"default","forwarded":true}
+{"seq":3,"tool":"mark_inbox_read","decision":"ask","rule":"inbox-writes","forwarded":false,"approvalId":"ap-26592ba2"}
+{"seq":4,"tool":"mark_inbox_read","decision":"ask","rule":"inbox-writes","forwarded":true,"approvalId":"ap-26592ba2"}
+{"seq":5,"tool":"mark_inbox_read","decision":"block","rule":"no-bulk-mark","forwarded":false}
+```
+
+`test/status-mcp.test.js` runs the same steps on a writable copy of the folder: it checks that the
+write ran once after the approval, that the bulk write never reached the server, and that
+`audit verify` passes on the log.
+
 ## Example: a change review as a workflow
 
 `examples/change-review/review.js` puts the guards together as the checks of a review: three
@@ -1671,7 +1734,7 @@ the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
 stopped (351/351 shell guard tests, 379/379 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
-the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
+the change-review example, 6/6 for the status-mcp example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
 
@@ -1737,6 +1800,11 @@ test/no-network-preload.js                    makes network modules throw, for t
 test/change-review.test.js                    tests of the change-review example
 examples/change-review/review.js              a change review as a workflow graph: checks, router, approval queue
 examples/change-review/sample.diff            a sample change that the review escalates
+examples/status-mcp/server.js                 a small, real MCP server: status reads and one write
+examples/status-mcp/policy.json               its policy: reads allowed, a write asks, a bulk write blocked
+examples/status-mcp/gateway.config.json       the gateway in front of it
+examples/status-mcp/sample-status/            the status folder it reads by default
+test/status-mcp.test.js                       the example through a running gateway
 test/SANITIZED.md                             what was changed in the cases before publication
 test/HELDOUT.md                               where the held-out cases come from, and their score
 docs/red-team.md                              the case categories, with counts

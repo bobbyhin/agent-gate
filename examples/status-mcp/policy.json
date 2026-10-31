@@ -1,0 +1,18 @@
+{
+  "default": "allow",
+  "rules": [
+    {
+      "id": "no-bulk-mark",
+      "tool": "mark_inbox_read",
+      "args": { "all": "true" },
+      "decision": "block",
+      "why": "Marking the whole inbox read hides what nobody looked at; mark items one by one."
+    },
+    {
+      "id": "inbox-writes",
+      "tool": "mark_*",
+      "decision": "ask",
+      "why": "This changes the inbox, so a human says yes first."
+    }
+  ]
+}

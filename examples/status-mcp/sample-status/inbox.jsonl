@@ -1,0 +1,3 @@
+{"id":"n-101","from":"price-watch","subject":"A watched item dropped below its target price","read":false}
+{"id":"n-102","from":"report-mailer","subject":"The weekly report failed to send","read":false}
+{"id":"n-103","from":"nightly-backup","subject":"Backup finished","read":true}
