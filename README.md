@@ -588,6 +588,29 @@ Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.con
 Why the gateway answers with an error and lets the agent retry, instead of holding the call open
 until a human answers: [docs/adr/0001-non-blocking-approvals.md](docs/adr/0001-non-blocking-approvals.md).
 
+### Approvals are action tokens
+
+An approval is a server-side action token: an id the gateway makes, bound to one call (`argsHash`,
+and file hashes with `fileBinding`), used once, with a lifetime, answered out of band at the CLI and
+kept in a state directory the agent cannot write. The confirmation does not live in the prompt, where
+the model decides whether it was given and a web page or a tool result can claim it was.
+
+```mermaid
+flowchart LR
+  subgraph steerable["Text the model reads: can be steered"]
+    you["You, in the chat"] --> model["Model (the agent)"]
+  end
+  subgraph decided["Decided in code: the model cannot reach it"]
+    gateway["agent-gate: policy and approvals.json"] --> tools["Tools (MCP servers)"]
+  end
+  model -- "tool call" --> gateway
+  cli["You, at the CLI: approve ap-..."] -- "out of band" --> gateway
+```
+
+The limit is the line itself: an agent with a shell or file tools of its own, outside the gateway, can
+cross it if the state directory or the CLI is within its reach. Keep them out of reach.
+[ADR 0005](docs/adr/0005-approvals-are-action-tokens.md) has the reasoning.
+
 ### Policy
 
 A policy is JSON: a default decision and an ordered list of rules. The first rule that matches a
@@ -1221,6 +1244,7 @@ docs/adr/0001-non-blocking-approvals.md       why "ask" answers with an error in
 docs/adr/0002-reserve-then-settle-budgets.md  why budgets reserve an estimate and settle after
 docs/adr/0003-single-writer-state.md          why the gateway runs as one replica, and the way to more
 docs/adr/0004-decisions-in-code.md            why the guards decide in code, not in a prompt or a model
+docs/adr/0005-approvals-are-action-tokens.md  an approval is a server-side action token, not a yes in the chat
 docs/adr/0006-standing-approvals.md           bounded standing approvals, and why only some rules accept them
 tsconfig.json                                 compiles src/ and test/ into dist/
 AGENTS.md                                     build, layout and rules for coding agents
