@@ -43,7 +43,9 @@ import type { GatewayConfig } from "./config.js";
 import { contextFromMeta, type CallContext } from "./context.js";
 import { bindFiles } from "./files.js";
 import { alwaysBlocked, evaluate, globToRegExp, repeatLimitsFor, type Policy, type ToolCall, type Verdict } from "./policy.js";
+import { loadLeakPolicy } from "../llm/config.js";
 import { RepeatStore } from "./repeats.js";
+import { guardResult, type ResultGuard } from "./result-guard.js";
 import { ToolPins } from "./tool-pins.js";
 
 export const VERSION = "0.1.0";
@@ -66,6 +68,9 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
   const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"), config.auditArguments);
   const repeats = policy.repeat.length > 0 ? new RepeatStore(config.stateDir, Math.max(...policy.repeat.map((limit) => limit.windowMs))) : undefined;
   const pins = config.pinTools ? new ToolPins(config.stateDir) : undefined;
+  const resultGuard: ResultGuard | undefined = config.resultGuard
+    ? { ...(config.resultGuard.leakPolicyFile ? { leak: loadLeakPolicy(config.resultGuard.leakPolicyFile) } : {}), flagInstructions: config.resultGuard.flagInstructions }
+    : undefined;
   const exposeTests = new Map(config.servers.flatMap((s) => (s.expose ? [[s.name, s.expose.map(globToRegExp)] as const] : [])));
   const isExposed = (server: string, tool: string): boolean => exposeTests.get(server)?.some((re) => re.test(tool)) ?? true;
   // One connection per gateway process: the stdio transport serves exactly one client.
@@ -253,7 +258,7 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
     rewrittenBy?: string[],
   ): Promise<CallToolResult> {
     const started = performance.now();
-    const record = (outcome: { isError: boolean; resultHash?: string; resultBytes?: number; errorCode?: number }): void => {
+    const record = (outcome: Omit<Parameters<AuditLog["writeResult"]>[0], "connId" | "seq" | "server" | "tool" | "argsHash" | "durationMs">): void => {
       try {
         audit.writeResult({ connId, seq: n, server: call.server, tool: call.tool, argsHash, durationMs: Math.round(performance.now() - started), ...outcome });
       } catch (err) {
@@ -269,10 +274,25 @@ export async function createGateway(config: GatewayConfig, policy: Policy, log: 
       record({ isError: true, errorCode: err instanceof McpError ? err.code : ErrorCode.InternalError });
       throw err;
     }
+    const sent = result;
+    const notes: { withheld?: string; redacted?: string[]; flags?: string[] } = {};
+    if (resultGuard) {
+      const guarded = guardResult(resultGuard, result);
+      result = guarded.result;
+      if (guarded.withheld) {
+        notes.withheld = guarded.withheld;
+        log(`WITHHELD ${call.server}${SEPARATOR}${call.tool}: its result matched leak-guard rule ${guarded.withheld}`);
+      }
+      if (guarded.redacted.length > 0) notes.redacted = guarded.redacted;
+      if (guarded.flags.length > 0) {
+        notes.flags = guarded.flags;
+        log(`WARN ${call.server}${SEPARATOR}${call.tool}: its result reads like instructions to the model (${guarded.flags.join(", ")}); it is passed on as data`);
+      }
+    }
     // The agent learns that its arguments were edited, in the result's _meta, not in its content.
     if (rewrittenBy) result = { ...result, _meta: { ...(result._meta ?? {}), "agent-gate/rewritten-by": rewrittenBy } };
     const { hash, bytes } = hashJson(result);
-    record({ isError: result.isError === true, resultHash: hash, resultBytes: bytes });
+    record({ isError: result.isError === true, resultHash: hash, resultBytes: bytes, ...(result === sent ? {} : { originalResultHash: hashJson(sent).hash }), ...notes });
     return result;
   }
 

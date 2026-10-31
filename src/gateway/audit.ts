@@ -92,6 +92,14 @@ export interface CallResultEvent {
   resultBytes?: number;
   /** The JSON-RPC error code when the call failed without a result, for example -32001 (timeout). */
   errorCode?: number;
+  /** When the gateway changed the result (result guard, rewrite note): the hash of what the downstream server sent. */
+  originalResultHash?: string;
+  /** The result guard's block rule that withheld the result. */
+  withheld?: string;
+  /** The result guard's redact rules that changed it. */
+  redacted?: string[];
+  /** Instruction-like text the result guard found (result-guard.ts). */
+  flags?: string[];
 }
 
 /** A change to the pinned tool definitions (src/gateway/tool-pins.ts). */

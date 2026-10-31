@@ -9,6 +9,8 @@
 // Optional fields: "approvalTtlHours" (default 24), "auditArguments" (default false), "pinTools"
 // (default true: pin tool definitions, see src/gateway/tool-pins.ts), per server "expose" (globs of
 // the tool names the agent may see and call; the others are hidden and blocked),
+// "resultGuard" ({ "leakPolicy": "<file>", "flagInstructions": true }: what a tool's result may carry
+// back to the model, see src/gateway/result-guard.ts),
 // "fileBinding" ({ "roots": [...], "arguments": [...] }: bind approvals to the content of the files
 // those arguments name, see src/gateway/files.ts), and per server "env" (extra environment
 // variables; a downstream server otherwise gets only the SDK's short list of safe variables such as
@@ -39,6 +41,8 @@ export interface GatewayConfig {
   auditArguments: boolean;
   /** Pin tool definitions and withhold tools whose definition changed (default true). */
   pinTools: boolean;
+  /** Read results: withhold or redact secrets (leak-guard rules) and flag instruction-like text. */
+  resultGuard?: { leakPolicyFile?: string; flagInstructions: boolean };
   fileBinding?: FileBindingConfig;
 }
 
@@ -59,7 +63,7 @@ export function loadPolicy(file: string): Policy {
 
 export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
   const config = object(json, "config");
-  onlyKeys(config, ["servers", "policy", "stateDir", "approvalTtlHours", "auditArguments", "pinTools", "fileBinding"], "config");
+  onlyKeys(config, ["servers", "policy", "stateDir", "approvalTtlHours", "auditArguments", "pinTools", "resultGuard", "fileBinding"], "config");
 
   const servers = array(config.servers, "config.servers").map((raw, i) => server(raw, `config.servers[${i}]`));
   if (servers.length === 0) fail("config.servers must list at least one server");
@@ -83,8 +87,19 @@ export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
     approvalTtlMs: Math.round(hours * 60 * 60 * 1000),
     auditArguments,
     pinTools,
+    ...(config.resultGuard === undefined ? {} : { resultGuard: resultGuard(config.resultGuard, baseDir) }),
     ...(config.fileBinding === undefined ? {} : { fileBinding: fileBinding(config.fileBinding, baseDir) }),
   };
+}
+
+function resultGuard(raw: unknown, baseDir: string): { leakPolicyFile?: string; flagInstructions: boolean } {
+  const at = "config.resultGuard";
+  const spec = object(raw, at);
+  onlyKeys(spec, ["leakPolicy", "flagInstructions"], at);
+  const flagInstructions = spec.flagInstructions ?? true;
+  if (typeof flagInstructions !== "boolean") fail(`${at}.flagInstructions must be true or false`);
+  if (spec.leakPolicy === undefined && !flagInstructions) fail(`${at} with no leakPolicy and flagInstructions false would do nothing`);
+  return { ...(spec.leakPolicy === undefined ? {} : { leakPolicyFile: path.resolve(baseDir, text(spec.leakPolicy, `${at}.leakPolicy`)) }), flagInstructions };
 }
 
 function fileBinding(raw: unknown, baseDir: string): FileBindingConfig {

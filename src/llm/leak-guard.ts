@@ -55,29 +55,35 @@ export function guardMessages(policy: LeakPolicy, messages: readonly unknown[]):
   }
 
   const counts = new Map<string, number>();
+  const redacting = redactRules(policy);
+  const result = mapTexts(messages, (original) => redactText(redacting, original, counts));
+  return { action: "pass", messages: result, redactions: [...counts].map(([rule, count]) => ({ rule, count })) };
+}
+
+/** The policy's redact rules, compiled for redactText(). */
+export function redactRules(policy: LeakPolicy): Array<{ id: string; all: RegExp }> {
   // g to find every match, d for the positions of capture groups. matchAll() works on a copy of
   // the regex, so one per call is safe.
-  const redacting = policy.rules
-    .filter((rule) => rule.action === "redact")
-    .map((rule) => ({ id: rule.id, all: new RegExp(rule.pattern.source, `${rule.pattern.flags}gd`) }));
-  const result = mapTexts(messages, (original) => {
-    let t = original;
-    for (const rule of redacting) {
-      let out = "";
-      let done = 0;
-      for (const match of t.matchAll(rule.all)) {
-        // The first capture group that took part in the match, or else the whole match.
-        const span = match.indices?.slice(1).find((s) => s !== undefined) ?? match.indices?.[0];
-        if (!span || span[0] === span[1]) continue;
-        out += `${t.slice(done, span[0])}[REDACTED:${rule.id}]`;
-        done = span[1];
-        counts.set(rule.id, (counts.get(rule.id) ?? 0) + 1);
-      }
-      t = out + t.slice(done);
+  return policy.rules.filter((rule) => rule.action === "redact").map((rule) => ({ id: rule.id, all: new RegExp(rule.pattern.source, `${rule.pattern.flags}gd`) }));
+}
+
+/** Replaces what each redact rule matches in `original` with [REDACTED:<id>], counting per rule. */
+export function redactText(rules: ReadonlyArray<{ id: string; all: RegExp }>, original: string, counts: Map<string, number>): string {
+  let t = original;
+  for (const rule of rules) {
+    let out = "";
+    let done = 0;
+    for (const match of t.matchAll(rule.all)) {
+      // The first capture group that took part in the match, or else the whole match.
+      const span = match.indices?.slice(1).find((s) => s !== undefined) ?? match.indices?.[0];
+      if (!span || span[0] === span[1]) continue;
+      out += `${t.slice(done, span[0])}[REDACTED:${rule.id}]`;
+      done = span[1];
+      counts.set(rule.id, (counts.get(rule.id) ?? 0) + 1);
     }
-    return t;
-  });
-  return { action: "pass", messages: result, redactions: [...counts].map(([rule, count]) => ({ rule, count })) };
+    t = out + t.slice(done);
+  }
+  return t;
 }
 
 export type ResponseGuardResult =

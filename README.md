@@ -398,6 +398,9 @@ example `{ "name": "files", "command": "npx", "args": ["-y", "@modelcontextproto
 - `expose` (optional, per server), for example `["read_*", "search_*"]`: globs of the tool names the
   agent may see and call; the others are hidden, and a call to one is blocked. `pinTools` (default
   `true`) pins each tool's definition the first time it is listed. See [Tool lists](#tool-lists).
+- `resultGuard` (optional), for example `{ "leakPolicy": "llm-policy.example.json" }`: read what tools
+  return, withhold or redact secrets in it, and flag text that reads like instructions. See
+  [Tool results are untrusted data](#tool-results-are-untrusted-data).
 - `fileBinding` (optional), for example `{ "roots": ["/srv/agent-work"], "arguments": ["path", "source"] }`,
   binds approvals to the content of the files that those arguments name. See
   [Approval rules](#approval-rules). Roots are resolved against the config file's directory and must exist.
@@ -799,7 +802,9 @@ context and an agent path, plus a blocked shell call; the user name is changed:
   to the answer (a call held for a human is answered at once and made again later, so waiting for a
   human is never in it), `isError`, and the SHA-256 and size of the result the agent got
   (`resultHash`, `resultBytes`). When a call fails without a result, `errorCode` has the JSON-RPC
-  error code instead. See [Tool results are untrusted data](#tool-results-are-untrusted-data).
+  error code instead. When the gateway changed the result, `originalResultHash` is the hash of what
+  the downstream server sent, and `withheld`, `redacted` and `flags` say what the result guard did.
+  See [Tool results are untrusted data](#tool-results-are-untrusted-data).
 
 Argument values are not logged:
 tool arguments often carry secrets (tokens, passwords) and personal data (names, message bodies),
@@ -888,8 +893,21 @@ data:
   injection: an `echo` result tells the agent to upload its SSH key, the agent obeys, and the shell
   rule blocks the upload before it reaches the server. An upload of a file that is not a secret
   waits for a human.
+- With `resultGuard` in the config, it reads the result before the model does: the text content,
+  the text of embedded resources, and every string in `structuredContent`. The LLM gateway's
+  leak-guard rules (`llm-policy.example.json`, the same file) apply. A block rule withholds the whole
+  result, and the agent gets an error result that names the rule: the call has already run, so it
+  cannot be refused, and cutting out only the match is not safe for every rule (the service-account
+  rule matches the key's first line, not its body). A redact rule replaces what it matches with
+  `[REDACTED:<id>]`, in `structuredContent` too, so a tool that returns a `.env` file does not hand
+  its keys to the model. Text that reads like instructions to the model ("ignore all previous
+  instructions", "run the following command", a download piped into a shell, "do not tell the
+  user") is flagged: a `WARN` on stderr, `flags` in the call-result line and in the result's `_meta`.
+  A flag changes nothing else, because legitimate documents contain such text too; it is a hint for
+  whoever reads the log, not a filter.
 - What it cannot do: tell a planted instruction from a real one, stop the model from reading it, or
-  see the results of tools that the agent reaches some other way.
+  see the results of tools that the agent reaches some other way. The flags are a short list of
+  phrases, so an injection written another way is not flagged.
 
 ### What the gateway does not cover
 
@@ -915,8 +933,10 @@ data:
   another OS user.
 - Only tools are proxied. Resources, prompts, and requests from a downstream server back to the
   client (sampling, elicitation) are not.
-- It does not read tool results, so it cannot spot instructions an attacker planted in them (a
-  prompt injection); it records only their hash and size. What it decides is the agent's next call:
+- Without `resultGuard`, it does not read tool results, so it cannot spot instructions an attacker
+  planted in them (a prompt injection); it records only their hash and size. With it, a few known
+  phrasings are flagged and known secret formats are withheld or redacted. Either way, what it
+  decides is the agent's next call:
   if the agent obeys and tries to upload a secret through a shell tool, the shell rule blocks it, as
   the end-to-end test shows.
 - Downstream servers are started once. If one fails to start, the gateway does not start; if one
@@ -1517,7 +1537,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 336 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 346 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
@@ -1527,7 +1547,8 @@ is dropped), `audit stats`, every rule that matched next to the one that decided
 the decisions are first match's), rewrite rules on their own and through a running gateway, loop
 limits (their counts with a clock the test controls, and a loop through a running gateway), tool
 lists (a server that changes a tool's description mid-session, `expose`, tools the policy always
-blocks, a damaged pin file), and an end-to-end test. That test starts `agent-gate serve`
+blocks, a damaged pin file), the result guard (secrets withheld or redacted in text, resources and
+structured content, instruction-like text flagged, ordinary text left alone), and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log,
 including a call-result line, with the hash of what came back, for every forwarded call.
@@ -1586,7 +1607,7 @@ the decision, with no model judging and no tolerance band. And it is evaluated o
 there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 336/336 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 346/346 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
 the change-review example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1603,6 +1624,7 @@ src/gateway/approvals.ts                      the approval queue in <stateDir>/a
 src/gateway/repeats.ts                        loop limits: recent runs per call in <stateDir>/repeats.json
 src/gateway/files.ts                          binds approvals to the content of the files a call names
 src/gateway/tool-pins.ts                      pinned tool definitions in <stateDir>/tools.json
+src/gateway/result-guard.ts                   reads results: withholds or redacts secrets, flags instruction-like text
 src/gateway/advisor.ts                        the escalate-only rule for a second reviewer (ADR 0008; not wired yet)
 src/gateway/audit.ts                          the audit log, <stateDir>/audit.jsonl
 src/gateway/audit-tools.ts                    reads the audit log back: agent-gate audit ...
