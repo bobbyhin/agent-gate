@@ -1185,6 +1185,23 @@ fake secret the tests use is in `test/llm/fake-secrets.ts`, assembled from piece
 no secret-shaped string appears in the source and secret scanners need no exceptions for this
 repository.
 
+### The tests as an evaluation set
+
+The shell guard's cases are a golden dataset with a gate in front of every change, in the shape that
+agent evaluation frameworks use (for example Google's ADK: an eval set of cases, a test config with
+thresholds, run by pytest):
+
+| Evaluation framework | Here |
+| --- | --- |
+| eval set: inputs with the expected outcome | `test/cases.json` (239 commands, each with `expect`) and `test/cases-exfil.json` (73) |
+| a held-out split | `test/cases-heldout.json` (163 commands the analyzer was never tuned on), with a baseline score |
+| test config: metric and threshold | an exact match on the decision for every case; for the held-out set, recall and false asks no worse than `test/heldout-baseline.json` |
+| the runner and the gate | `npm test`, in CI on Node 20 and 22; the deploy job does not start until it passes |
+
+The difference is the judge. The analyzer is deterministic, so a case is checked by an exact match on
+the decision, with no model judging and no tolerance band. And it is evaluated one call at a time:
+there is no trajectory metric, nothing that checks whether an agent's sequence of calls was right.
+
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
 stopped (351/351 shell guard tests, 245/245 MCP gateway tests, 173/173 LLM gateway tests), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
