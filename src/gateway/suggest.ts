@@ -13,6 +13,11 @@
 // something) or, from an OpenAPI document, GET and HEAD operations; and "default": "ask", so a tool
 // that no rule names waits for a human instead of running. Tool annotations (readOnlyHint,
 // destructiveHint) are shown, never used: the server declares them about itself.
+// Tool names come from the server, so they are untrusted text. A name goes into the draft only when it
+// is plain (letters, digits, "_", "." and "-", at most 128 characters): the draft's tool lists are
+// globs, and a name such as "get*" would allow every other "get..." tool of that server, while a run
+// of "*" makes a pattern that takes exponential time to match. Other names are not drafted (the
+// default asks about them) and are listed, quoted, so that what the output prints is the name.
 // ponytail: names only. A read that is not named like one is left to the default (ask), and a
 // write named like a read is allowed by the draft: the draft is a starting point for a human.
 
@@ -61,7 +66,17 @@ export interface SuggestReport {
   argumentRules: string[];
   /** The tools that no rule matched: the policy's default decides them. */
   unmatched: string[];
+  /** Reads whose names are not plain (see PLAIN_NAME), so the draft leaves them to its default. */
+  notDrafted: string[];
   draft: { default: "ask"; rules: unknown[]; repeat?: unknown[] };
+}
+
+/** A name the draft may put in a glob list as it is: no "*" or "?", nothing a terminal would act on. */
+export const PLAIN_NAME = /^[A-Za-z0-9_.-]{1,128}$/;
+
+/** A tool's full name for the output: as it is when plain, else quoted as JSON, so control characters show as escapes. */
+export function shownName(server: string, tool: string): string {
+  return PLAIN_NAME.test(tool) ? `${server}__${tool}` : `${server}__${JSON.stringify(tool)}`;
 }
 
 /** True when the name reads like a read: a read verb first, and no word that changes something. */
@@ -78,9 +93,13 @@ export function suggest(policy: Policy, rawPolicy: unknown, candidates: readonly
   const raw = object(rawPolicy, "policy") as { rules?: unknown[]; repeat?: unknown[] };
   const ids = new Set(policy.rules.map((rule) => rule.id));
   const reads = new Map<string, string[]>();
+  const notDrafted: string[] = [];
   for (const c of candidates) {
     const read = c.http ? READ_METHODS.has(c.http.method) && !splitWords(c.tool).some((word) => CHANGE_WORDS.has(word)) : readsByName(c.tool);
-    if (read) reads.set(c.server, [...(reads.get(c.server) ?? []), c.tool]);
+    if (!read) continue;
+    // A name that is not plain would become a pattern in the draft's glob list: leave it to the default.
+    if (PLAIN_NAME.test(c.tool)) reads.set(c.server, [...(reads.get(c.server) ?? []), c.tool]);
+    else notDrafted.push(`${c.server}__${c.tool}`);
   }
   const added = [...reads].map(([server, tools]) => {
     let id = `suggested-reads-${server}`;
@@ -106,6 +125,7 @@ export function suggest(policy: Policy, rawPolicy: unknown, candidates: readonly
     suggestions,
     argumentRules: policy.rules.filter((rule) => !namesTools(rule) && rule.args.length > 0).map((rule) => rule.id),
     unmatched: suggestions.filter((s) => s.rule === "default").map((s) => `${s.server}__${s.tool}`),
+    notDrafted,
     draft,
   };
 }

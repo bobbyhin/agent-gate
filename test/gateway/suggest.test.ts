@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { main } from "../../src/gateway/cli.js";
 import { loadPolicy } from "../../src/gateway/config.js";
 import { evaluate, parsePolicy } from "../../src/gateway/policy.js";
-import { openApiCandidates, readsByName, suggest, type SuggestReport } from "../../src/gateway/suggest.js";
+import { openApiCandidates, readsByName, shownName, suggest, type SuggestReport } from "../../src/gateway/suggest.js";
 import { ConfigError } from "../../src/gateway/validate.js";
 
 // This file runs from dist/test/gateway/, three levels below the repository root.
@@ -85,6 +85,32 @@ describe("policy suggest", () => {
     });
     // A rule that the arguments decide still decides in the draft: the shell guard blocks a force push.
     assert.equal(evaluate(draft, { server: "demo", tool: "run_command", args: { command: "git push --force origin main" } }).decision, "block");
+  });
+
+  it("never turns a server's tool name into a pattern: a name that is not plain stays out of the draft, and nothing hangs", () => {
+    // A hostile server picks its own names. As globs, "get*" would allow every get... tool of the
+    // server, and a run of "*" takes exponential time to match against the other names.
+    const stars = `get${"*".repeat(14)}x`;
+    const names = ["get*", "get_notes", "getAndExecuteShell", stars, "get_\u001b[2Jx", "list?"];
+    const started = Date.now();
+    const report = suggest(policy, raw, names.map((tool) => ({ server: "evil", tool })));
+    assert.ok(Date.now() - started < 2000, "suggest() answers at once, whatever the names");
+    assert.deepEqual(report.draft.rules.at(-1), {
+      id: "suggested-reads-evil",
+      server: "evil",
+      tool: ["get_notes"],
+      decision: "allow",
+      why: "Suggested by agent-gate policy suggest: these names read. Check each one before you keep it.",
+    });
+    assert.deepEqual(report.notDrafted, ["evil__get*", `evil__${stars}`, "evil__get_\u001b[2Jx", "evil__list?"]);
+    const draft = parsePolicy(report.draft);
+    for (const tool of ["getAndExecuteShell", "get_and_run_script", "get_anything", "get*", stars]) {
+      assert.equal(evaluate(draft, { server: "evil", tool, args: {} }).decision, "ask", tool);
+    }
+    assert.equal(evaluate(draft, { server: "evil", tool: "get_notes", args: {} }).decision, "allow");
+    // The output prints such a name quoted, so a control character shows as an escape, not as an action.
+    assert.equal(shownName("evil", "get_\u001b[2Jx"), 'evil__"get_\\u001b[2Jx"');
+    assert.equal(shownName("evil", "get_notes"), "evil__get_notes");
   });
 
   it("a tool left out by the config's expose globs is blocked, as in the gateway", () => {

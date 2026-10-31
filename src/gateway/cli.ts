@@ -19,7 +19,7 @@ import { bindFiles } from "./files.js";
 import { startHttpGateway } from "./http-server.js";
 import { createGateway, SEPARATOR } from "./server.js";
 import { readStatus } from "./status.js";
-import { downstreamCandidates, openApiCandidates, suggest, type Candidate } from "./suggest.js";
+import { downstreamCandidates, openApiCandidates, shownName, suggest, type Candidate } from "./suggest.js";
 import { ToolPins } from "./tool-pins.js";
 import { ConfigError } from "./validate.js";
 
@@ -790,7 +790,8 @@ async function policySuggest(configFile: string, openapi: string | undefined, js
     candidates = openApiCandidates(spec);
   }
   const report = suggest(policy, raw, candidates, new Map(config.servers.flatMap((s) => (s.expose ? [[s.name, s.expose] as const] : []))));
-  for (const failure of failures) io.err(`agent-gate: ${failure}\n`);
+  // A server's error text is its own: printed on one line, without control characters.
+  for (const failure of failures) io.err(`agent-gate: ${cleanNote(failure, 500) ?? "(no message)"}\n`);
   if (json) {
     io.out(`${JSON.stringify({ ...report, failures }, null, 2)}\n`);
     return failures.length > 0 ? 1 : 0;
@@ -802,16 +803,21 @@ async function policySuggest(configFile: string, openapi: string | undefined, js
       s.dependsOn.length > 0 ? `arguments can change it (${s.dependsOn.join(", ")})` : "",
       s.hints ? `the server says: ${s.hints.join(", ")}` : "",
     ].filter(Boolean);
-    table.push([`${s.server}${SEPARATOR}${s.tool}`, s.decision, s.rule, s.draft, notes.join("; ")]);
+    table.push([shownName(s.server, s.tool), s.decision, s.rule, s.draft, notes.join("; ")]);
   }
   io.out(`${report.suggestions.length} tools, decided from their names by ${path.basename(config.policyFile)} ("now") and by the draft below ("draft"):\n`);
   printTable(table, io);
   if (report.argumentRules.length > 0) io.out(`\nRules that look only at arguments can change any of these when the arguments match: ${report.argumentRules.join(", ")}.\n`);
+  const unmatched = report.suggestions.filter((s) => s.rule === "default").map((s) => shownName(s.server, s.tool));
   io.out(
-    report.unmatched.length === 0
+    unmatched.length === 0
       ? "\nEvery tool matched a rule.\n"
-      : `\nNo rule names ${report.unmatched.length} of them, so the policy's default (${policy.default}) decides: ${report.unmatched.join(", ")}\n`,
+      : `\nNo rule names ${unmatched.length} of them, so the policy's default (${policy.default}) decides: ${unmatched.join(", ")}\n`,
   );
+  if (report.notDrafted.length > 0) {
+    const shown = report.suggestions.filter((s) => report.notDrafted.includes(`${s.server}${SEPARATOR}${s.tool}`)).map((s) => shownName(s.server, s.tool));
+    io.out(`\nNot in the draft's allow rule, although they read, because a name with characters other than letters, digits, "_", "." and "-" would be a pattern there; the draft asks about them: ${shown.join(", ")}\n`);
+  }
   // One rule per line, so the draft can be read and edited.
   const { rules, repeat } = report.draft;
   const draft = [

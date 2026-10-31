@@ -1095,7 +1095,12 @@ draft allows the nine whose names read and asks about the other two: `create_dir
 `directory_tree`, which reads but has no read verb. "The server says" is the server's own annotations
 (`readOnlyHint`, `destructiveHint`): shown, never used, because the server declares them about
 itself. The names decide, so a read without a read verb waits for a human, and a write named like a
-read would be allowed: the draft is where a human starts, not a finished policy. An OpenAPI document
+read would be allowed: the draft is where a human starts, not a finished policy. The names are the
+server's own text, so one goes into the draft's allow rule only when it is plain (letters, digits,
+`_`, `.` and `-`): a rule's tool list is a list of globs, and a tool named `get*` would allow every
+other `get...` tool of that server, while a long run of `*` takes exponential time to match. Such a
+name is printed quoted, so a control character in it shows as an escape, and left to the draft's
+default, which asks. An OpenAPI document
 must be JSON (convert a YAML one first). A server that cannot be started or listed is named, and the
 command exits 1.
 
@@ -2404,7 +2409,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 490 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 491 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
@@ -2412,7 +2417,7 @@ lists with each tool labelled with the decision it should get (`test/gateway/too
 app's tools, and the 48 tools of a real Gitea MCP server, recorded), and the
 README's table of example rules checked against `policy.example.json`; a red team of 20 ways to get a
 denied delete done another way (other tools, shell commands, the path written another way); `policy
-suggest` (reads by name, an OpenAPI document, the draft it prints, a server that cannot start); ten
+suggest` (reads by name, an OpenAPI document, the draft it prints, a server that cannot start, tool names that would be patterns); ten
 trajectory fixtures replayed step by step through a running gateway; which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
@@ -2519,7 +2524,7 @@ an evaluation set of whole runs, each replayed and checked step by step. It chec
 not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 490/490 MCP gateway tests, 323/323 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 491/491 MCP gateway tests, 323/323 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for each of the two demo pages, 2/2 for the load
 test), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
