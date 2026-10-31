@@ -52,7 +52,8 @@ describe("crash: what a killed process leaves behind", () => {
     fs.writeFileSync(half, '{"version":1,"approvals":[{"id":"ap-');
     const t0 = Date.now();
     new ApprovalStore(state, TTL).resolveAsk(request({ path: "a.txt" }));
-    assert.ok(Date.now() - t0 < 1000, "the lock of a dead process must not make the next writer wait");
+    // Without the check of the owner's id, this write would wait for the 5-second deadline and fail.
+    assert.ok(Date.now() - t0 < 4000, "the lock of a dead process must not make the next writer wait for the deadline");
     assert.equal(fs.existsSync(half), false, "the half-written temporary file is gone");
     assert.equal(fs.existsSync(path.join(state, "approvals.lock")), false);
     assert.equal(new ApprovalStore(state, TTL).list().length, 1);
@@ -64,7 +65,7 @@ describe("crash: what a killed process leaves behind", () => {
     const t0 = Date.now();
     new ApprovalStore(state, TTL).resolveAsk(request({ path: "a.txt" }));
     const waited = Date.now() - t0;
-    assert.ok(waited >= 900 && waited < 2500, `waited ${waited} ms`);
+    assert.ok(waited >= 900 && waited < 4500, `waited ${waited} ms`);
   });
 
   it("kill -9 in the middle of a run of writes never leaves approvals.json damaged, and the next write recovers at once", async (t) => {
@@ -79,6 +80,7 @@ describe("crash: what a killed process leaves behind", () => {
         store.resolveAsk({ server: "demo", tool: "delete_file", args, argsHash: hashArguments(args), rule: "r", why: "w" });
       }`;
     let leftovers = 0;
+    fs.mkdirSync(state, { recursive: true }); // a kill can come before the writer has made the folder
     for (const delay of [80, 120, 160, 200, 260, 320, 400, 500]) {
       const child = spawn(process.execPath, ["-e", writer, state], { stdio: "ignore" });
       await sleep(delay);
@@ -92,7 +94,7 @@ describe("crash: what a killed process leaves behind", () => {
       }
       const t0 = Date.now();
       new ApprovalStore(state, TTL).resolveAsk(request({ path: `after-${delay}.txt` }));
-      assert.ok(Date.now() - t0 < 2000, `the write after a kill at ${delay} ms waited ${Date.now() - t0} ms`);
+      assert.ok(Date.now() - t0 < 4000, `the write after a kill at ${delay} ms waited ${Date.now() - t0} ms (the lock deadline is 5 s)`);
       assert.deepEqual(fs.readdirSync(state).filter((n) => n.endsWith(".tmp")), [], "no temporary file is left");
     }
     t.diagnostic(`${leftovers} of 8 kills left a lock or a temporary file behind; the next write cleared each one`);

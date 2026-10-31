@@ -148,38 +148,58 @@ describe("bin/claude-pretooluse-hook.js (child process)", () => {
 
 // ── v5.2: linear time ──────────────────────────────────────────────────────────────────────────
 // v5.1 took minutes on some long commands under the 100k limit (see docs/red-team.md, "Slow inputs").
-// Each input below is timed once. The bound is 500 ms, or 3 s for the two slowest: at least 6 times
-// what v5.2 needs on a laptop, and less than half of what v5.1 needed (1.1 s for the fastest of these,
-// more than 120 s for six of them). So a slow CI machine passes, and a return of the old behaviour fails.
+// Two checks, so that a busy machine does not fail the test and a slow algorithm cannot pass it:
+//   1. the input finishes within the bound: 500 ms, or 3 s for the two slowest, at least 6 times what
+//      v5.2 needs on an idle laptop and less than half of what v5.1 needed (1.1 s to over 120 s);
+//   2. if not (other work can slow any run down 10 times), time must grow in step with length: the
+//      input at a quarter of its length and in full, 5 runs each, interleaved, fastest of each. Linear
+//      code takes about 4 times as long for 4 times the length, quadratic code about 16 times; v5.1 grew
+//      12 to 112 times on these inputs. The bound is 12.
+// The two exponential inputs are short and take under a millisecond; for them the bound is the check,
+// and the test's timeout turns a return of the exponential reading into a failure instead of a hang.
 describe("v5.2 linear time: crafted long commands finish quickly", () => {
-  const timed = (command) => {
+  const timeOf = (command) => {
     const t0 = process.hrtime.bigint();
-    const result = analyze(command);
-    return { result, ms: Number(process.hrtime.bigint() - t0) / 1e6 };
+    analyze(command);
+    return Number(process.hrtime.bigint() - t0) / 1e6;
   };
+  const GROWTH_BOUND = 12;
   const SLOW_INPUTS = [
-    // [name, command, expected action, bound in ms, v5.1 time]
-    ["'|bash' x 19,000", "|bash".repeat(19000), "pass", 500, "152 s"],
-    ["'$(' x 40,000", "$(".repeat(40000), "pass", 500, "299 s"],
-    ["99,000 backticks", "`".repeat(99000), "pass", 500, "304 s"],
-    ["99,000 newlines", "\n".repeat(99000), "pass", 500, "over 120 s"],
-    ["'sudo ' x 200", "sudo ".repeat(200) + "x", "ask", 500, "over 120 s: 2^n readings"],
-    ["'git -c' x 200", "git " + "-c ".repeat(200) + "x", "ask", 500, "over 120 s: 2^n readings"],
-    ["'sudo\\n' x 19,000", "sudo\n".repeat(19000), "ask", 3000, "over 120 s"],
-    ["'`sudo ' x 16,000", "`sudo ".repeat(16000), "ask", 3000, "over 120 s"],
-    ["rm -rrrr… (99,996 letters)", "rm -" + "r".repeat(99996), "ask", 500, "20 s"],
-    ["'<<a ' x 24,000 (heredocs with no end line)", "<<a ".repeat(24000), "pass", 500, "2.6 s"],
-    ["'cat <<EOF\\n' x 9,000", "cat <<EOF\n".repeat(9000), "pass", 500, "1.1 s"],
-    ["'git ' x 24,000", "git ".repeat(24000), "pass", 500, "2.6 s"],
-    ["echo with 50k characters, then | bash x 7,000", "echo " + "a ".repeat(25000) + "| bash ".repeat(7000), "pass", 500, "34 s"],
-    ["python3 -c with a 4,700-line script", 'python3 -c "' + "print(1); x = f(a)\\n".repeat(4700) + '"', "pass", 500, "64 s"],
+    // [name, build(k) = the command at k times its length, expected action, bound in ms, v5.1 time]
+    ["'|bash' x 19,000", (k) => "|bash".repeat(19000 * k), "pass", 500, "152 s"],
+    ["'$(' x 40,000", (k) => "$(".repeat(40000 * k), "pass", 500, "299 s"],
+    ["99,000 backticks", (k) => "`".repeat(99000 * k), "pass", 500, "304 s"],
+    ["99,000 newlines", (k) => "\n".repeat(99000 * k), "pass", 500, "over 120 s"],
+    ["'sudo ' x 200", null, "ask", 500, "over 120 s: 2^n readings"],
+    ["'git -c' x 200", null, "ask", 500, "over 120 s: 2^n readings"],
+    ["'sudo\\n' x 19,000", (k) => "sudo\n".repeat(19000 * k), "ask", 3000, "over 120 s"],
+    ["'`sudo ' x 16,000", (k) => "`sudo ".repeat(16000 * k), "ask", 3000, "over 120 s"],
+    ["rm -rrrr… (99,996 letters)", (k) => "rm -" + "r".repeat(99996 * k), "ask", 500, "20 s"],
+    ["'<<a ' x 24,000 (heredocs with no end line)", (k) => "<<a ".repeat(24000 * k), "pass", 500, "2.6 s"],
+    ["'cat <<EOF\\n' x 9,000", (k) => "cat <<EOF\n".repeat(9000 * k), "pass", 500, "1.1 s"],
+    ["'git ' x 24,000", (k) => "git ".repeat(24000 * k), "pass", 500, "2.6 s"],
+    ["echo with 50k characters, then | bash x 7,000", (k) => "echo " + "a ".repeat(25000 * k) + "| bash ".repeat(7000 * k), "pass", 500, "34 s"],
+    ["python3 -c with a 4,700-line script", (k) => 'python3 -c "' + "print(1); x = f(a)\\n".repeat(4700 * k) + '"', "pass", 500, "64 s"],
   ];
-  for (const [name, command, expected, bound, before] of SLOW_INPUTS) {
-    it(`${name}: ${expected} within ${bound} ms (v5.1: ${before})`, () => {
+  const EXPONENTIAL = { "'sudo ' x 200": "sudo ".repeat(200) + "x", "'git -c' x 200": "git " + "-c ".repeat(200) + "x" };
+  for (const [name, build, expected, bound, before] of SLOW_INPUTS) {
+    it(`${name}: ${expected}, linear in its length (v5.1: ${before})`, { timeout: 120000 }, (t) => {
+      const command = build ? build(1) : EXPONENTIAL[name];
       assert.ok(command.length <= 100000, `${name} must stay under the 100k limit (${command.length})`);
-      const { result, ms } = timed(command);
-      assert.equal(result.action, expected);
-      assert.ok(ms < bound, `${name} took ${ms.toFixed(0)} ms (bound ${bound} ms)`);
+      const t0 = process.hrtime.bigint();
+      assert.equal(analyze(command).action, expected);
+      const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+      if (ms < bound) return;
+      assert.ok(build, `${name} took ${ms.toFixed(0)} ms (bound ${bound} ms)`);
+      const quarter = build(0.25);
+      let small = Infinity;
+      let full = Infinity;
+      for (let i = 0; i < 5; i++) {
+        small = Math.min(small, timeOf(quarter));
+        full = Math.min(full, timeOf(command));
+      }
+      t.diagnostic(`${ms.toFixed(0)} ms is over ${bound} ms (a busy machine?); 4 times the length took ${(full / small).toFixed(1)} times as long`);
+      assert.ok(full / small < GROWTH_BOUND, `${name}: ${ms.toFixed(0)} ms (bound ${bound} ms), and 4 times the length took ${(full / small).toFixed(1)} times as long (linear is about 4)`);
     });
   }
 
