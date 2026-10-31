@@ -1,8 +1,44 @@
 # agent-gate
 
-A guard that sits between an AI coding agent and the shell. Before the agent runs a shell
-command, agent-gate reads the command and decides one of four things: **pass**, **warn**,
-**ask** a human, or **block**.
+Guards between an AI agent and its actions: a shell command guard, an MCP gateway that holds risky
+tool calls for a human, and an LLM gateway with routing, budget caps and a leak guard. Each one
+decides in code, before the action runs.
+
+```mermaid
+flowchart LR
+  agent["AI agent"]
+  subgraph gate["agent-gate"]
+    hook["shell guard: a Claude Code hook"]
+    mcp["MCP gateway: policy, approvals, audit log"]
+    llm["LLM gateway: routing, budgets, leak guard"]
+  end
+  shell["shell"]
+  tools["MCP servers: local over stdio, remote over Streamable HTTP"]
+  providers["model providers"]
+  localModel["a local model, for calls with personal data"]
+  files[("state files: approval queue, audit log, pinned tools, budget ledger, usage log")]
+  human["a human, at the CLI"]
+  cloud["Cloud Run can run the LLM gateway as a container (Terraform in deploy/)"]
+  agent -- "shell command" --> hook --> shell
+  agent -- "tool call: stdio, or HTTP with a key per agent" --> mcp --> tools
+  agent -- "chat completion, with a gateway key" --> llm --> providers
+  llm -.->|"divert"| localModel
+  mcp --- files
+  llm --- files
+  human -- "approve or deny, out of band" --> files
+  llm -.- cloud
+```
+
+A call held for a human waits in the approval queue, a state file kept out of the agent's reach, and a
+human answers it at the CLI; the agent learns the answer when it makes the same call again. Two pages
+replay real runs step by step, with the lines of code that decided each step:
+[the MCP gateway](docs/demo/index.html) and [the LLM gateway](docs/demo/llm.html) (static files: open
+them in a browser).
+
+The shell guard came first. Before the agent runs a shell command, it reads the command and decides
+one of four things: **pass**, **warn**, **ask** a human, or **block**. The MCP gateway brings the same
+decisions to tool calls; the LLM gateway decides which model serves a call, whether the caller's
+budget allows it, and what may leave the machine.
 
 This repository has five parts:
 
@@ -16,8 +52,9 @@ This repository has five parts:
 - `src/gateway/`: an MCP gateway (TypeScript) that brings the same four decisions to MCP tool
   calls and holds risky calls until a human approves them. See [MCP gateway](#mcp-gateway).
 - `src/llm/`: an LLM gateway (TypeScript) in front of model providers, with routing, daily and
-  monthly budget caps per key, and a leak guard for secrets in prompts. See
-  [LLM gateway](#llm-gateway).
+  monthly budget caps per key, stop rules for loops, a leak guard for secrets and personal numbers in
+  prompts and answers (streamed ones too), and a way to keep calls with personal data on a local
+  model. See [LLM gateway](#llm-gateway).
 
 The LLM gateway also comes as a container image, with Kubernetes manifests and Terraform for Google
 Cloud Run. See [Deploy](#deploy).
@@ -1399,6 +1436,12 @@ dependencies.
 Status: new. It was built and tested against fake upstream servers on the local machine; no real
 provider has been called through it yet.
 
+To see it work without installing anything, open [docs/demo/llm.html](docs/demo/llm.html) in a
+browser: a replay of a real run with the example config against the fake provider (a call routed to
+the cheap model, a secret stopped before it leaves, a call refused by its budget, a streamed answer held
+until it has been read, `usage --verify`), with the code that decided each step. `npm run demo:llm`
+records it again; `test/demo-llm.test.js` fails when a line it quotes no longer matches the code.
+
 ### Set it up
 
 ```
@@ -2377,7 +2420,7 @@ not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
 stopped (351/351 shell guard tests, 458/458 MCP gateway tests, 308/308 LLM gateway tests, 7/7 for
-the change-review example, 6/6 for the status-mcp example, 5/5 for the demo page), on Node 22. CI runs `npm ci` and `npm test` on
+the change-review example, 6/6 for the status-mcp example, 5/5 for each of the two demo pages), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
 
@@ -2463,6 +2506,7 @@ examples/status-mcp/gateway.config.json       the gateway in front of it
 examples/status-mcp/sample-status/            the status folder it reads by default
 test/status-mcp.test.js                       the example through a running gateway
 test/demo.test.js                             the demo page: quoted code still matches, its log verifies, it steps through
+test/demo-llm.test.js                         the LLM demo page: quoted code still matches, its dollars add up, no key on it
 test/SANITIZED.md                             what was changed in the cases before publication
 test/HELDOUT.md                               where the held-out cases come from, and their score
 docs/red-team.md                              the case categories, with counts
@@ -2470,6 +2514,8 @@ docs/exploring-the-codebase.md                trace a decision: one line to repr
 docs/related-work.md                          Docker MCP Gateway, LiteLLM, and how other tools bind a human's yes
 docs/demo/index.html                          a step-through replay of a real gateway run, with the code that decided
 scripts/demo-transcript.js                    npm run demo: records that run and writes it into the page
+docs/demo/llm.html                            the same for the LLM gateway: routing, a blocked secret, a budget refusal, a stream
+scripts/demo-llm-transcript.js                npm run demo:llm: records that run and writes it into the page
 docs/adr/0001-non-blocking-approvals.md       why "ask" answers with an error instead of waiting
 docs/adr/0002-reserve-then-settle-budgets.md  why budgets reserve an estimate and settle after
 docs/adr/0003-single-writer-state.md          why the gateway runs as one replica, and the way to more

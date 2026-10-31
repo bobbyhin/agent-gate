@@ -21,7 +21,8 @@
     "build": "tsc -p tsconfig.json",
     "test": "tsc -p tsconfig.json && node --test test/*.test.js dist/test/gateway/*.test.js dist/test/llm/*.test.js",
     "redteam": "node scripts/redteam.js",
-    "demo": "node scripts/demo-transcript.js"
+    "demo": "node scripts/demo-transcript.js",
+    "demo:llm": "node scripts/demo-llm-transcript.js"
   },
   "engines": {
     "node": ">=20"

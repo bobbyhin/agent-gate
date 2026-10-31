@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-gate LLM gateway step by step</title>
+<meta name="description" content="A replay of a real run of agent-gate's LLM gateway: a call routed to a cheaper model, a secret blocked before it leaves, a call refused by its budget, a streamed answer held until it is read, and the books checked, with the code that decided each step.">
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1b; --muted: #5f5f5a; --line: #e2e1dc;
+    --code-bg: #f1f0ec; --accent: #2457c5;
+    --allow: #1f7a45; --allow-bg: #e6f4ec; --ask: #8a5a00; --ask-bg: #fbf1dc; --block: #b0302a; --block-bg: #fbe8e6;
+    --human: #5a3fa0; --human-bg: #efeafa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #151514; --panel: #1e1e1c; --ink: #ecebe6; --muted: #a3a29b; --line: #34332f;
+      --code-bg: #262624; --accent: #8fb0ff;
+      --allow: #7fd3a1; --allow-bg: #1d3327; --ask: #f0c36b; --ask-bg: #3a2f17; --block: #ff9b93; --block-bg: #3d1f1d;
+      --human: #c7b5ff; --human-bg: #2b2540;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #151514; --panel: #1e1e1c; --ink: #ecebe6; --muted: #a3a29b; --line: #34332f;
+    --code-bg: #262624; --accent: #8fb0ff;
+    --allow: #7fd3a1; --allow-bg: #1d3327; --ask: #f0c36b; --ask-bg: #3a2f17; --block: #ff9b93; --block-bg: #3d1f1d;
+    --human: #c7b5ff; --human-bg: #2b2540;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header, main, footer { max-width: 1180px; margin: 0 auto; padding: 0 16px; }
+  header { padding-top: 24px; }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; }
+  header p { margin: 0; color: var(--muted); max-width: 72ch; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 16px 0; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 8px; padding: 6px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .count { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: 4px; }
+  .dots { display: flex; gap: 4px; margin-left: auto; }
+  .dots span { width: 9px; height: 9px; border-radius: 50%; background: var(--line); }
+  .dots span.on { background: var(--accent); }
+  main { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 16px; padding-bottom: 24px; }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } .dots { display: none; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+  section h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; }
+  .step { border-left: 3px solid var(--line); padding: 2px 0 2px 12px; margin: 0 0 14px; opacity: 0.55; }
+  .step.current { opacity: 1; border-left-color: var(--accent); }
+  .step h3 { font-size: 0.98rem; margin: 0 0 4px; }
+  .note { margin: 4px 0 8px; color: var(--muted); }
+  .who { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+  .bubble { border-radius: 8px; padding: 8px 10px; margin: 4px 0; overflow-x: auto; }
+  .bubble.agent { background: var(--code-bg); }
+  .bubble.human { background: var(--human-bg); }
+  .bubble.human .who { color: var(--human); }
+  .bubble.human pre { white-space: pre; }
+  .bubble.allow { background: var(--allow-bg); } .bubble.allow .who { color: var(--allow); }
+  .bubble.ask { background: var(--ask-bg); } .bubble.ask .who { color: var(--ask); }
+  .bubble.block { background: var(--block-bg); } .bubble.block .who { color: var(--block); }
+  .reached { font-size: 0.8rem; color: var(--muted); margin: 2px 0 0; }
+  pre, code { font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; }
+  .code pre { white-space: pre; overflow: auto; max-height: 300px; background: var(--code-bg); padding: 10px; border-radius: 8px; }
+  .code .file { font-size: 0.8rem; color: var(--muted); margin-top: 10px; }
+  .code .file:first-of-type { margin-top: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  td { font-variant-numeric: tabular-nums; }
+  .usage pre { white-space: pre-wrap; word-break: break-all; background: var(--code-bg); padding: 8px; border-radius: 8px; margin: 6px 0; }
+  .empty { color: var(--muted); font-style: italic; }
+  footer { color: var(--muted); font-size: 0.85rem; padding-bottom: 32px; }
+  footer a, header a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>agent-gate's LLM gateway, step by step</h1>
+  <p>A replay of a real run of the LLM gateway with the example config, in front of the fake provider from the tests:
+    a call routed to a cheaper model, a secret stopped before it leaves, a call refused by its budget, a streamed answer
+    held until it has been read, and the books checked at the end. Each step shows what the agent sent and got back,
+    whether anything reached the provider, what was written down, and the code that decided.
+    The MCP gateway has <a href="index.html">a replay of its own</a>.</p>
+  <div class="bar">
+    <button id="back" type="button" aria-label="Previous step">Back</button>
+    <button id="next" type="button" class="primary" aria-label="Next step">Next</button>
+    <button id="restart" type="button">Start over</button>
+    <span class="count" id="count" aria-live="polite"></span>
+    <span class="dots" id="dots" aria-hidden="true"></span>
+  </div>
+</header>
+<main>
+  <section aria-label="What happened">
+    <h2>What happened</h2>
+    <div id="story"></div>
+  </section>
+  <div style="display: grid; gap: 16px; min-width: 0; align-content: start;">
+    <section aria-label="State">
+      <h2>Written to usage.jsonl in this step</h2>
+      <div id="usage" class="usage"></div>
+      <h2 style="margin-top: 14px;">The ledger after this step</h2>
+      <div id="ledger"></div>
+    </section>
+    <section class="code" aria-label="The code that decided">
+      <h2>The code that decided this step</h2>
+      <div id="code"></div>
+    </section>
+  </div>
+</main>
+<footer>
+  <p>Nothing runs in your browser: this page replays a run recorded by <code>scripts/demo-llm-transcript.js</code>,
+    which also copies the code excerpts from the source; <code>test/demo-llm.test.js</code> fails when one of them no
+    longer matches the code. Ids, times and trace ids are from that run; no prompt text is ever written to the usage log.
+    Keys: <kbd>←</kbd> and <kbd>→</kbd>.</p>
+</footer>
+<script type="application/json" id="transcript">
+{
+ "about": "A real run of agent-gate's LLM gateway with llm-gateway.config.example.json (upstreams pointed at the fake provider from the tests) and llm-policy.example.json, written by scripts/demo-llm-transcript.js. Times, ids and trace ids are from that run.",
+ "steps": [
+  {
+   "actor": "agent",
+   "request": {
+    "headers": {
+     "authorization": "Bearer $GATEWAY_KEY",
+     "x-agent-task": "classify"
+    },
+    "body": {
+     "model": "large",
+     "messages": [
+      {
+       "role": "user",
+       "content": "Label this ticket: printer on fire"
+      }
+     ],
+     "max_tokens": 20
+    }
+   },
+   "response": {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json",
+     "x-agent-gate-route": "classify-is-cheap",
+     "x-agent-gate-upstream": "cheap",
+     "x-agent-gate-cost-usd": "0.00000885"
+    },
+    "body": "{\"id\":\"chatcmpl-fake-1\",\"object\":\"chat.completion\",\"created\":1760400000,\"model\":\"fake-small-1\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"fake answer 1 from fake-small-1\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":23,\"completion_tokens\":9,\"total_tokens\":32}}"
+   },
+   "upstreamCalls": 1,
+   "usage": [
+    {
+     "ts": "2026-10-31T09:14:31.281Z",
+     "id": "req-70501bb1",
+     "key": "demo-agent",
+     "task": "classify",
+     "route": "classify-is-cheap",
+     "upstream": "cheap",
+     "model": "fake-small-1",
+     "status": 200,
+     "inputTokens": 23,
+     "outputTokens": 9,
+     "costUsd": 0.00000885,
+     "usage": "upstream",
+     "attempts": 1,
+     "fallback": false,
+     "latencyMs": 18,
+     "traceId": "5d15dd1170177c7b4c66d5dad1454ffe",
+     "spanId": "34bc7138d4a5e0de"
+    }
+   ],
+   "ledger": [
+    {
+     "key": "demo-agent",
+     "day": "2026-10-31",
+     "dayUsd": 0.00000885,
+     "dailyUsd": 0.01,
+     "inFlight": 0
+    }
+   ],
+   "log": [
+    "200 req-70501bb1 key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 18ms"
+   ],
+   "title": "A classification goes to the cheap model",
+   "note": "The agent asks for the large model, but its x-agent-task header says classify, and the first route that applies sends that to the cheap upstream. The cost is reserved first and settled from the provider's own token count.",
+   "code": [
+    "route",
+    "settle"
+   ]
+  },
+  {
+   "actor": "agent",
+   "request": {
+    "headers": {
+     "authorization": "Bearer $GATEWAY_KEY"
+    },
+    "body": {
+     "model": "small",
+     "messages": [
+      {
+       "role": "user",
+       "content": "Why does ssh reject this key? -----BEGIN OPENSSH PRIVATE KEY----- (rest cut)"
+      }
+     ]
+    }
+   },
+   "response": {
+    "status": 400,
+    "headers": {
+     "content-type": "application/json"
+    },
+    "body": "{\"error\":{\"message\":\"agent-gate: the messages contain text that looks like a secret (rule private-key), so the request was not sent. Remove it and try again; if it was a real secret, rotate it.\",\"type\":\"invalid_request_error\",\"param\":\"messages\",\"code\":\"secret_detected\",\"rule\":\"private-key\"}}"
+   },
+   "upstreamCalls": 0,
+   "usage": [
+    {
+     "ts": "2026-10-31T09:14:31.283Z",
+     "id": "req-4e858fae",
+     "key": "demo-agent",
+     "route": "cheap-models",
+     "upstream": "cheap",
+     "model": "fake-small-1",
+     "status": 400,
+     "error": "secret_detected",
+     "rule": "private-key",
+     "side": "prompt",
+     "inputTokens": 0,
+     "outputTokens": 0,
+     "costUsd": 0,
+     "latencyMs": 0,
+     "traceId": "7b5747b4f7866a56f5c1b42e5736b59c",
+     "spanId": "2c75a9dbfd4bc1ac"
+    }
+   ],
+   "ledger": [
+    {
+     "key": "demo-agent",
+     "day": "2026-10-31",
+     "dayUsd": 0.00000885,
+     "dailyUsd": 0.01,
+     "inFlight": 0
+    }
+   ],
+   "log": [
+    "400 req-4e858fae key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0 error=secret_detected 0ms"
+   ],
+   "title": "A secret in the prompt never leaves",
+   "note": "The leak guard reads the messages before anything is sent. A block rule matched, so the request is refused with the rule's name, never the text it matched, and the provider gets nothing.",
+   "code": [
+    "leakStep",
+    "guardMessages"
+   ]
+  },
+  {
+   "actor": "agent",
+   "request": {
+    "headers": {
+     "authorization": "Bearer $GATEWAY_KEY"
+    },
+    "body": {
+     "model": "large",
+     "messages": [
+      {
+       "role": "user",
+       "content": "Write the release notes for version 2."
+      }
+     ],
+     "max_tokens": 1000
+    }
+   },
+   "response": {
+    "status": 429,
+    "headers": {
+     "retry-after": "53129",
+     "content-type": "application/json"
+    },
+    "body": "{\"error\":{\"message\":\"agent-gate: this call could cost up to $0.01503, and key \\\"demo-agent\\\" has $0.00999115 left of its daily budget of $0.01 ($0.00000885 spent, $0 held by calls in flight). Try again later, or with a lower max_tokens.\",\"type\":\"insufficient_quota\",\"param\":null,\"code\":\"budget_exceeded\",\"cap\":\"daily\"}}"
+   },
+   "upstreamCalls": 0,
+   "usage": [
+    {
+     "ts": "2026-10-31T09:14:31.292Z",
+     "id": "req-caad4c54",
+     "key": "demo-agent",
+     "route": "strong-models",
+     "upstream": "strong",
+     "model": "fake-large-1",
+     "status": 429,
+     "error": "budget_exceeded",
+     "rule": "daily",
+     "inputTokens": 0,
+     "outputTokens": 0,
+     "costUsd": 0,
+     "latencyMs": 6,
+     "traceId": "a27bdbb40af58b305645b0ac938b9fcc",
+     "spanId": "8d1d16c099116a07"
+    }
+   ],
+   "ledger": [
+    {
+     "key": "demo-agent",
+     "day": "2026-10-31",
+     "dayUsd": 0.00000885,
+     "dailyUsd": 0.01,
+     "inFlight": 0
+    }
+   ],
+   "log": [
+    "429 req-caad4c54 key=demo-agent route=strong-models upstream=strong model=fake-large-1 cost=$0 error=budget_exceeded 6ms"
+   ],
+   "title": "A call that could pass the budget is refused before it is sent",
+   "note": "This call could produce 1000 output tokens at $15 per million, more than the key's whole daily cap of $0.01. The gateway reserves the most a call can cost before sending it, so it refuses now, with the numbers and a Retry-After, and nothing is charged.",
+   "code": [
+    "estimate",
+    "capCheck"
+   ]
+  },
+  {
+   "actor": "agent",
+   "request": {
+    "headers": {
+     "authorization": "Bearer $GATEWAY_KEY"
+    },
+    "body": {
+     "model": "small",
+     "messages": [
+      {
+       "role": "user",
+       "content": "Say hello in five words."
+      }
+     ],
+     "stream": true
+    }
+   },
+   "response": {
+    "status": 200,
+    "headers": {
+     "content-type": "text/event-stream; charset=utf-8",
+     "x-agent-gate-route": "cheap-models",
+     "x-agent-gate-upstream": "cheap",
+     "x-agent-gate-cost-usd": "0.00000855"
+    },
+    "body": "data: {\"id\":\"chatcmpl-fake-2\",\"object\":\"chat.completion.chunk\",\"created\":1760400000,\"model\":\"fake-small-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-fake-2\",\"object\":\"chat.completion.chunk\",\"created\":1760400000,\"model\":\"fake-small-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"fake answer 2\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-fake-2\",\"object\":\"chat.completion.chunk\",\"created\":1760400000,\"model\":\"fake-small-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" from fake-small-1\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-fake-2\",\"object\":\"chat.completion.chunk\",\"created\":1760400000,\"model\":\"fake-small-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+   },
+   "upstreamCalls": 1,
+   "usage": [
+    {
+     "ts": "2026-10-31T09:14:31.304Z",
+     "id": "req-ad4d4803",
+     "key": "demo-agent",
+     "route": "cheap-models",
+     "upstream": "cheap",
+     "model": "fake-small-1",
+     "status": 200,
+     "inputTokens": 21,
+     "outputTokens": 9,
+     "costUsd": 0.00000855,
+     "usage": "upstream",
+     "attempts": 1,
+     "fallback": false,
+     "stream": true,
+     "streamEnd": "done",
+     "latencyMs": 10,
+     "traceId": "b5494e2ab7036cb9c9a09ac50217008f",
+     "spanId": "dee57124aa485de2"
+    }
+   ],
+   "ledger": [
+    {
+     "key": "demo-agent",
+     "day": "2026-10-31",
+     "dayUsd": 0.0000174,
+     "dailyUsd": 0.01,
+     "inFlight": 0
+    }
+   ],
+   "log": [
+    "200 req-ad4d4803 key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0.00000855 stream=done 10ms"
+   ],
+   "title": "A streamed answer is held until it has been read",
+   "note": "With stream: true the client gets server-sent events. The gateway asks the provider for a usage chunk, reads the whole stream, runs the leak guard over the answer, and only then sends the events, with the cost settled from the provider's count.",
+   "code": [
+    "streamHeld",
+    "settle"
+   ]
+  },
+  {
+   "actor": "human",
+   "command": "$ agent-gate usage --verify",
+   "answer": "key         day         ledger      usage log   month    ledger      usage log   result\ndemo-agent  2026-10-31  $0.0000174  $0.0000174  2026-10  $0.0000174  $0.0000174  ok",
+   "exitCode": 0,
+   "upstreamCalls": 0,
+   "usage": [],
+   "ledger": [
+    {
+     "key": "demo-agent",
+     "day": "2026-10-31",
+     "dayUsd": 0.0000174,
+     "dailyUsd": 0.01,
+     "inFlight": 0
+    }
+   ],
+   "log": [],
+   "title": "The books balance",
+   "note": "usage --verify adds up the usage log and compares it with the ledger, per key, for today and this month: the two refused calls cost nothing, and the two that ran were booked once each.",
+   "code": []
+  }
+ ],
+ "excerpts": {
+  "route": {
+   "id": "route",
+   "file": "src/llm/routing.ts",
+   "line": 39,
+   "text": "export function route(config: Pick\u003cLlmConfig, \"routes\" | \"upstreams\">, request: RouteRequest): Route | undefined {\n  for (const rule of config.routes) {\n    if (rule.model && !rule.model(request.model)) continue;\n    if (rule.task && (request.task === undefined || !rule.task(request.task))) continue;\n    const primary = resolve(config.upstreams, rule.use, request.model);\n    if (!primary) continue;\n    const fallback = rule.fallback && resolve(config.upstreams, rule.fallback, primary.alias);\n    return fallback ? { rule: rule.id, primary, fallback } : { rule: rule.id, primary };\n  }\n  return undefined;\n}\n"
+  },
+  "leakStep": {
+   "id": "leakStep",
+   "file": "src/llm/server.ts",
+   "line": 274,
+   "text": "    // 4. Leak guard. The error names the rule, never the text it matched.\n    const guarded = guardMessages(guardPolicy, messages);\n    if (guarded.action === \"block\") {\n      return finish(\n        400,\n        apiError(\n          \"secret_detected\",\n          `agent-gate: the messages contain text that looks like a secret (rule ${guarded.rule}), so the request was not sent. Remove it and try again; if it was a real secret, rotate it.`,\n          { param: \"messages\", rule: guarded.rule },\n        ),\n        { error: \"secret_detected\", rule: guarded.rule, side: \"prompt\" },\n      );\n    }"
+  },
+  "guardMessages": {
+   "id": "guardMessages",
+   "file": "src/llm/leak-guard.ts",
+   "line": 78,
+   "text": "export function guardMessages(policy: LeakPolicy, messages: readonly unknown[]): GuardResult {\n  const texts = messageTexts(messages);\n  for (const rule of policy.rules) {\n    if (rule.action === \"block\" && texts.some((t) => rule.pattern.test(t))) return { action: \"block\", rule: rule.id };\n  }"
+  },
+  "estimate": {
+   "id": "estimate",
+   "file": "src/llm/server.ts",
+   "line": 316,
+   "text": "    // 5. Reserve the most this call can cost on any upstream it may reach.\n    const promptChars = messageTexts(outgoing).reduce((sum, t) => sum + t.length, 0) + (body.tools === undefined ? 0 : JSON.stringify(body.tools).length);\n    const inputTokens = estimateInputTokens(promptChars);\n    const outputLimit = (body.max_completion_tokens ?? body.max_tokens ?? config.defaultMaxTokens) as number;\n    const outputTokens = outputLimit * ((body.n ?? 1) as number);\n    const estimate = Math.max(...targets.map((t) => costUsd(t.upstream.pricePerMTok, inputTokens, outputTokens)));"
+  },
+  "capCheck": {
+   "id": "capCheck",
+   "file": "src/llm/budget.ts",
+   "line": 177,
+   "text": "      const checks: Array\u003c[Cap, number, number, number]> = [\n        [\"daily\", key.dailyUsd, entry.dayUsd, nextUtcDay(now)],\n        [\"monthly\", key.monthlyUsd, entry.monthUsd, nextUtcMonth(now)],\n      ];\n      for (const [cap, capUsd, spentUsd, periodEnd] of checks) {\n        if (roundUsd(spentUsd + reservedUsd + usd) > capUsd) {\n          // If the settled spend alone leaves no room, only the next period helps.\n          const retryAfterSeconds = roundUsd(spentUsd + usd) > capUsd ? Math.max(1, Math.ceil((periodEnd - now) / 1000)) : 1;\n          return { ok: false, cap, capUsd, spentUsd, reservedUsd, requestedUsd: usd, retryAfterSeconds };\n        }\n      }"
+  },
+  "streamHeld": {
+   "id": "streamHeld",
+   "file": "src/llm/server.ts",
+   "line": 630,
+   "text": "    // Buffered: nothing has been sent yet.\n    if (end === \"client_closed\") return record(499, { ...spent, error: \"client_closed\" });\n    if (failed) return finish(failed.status, failed.body, { ...spent, error: failed.code });\n    const scanned = guardResponse(policy, assembler.answer());\n    if (scanned.action === \"block\") {\n      return finish(\n        502,\n        apiError(\n          \"response_blocked\",\n          `agent-gate: the model's answer contains text that looks like a secret (rule ${scanned.rule}), so it was not passed on. The call was paid for; if the secret is real, rotate it.`,\n          { type: \"api_error\", rule: scanned.rule },\n        ),\n        { ...spent, error: \"response_blocked\", rule: scanned.rule, side: \"response\" },\n      );"
+  },
+  "settle": {
+   "id": "settle",
+   "file": "src/llm/server.ts",
+   "line": 602,
+   "text": "    const used = readUsage({ usage: assembler.usage });\n    const cost = used ? costUsd(target.upstream.pricePerMTok, used.input, used.output) : reservation.usd;\n    let settled: SettleOutcome = \"booked\";\n    try {\n      settled = ledger.settle(keyName, reservation.id, cost);\n    } catch (err) {\n      log(`could not settle ${reservation.id} for key \"${keyName}\" ($${formatUsd(cost)}): ${errorText(err)}; its reservation stays until it expires`);\n    }\n    if (settled !== \"booked\") log(`settled ${reservation.id} for key \"${keyName}\" ($${formatUsd(cost)}) as ${settled}`);"
+  }
+ }
+}
+</script>
+<script>
+(function () {
+  "use strict";
+  var data = JSON.parse(document.getElementById("transcript").textContent);
+  var steps = data.steps || [];
+  var at = 0;
+  var story = document.getElementById("story");
+  var code = document.getElementById("code");
+  var ledger = document.getElementById("ledger");
+  var usage = document.getElementById("usage");
+
+  function el(tag, attrs, children) {
+    var node = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) { node.setAttribute(k, attrs[k]); });
+    (children || []).forEach(function (c) { node.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
+    return node;
+  }
+  function kindOf(status) {
+    if (status < 300) return "allow";
+    return status === 429 ? "ask" : "block";
+  }
+  function headerLines(headers) {
+    return Object.keys(headers || {}).map(function (h) { return h + ": " + headers[h]; }).join("\n");
+  }
+  function stepNode(step, i) {
+    var current = i === at;
+    var node = el("div", { class: "step" + (current ? " current" : "") }, [el("h3", {}, [(i + 1) + ". " + step.title])]);
+    if (current) node.appendChild(el("p", { class: "note" }, [step.note]));
+    if (step.actor === "agent") {
+      var req = "POST /v1/chat/completions\n" + headerLines(step.request.headers) + "\n\n" + JSON.stringify(step.request.body);
+      node.appendChild(el("div", { class: "bubble agent" }, [el("span", { class: "who" }, ["agent sends"]), el("pre", {}, [req])]));
+      var k = kindOf(step.response.status);
+      var label = k === "allow" ? "agent-gate answers " + step.response.status : "agent-gate refuses: " + step.response.status;
+      var res = headerLines(step.response.headers) + "\n\n" + step.response.body.replace(/\s+$/, "");
+      node.appendChild(el("div", { class: "bubble " + k }, [el("span", { class: "who" }, [label]), el("pre", {}, [res])]));
+      node.appendChild(el("p", { class: "reached" }, [step.upstreamCalls > 0 ? "reached the provider: yes (" + step.upstreamCalls + " request)" : "reached the provider: no"]));
+    } else {
+      node.appendChild(el("div", { class: "bubble human" }, [el("span", { class: "who" }, ["human, at a terminal"]), el("pre", {}, [step.command + "\n" + step.answer])]));
+    }
+    return node;
+  }
+  function money(usd) { return "$" + String(usd); }
+  function render() {
+    story.textContent = "";
+    for (var i = 0; i <= at && i < steps.length; i++) story.appendChild(stepNode(steps[i], i));
+    var step = steps[at];
+    code.textContent = "";
+    var ids = (step && step.code) || [];
+    if (ids.length === 0) code.appendChild(el("p", { class: "empty" }, ["No decision in code here: this step is a person checking the record."]));
+    ids.forEach(function (id) {
+      var x = data.excerpts[id];
+      if (!x) return;
+      code.appendChild(el("div", { class: "file" }, [x.file + ", line " + x.line]));
+      code.appendChild(el("pre", {}, [x.text]));
+    });
+    ledger.textContent = "";
+    var rows = (step && step.ledger) || [];
+    if (rows.length === 0) ledger.appendChild(el("p", { class: "empty" }, ["empty"]));
+    else {
+      var table = el("table", {}, [el("tr", {}, [el("th", {}, ["key"]), el("th", {}, ["spent today (UTC)"]), el("th", {}, ["daily cap"]), el("th", {}, ["calls in flight"])])]);
+      rows.forEach(function (r) {
+        table.appendChild(el("tr", {}, [el("td", {}, [el("code", {}, [r.key])]), el("td", {}, [money(r.dayUsd)]), el("td", {}, [money(r.dailyUsd)]), el("td", {}, [String(r.inFlight)])]));
+      });
+      ledger.appendChild(table);
+    }
+    usage.textContent = "";
+    var lines = (step && step.usage) || [];
+    if (lines.length === 0) usage.appendChild(el("p", { class: "empty" }, ["nothing"]));
+    lines.forEach(function (l) { usage.appendChild(el("pre", {}, [JSON.stringify(l)])); });
+    document.getElementById("count").textContent = steps.length ? "step " + (at + 1) + " of " + steps.length : "no transcript";
+    document.getElementById("back").disabled = at === 0;
+    document.getElementById("next").disabled = at >= steps.length - 1;
+    var dots = document.getElementById("dots");
+    dots.textContent = "";
+    steps.forEach(function (_, i) { dots.appendChild(el("span", { class: i <= at ? "on" : "" })); });
+    var current = story.querySelector(".step.current");
+    if (current && current.scrollIntoView && window.innerWidth > 860) current.scrollIntoView({ block: "nearest" });
+  }
+  function go(n) { at = Math.max(0, Math.min(steps.length - 1, n)); render(); }
+  document.getElementById("next").addEventListener("click", function () { go(at + 1); });
+  document.getElementById("back").addEventListener("click", function () { go(at - 1); });
+  document.getElementById("restart").addEventListener("click", function () { go(0); });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowRight") go(at + 1);
+    if (e.key === "ArrowLeft") go(at - 1);
+  });
+  render();
+})();
+</script>
+</body>
+</html>
