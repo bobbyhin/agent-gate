@@ -610,6 +610,17 @@ Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.con
   when the process id written in it is no longer running (after a second if no id was written yet),
   and its temporary file is removed.
 
+**Why the state is exact.** `approvals.json`, the LLM gateway's `ledger.json` and `audit.jsonl` hold
+exact things: the SHA-256 of a call's canonical arguments, ids, amounts in dollars. Whether a call
+runs, is refused, or may spend money is decided by looking those up exactly: this arguments' hash, this
+approval id, this key's spend. Nothing here finds things by meaning: there is no embedding search and
+no "a similar call was approved last week". Similarity is the right tool for finding a document and
+the wrong one when the answer must be exact, because a call that is close to an approved one is
+another call (`delete notes/old.md` is close to `delete notes/`). If a classifier is ever added (see
+[Three lanes](#three-lanes)), it advises: what it says can feed a rule, and the rule, in code, decides.
+[ADR 0008](docs/adr/0008-second-reviewer-escalate-only.md) holds a second reviewer to that: it may make
+a decision stricter, never looser.
+
 Why the gateway answers with an error and lets the agent retry, instead of holding the call open
 until a human answers: [docs/adr/0001-non-blocking-approvals.md](docs/adr/0001-non-blocking-approvals.md).
 
@@ -1114,8 +1125,8 @@ read from `$GATEWAY_KEY`. This is the example config:
 - Optional, with their defaults: `listen` (`127.0.0.1`, port 8787), `defaultMaxTokens` (1024),
   `timeoutMs` per attempt (60000), `retries` per upstream (1, at most 3), `backoffMs` (250),
   `rateLimitWaitMs` (2000: the longest wait after a 429, see [Routing](#routing)), `maxBodyBytes`
-  (1 MiB), `scanResponses` (true, see [Leak guard](#leak-guard)) and `metrics` (off, see
-  [Metrics](#metrics)).
+  (1 MiB), `scanResponses` (true, see [Leak guard](#leak-guard)), `sendTraceparent` (true, see
+  [Tracing](#tracing)) and `metrics` (off, see [Metrics](#metrics)).
 
 To make a gateway key and the hash for the config:
 
@@ -1224,6 +1235,9 @@ an estimate of its cost; after the call, it settles the reservation with the rea
 Days and months are UTC. Because calls in flight hold their reservations, concurrent calls cannot
 pass a cap together; the price is that an estimate can refuse a call that would have fit. Why it
 works this way: [docs/adr/0002-reserve-then-settle-budgets.md](docs/adr/0002-reserve-then-settle-budgets.md).
+The ledger is exact for the same reason as the approval queue (see Why the state is exact under
+[Approval rules](#approval-rules)): a cap is checked against dollars booked, never against a guess
+from similar calls.
 
 In the run above, the demo key has a daily cap of $0.01. A call to `large` with
 `"max_tokens": 1000` could cost up to 1000 output tokens at $15 per million, so it is refused even
@@ -1398,7 +1412,10 @@ usage line can be joined with the agent's own trace and with the provider's logs
   not fit the format, the call starts a new trace.
 - The gateway makes a span id of its own for each call (`spanId`) and sends the upstream a
   `traceparent` with the trace id and that span, keeping the client's sampled flag (a new trace is
-  sent as not sampled). The answer carries the trace id in `x-agent-gate-trace-id`.
+  sent as not sampled). The answer carries the trace id in `x-agent-gate-trace-id`. An upstream
+  that refuses unknown headers would refuse that one; `"sendTraceparent": false` keeps the trace in
+  the usage log and sends nothing (LiteLLM documents such failures with some providers and makes
+  forwarding opt-in; see [docs/related-work.md](docs/related-work.md)).
 - `x-agent-session` and `x-run-id` are written as `session` and `runId` when they are plain ids
   (letters, digits, `.`, `_`, `:` and `-`, up to 128 characters). A header that does not fit is left
   out, and `contextDropped` names it.
@@ -1614,6 +1631,47 @@ structure, not a parallel speed-up. Shell lines are read from `*.sh` files, Dock
 single-line `run:` steps of GitHub workflows and Makefile recipes. `test/change-review.test.js` covers
 each route, the rework limit and the queued request.
 
+## Failure behavior
+
+Every check fails closed: when a part of agent-gate cannot do its job, the call does not happen. A
+guard that lets calls through when something it relies on is down (a callback that fails open when
+the service it asks does not answer) turns an outage into a gap that nobody sees. The exceptions are
+records written after a call has already happened; those fail loudly instead, on stderr.
+
+| Part | What fails | What happens | Proved by |
+| --- | --- | --- | --- |
+| MCP shell rule | the analyzer throws | the older rules decide; what they do not block is asked about (the hook does the same, untested) | `test/gateway/failure.test.ts` |
+| MCP gateway | the audit log cannot be written | no call runs | `test/gateway/failure.test.ts` |
+| MCP gateway | `approvals.json` is damaged | a call that needs a human is not run and nothing is queued, because an empty queue would forget denials; calls the policy allows still run | `test/gateway/failure.test.ts`, `approvals.test.ts` |
+| MCP gateway | `tools.json` (the pins) is damaged | that server's tools are not listed, and calls to them are not run | `test/gateway/tools.test.ts` |
+| MCP gateway | `repeats.json` is damaged | calls under a loop limit are not run | `test/gateway/repeat.test.ts` |
+| MCP gateway | it is killed (`kill -9`) mid-run | the queue survives; an approved call runs once after a restart; no state file is left half written | `test/gateway/crash.test.ts` |
+| MCP gateway | a downstream server fails to start or refuses the gateway's header; the header's variable is not set | the gateway does not start, naming the server or the variable and never a header value | `test/gateway/http-downstream.test.ts` |
+| MCP gateway | a downstream server goes away later | its calls fail, and their result lines say so; the other servers' calls go on | `test/gateway/http-downstream.test.ts` |
+| LLM gateway | `ledger.json` is damaged | the call is refused before anything is sent upstream, because an empty ledger would hand every key its whole budget again | `test/llm/failure.test.ts`, `budget.test.ts` |
+| LLM gateway | a provider key's variable is not set | the gateway does not start, naming the variable | `test/llm/cli.test.ts` |
+| LLM gateway | the upstream answers 5xx or times out | retries, then the fallback; else 502 or 504, and nothing is charged | `test/llm/upstream.test.ts`, `e2e.test.ts` |
+| LLM gateway | the upstream answers 429 | the fallback at once; on the last upstream, one capped wait; else the gateway's own 429, and nothing is charged | `test/llm/upstream.test.ts`, `e2e.test.ts` |
+| After a call | an MCP result line, an LLM usage line or the ledger's settle cannot be written | the call has already run, so it is answered and the failure is reported on stderr; a settle that failed leaves its reservation until the reservation expires | `test/llm/failure.test.ts` (the usage line); the other two have no test |
+
+## Related work
+
+agent-gate is small next to the gateways it is usually compared with, and it does a different job:
+
+| | agent-gate | [Docker MCP Gateway](https://github.com/docker/mcp-gateway) | [LiteLLM](https://github.com/BerriAI/litellm) |
+| --- | --- | --- | --- |
+| Main job | decide each call: a policy, a human, a record | run MCP servers safely: containers, a catalog, signed images | one API in front of many model providers |
+| How calls are decided | a JSON policy on tool names and arguments; approvals bound to the arguments' hash, used once | interceptors: your own code before or after a call | budgets, rate limits, guardrails |
+| A human in the loop | an approval queue answered at a CLI | not described in its documentation | no approval queue in the proxy |
+| Record | an audit line before each call (no line, no call), hashes instead of values, `audit verify` | logs of tool names and argument shapes; OpenTelemetry | spend in its database; OpenTelemetry; audit logs in its Enterprise tier |
+
+What agent-gate does not do: run servers in containers, keep a catalog of servers, verify image
+signatures, or translate between provider APIs. Isolation belongs to whatever runs the servers, and
+Docker's gateway does that well; agent-gate decides which calls may run and who said yes, and keeps a
+record that can be checked. [docs/related-work.md](docs/related-work.md) has the details, with a source
+for every claim about the other tools, and compares how Claude Code, the OpenAI Agents SDK, Antigravity
+and agent-gate bind a human's yes.
+
 ## Deploy
 
 The LLM gateway ships as a container image, with three ways to run it.
@@ -1656,7 +1714,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 379 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 382 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); which
 files an approval is bound to (symlinks, `..`, relative paths) and what a changed file does to it (every case in `test/cases.json` and
 `test/cases-exfil.json` is also run through the gateway's shell rule), config and policy validation, the approval store with a clock the test
@@ -1671,7 +1729,7 @@ structured content, instruction-like text flagged, ordinary text left alone), `a
 the gateway wrote passes; each of ten hand edits fails it) and `audit trajectory` (the three modes,
 precision and recall), a remote server over Streamable HTTP on 127.0.0.1 (its header from the
 environment, a timeout, a 401 at startup whose quoted header value stays out of the log, a server
-that goes away), and an end-to-end test. That test starts `agent-gate serve`
+that goes away), what the gateway does when one of its own parts fails, and an end-to-end test. That test starts `agent-gate serve`
 against a fake downstream server, talks to it with a real MCP client, answers approvals with the
 real CLI, and checks what reached the downstream server and what was written to the audit log,
 including a call-result line, with the hash of what came back, for every forwarded call.
@@ -1682,7 +1740,7 @@ obeys, and the gateway blocks the call before it reaches the server. Another den
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 232 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 235 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file, a settle that comes
 twice or after its reservation expired, calls per minute and run caps); a leak-guard table
@@ -1704,7 +1762,8 @@ stop-rule suite runs loops against a live gateway: cut at the sixth call of a mi
 third call and before it passes its dollars, each cut in the usage log; the end-to-end run also
 checks that `usage --verify` finds the usage log and the ledger in agreement. A response-guard
 suite runs every block rule on a request and on an answer, and a live gateway against providers
-whose answers carry a secret (withheld, booked) or a key assignment (redacted). Six more check the
+whose answers carry a secret (withheld, booked) or a key assignment (redacted). A failure suite
+damages the ledger and the usage log and turns the upstream traceparent off. Six more check the
 gateway configs under `deploy/`: they load, they use the container's paths, the deployable one
 refuses the demo key, the Kubernetes copy of the leak-guard policy matches the example, and Cloud
 Run's request timeout is longer than the gateway's longest call. Every
@@ -1733,7 +1792,7 @@ audit log; the end-to-end test scores its own run that way. It checks which call
 the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 379/379 MCP gateway tests, 232/232 LLM gateway tests, 7/7 for
+stopped (351/351 shell guard tests, 382/382 MCP gateway tests, 235/235 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -1809,6 +1868,7 @@ test/SANITIZED.md                             what was changed in the cases befo
 test/HELDOUT.md                               where the held-out cases come from, and their score
 docs/red-team.md                              the case categories, with counts
 docs/exploring-the-codebase.md                trace a decision: one line to reproduce it per guard, and its code and tests
+docs/related-work.md                          Docker MCP Gateway, LiteLLM, and how other tools bind a human's yes
 docs/adr/0001-non-blocking-approvals.md       why "ask" answers with an error instead of waiting
 docs/adr/0002-reserve-then-settle-budgets.md  why budgets reserve an estimate and settle after
 docs/adr/0003-single-writer-state.md          why the gateway runs as one replica, and the way to more

@@ -292,7 +292,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         apiKey: (target) => apiKeys.get(target.upstream.name) as string,
         ...(options.fetch ? { fetch: options.fetch } : {}),
         log,
-        traceparent,
+        ...(config.sendTraceparent ? { traceparent } : {}),
       });
       if (!outcome.ok && outcome.failure === "rate_limited") {
         release();
