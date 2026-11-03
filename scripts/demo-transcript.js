@@ -20,10 +20,10 @@ const { StdioClientTransport } = require("@modelcontextprotocol/sdk/client/stdio
 
 /** The code the page shows: a file, the first line to find, and how many lines to quote from there. */
 const EXCERPTS = {
-  evaluate: ["src/gateway/policy.ts", "export function evaluate(policy: Policy, call: ToolCall): Verdict {", 30],
-  decide: ["src/gateway/server.ts", "    switch (verdict.decision) {", 34],
-  resolveCall: ["src/gateway/approvals.ts", "  resolveCall(request: AskRequest): CallOutcome {", 45],
-  approve: ["src/gateway/approvals.ts", "  approve(id: string, input: DecisionInput = {}): Approval {", 10],
+  evaluate: ["src/gateway/policy.ts", "export function evaluate(policy: Policy, call: ToolCall): Verdict {", 39],
+  decide: ["src/gateway/server.ts", "    switch (verdict.decision) {", 42],
+  resolveCall: ["src/gateway/approvals.ts", "  resolveCall(request: AskRequest): CallOutcome {", 63],
+  approve: ["src/gateway/approvals.ts", "  approve(id: string, input: DecisionInput = {}): Approval {", 12],
   auditWrite: ["src/gateway/audit.ts", '  write(entry: Omit<AuditEntry, "ts" | "args">, args: Record<string, unknown>, now = new Date()): AuditEntry {', 6],
   forcePush: ["src/command-guard.js", "force push", 1],
   secretUpload: ["src/command-guard.js", "/** Layer for uploads: block when a secret file is sent", 7],
@@ -99,9 +99,12 @@ async function main() {
     note: "The queue lives outside the chat: the human reads it at a terminal, with the rule, its reason and every argument.",
     code: [],
   });
-  human(`approvals approve ${id} --yes`, ["approvals", "approve", id, "--yes"], {
+  // A delete cannot be undone, so its rule is irreversible: the human gives back the request's action
+  // token, which the read-back and "approvals show" print and the agent never sees (ADR 0013).
+  const token = JSON.parse(cli("approvals", "show", id)).actionToken;
+  human(`approvals approve ${id} --token ${token}`, ["approvals", "approve", id, "--token", token], {
     title: "The human approves this one call",
-    note: "Without --yes, approve reads the call back and waits for the last 4 characters of the id. The decision, who made it and how it was confirmed are written to approvals.json and to the audit log.",
+    note: "A delete cannot be undone, so its rule is irreversible and --yes is not enough: the human gives back the request's action token, which the read-back (or approvals show) prints and the agent never sees. The decision, who made it and that it was confirmed with the token go to approvals.json and the audit log.",
     code: ["approve"],
   });
   await call("demo__delete_file", { path: "notes/old.md" }, {

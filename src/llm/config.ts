@@ -67,6 +67,19 @@ export interface GatewayKey {
   maxCallsPerMinute?: number;
   runMaxCalls?: number;
   runMaxUsd?: number;
+  /**
+   * A run's other exits (src/llm/budget.ts, "Loop exits"). Budget: seconds since the run's first call,
+   * tokens booked, and scored rounds (POST /v1/runs/score). Ship: a round whose score is at least
+   * runShipScore. Flat line: runFlatRounds scored rounds in a row that gain no more than runMinGain
+   * over the best score. With runMaxCalls and runMaxUsd, these are the key's hard caps: a client may
+   * lower them for its run (x-run-budget), never raise them.
+   */
+  runMaxSeconds?: number;
+  runMaxTokens?: number;
+  runMaxRounds?: number;
+  runShipScore?: number;
+  runFlatRounds?: number;
+  runMinGain?: number;
   /** The same request let through at most repeatMax times in any repeatWindowMs (src/llm/repeats.ts). */
   repeatMax?: number;
   repeatWindowMs?: number;
@@ -364,8 +377,14 @@ function globs(value: unknown, at: string): (candidate: string) => boolean {
 
 function parseKey(raw: unknown, at: string): GatewayKey {
   const k = object(raw, at);
-  onlyKeys(k, ["name", "sha256", "dailyUsd", "monthlyUsd", "maxCallsPerMinute", "runMaxCalls", "runMaxUsd", "repeatMax", "repeatWindowSeconds"], at);
+  onlyKeys(
+    k,
+    ["name", "sha256", "dailyUsd", "monthlyUsd", "maxCallsPerMinute", "runMaxCalls", "runMaxUsd", "runMaxSeconds", "runMaxTokens", "runMaxRounds", "runShipScore", "runFlatRounds", "runMinGain", "repeatMax", "repeatWindowSeconds"],
+    at,
+  );
   if ((k.repeatMax === undefined) !== (k.repeatWindowSeconds === undefined)) fail(`${at}: repeatMax and repeatWindowSeconds go together; set both or neither`);
+  if (k.runMinGain !== undefined && k.runFlatRounds === undefined) fail(`${at}.runMinGain only applies with runFlatRounds`);
+  if (k.runShipScore !== undefined && (typeof k.runShipScore !== "number" || !Number.isFinite(k.runShipScore))) fail(`${at}.runShipScore must be a number`);
   const name = text(k.name, `${at}.name`);
   if (!NAME.test(name)) fail(`${at}.name must be 1 to 64 letters, digits, ".", "_" or "-", starting with a letter or digit`);
   const sha256 = text(k.sha256, `${at}.sha256`);
@@ -378,6 +397,13 @@ function parseKey(raw: unknown, at: string): GatewayKey {
     ...(k.maxCallsPerMinute === undefined ? {} : { maxCallsPerMinute: integerIn(k.maxCallsPerMinute, `${at}.maxCallsPerMinute`, 1, 100_000) }),
     ...(k.runMaxCalls === undefined ? {} : { runMaxCalls: integerIn(k.runMaxCalls, `${at}.runMaxCalls`, 1, 1_000_000) }),
     ...(k.runMaxUsd === undefined ? {} : { runMaxUsd: positiveNumber(k.runMaxUsd, `${at}.runMaxUsd`) }),
+    // A run is remembered for a day after its last call (budget.ts), so a longer time limit would not hold.
+    ...(k.runMaxSeconds === undefined ? {} : { runMaxSeconds: integerIn(k.runMaxSeconds, `${at}.runMaxSeconds`, 1, 86_400) }),
+    ...(k.runMaxTokens === undefined ? {} : { runMaxTokens: integerIn(k.runMaxTokens, `${at}.runMaxTokens`, 1, 1_000_000_000) }),
+    ...(k.runMaxRounds === undefined ? {} : { runMaxRounds: integerIn(k.runMaxRounds, `${at}.runMaxRounds`, 1, 10_000) }),
+    ...(k.runShipScore === undefined ? {} : { runShipScore: k.runShipScore as number }),
+    ...(k.runFlatRounds === undefined ? {} : { runFlatRounds: integerIn(k.runFlatRounds, `${at}.runFlatRounds`, 1, 100) }),
+    ...(k.runMinGain === undefined ? {} : { runMinGain: nonNegativeNumber(k.runMinGain, `${at}.runMinGain`) }),
     ...(k.repeatMax === undefined
       ? {}
       : { repeatMax: integerIn(k.repeatMax, `${at}.repeatMax`, 1, 10_000), repeatWindowMs: integerIn(k.repeatWindowSeconds, `${at}.repeatWindowSeconds`, 1, 86_400) * 1000 }),

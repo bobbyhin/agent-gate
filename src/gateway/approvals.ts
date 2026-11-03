@@ -9,6 +9,12 @@
 // and a new request is queued. A call from an HTTP agent (serve --http) is bound to that agent too:
 // another agent's identical call does not use it, and a standing approval covers only the agent it
 // names (or, naming none, only calls that come with no agent: the stdio gateway).
+// A call that an "irreversible" rule asks about (ADR 0013) is held to more: its request carries a
+// nonce, the human's approval must carry the proof that its action token was given back
+// (src/gateway/action-tokens.ts), the gateway checks that proof and that the token was not spent before
+// (<stateDir>/spent-tokens.json, shared by every gateway process on the state directory), and no
+// standing approval answers it. When such a call cannot use an approval (used, expired, issued
+// for other arguments, without a valid proof, or replayed), the outcome says which, for the audit log.
 //
 // Everything lives in one JSON file, <stateDir>/approvals.json. The gateway and the CLI are
 // separate processes, so every change is a locked read-modify-write, and every write goes to a
@@ -17,6 +23,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import * as path from "node:path";
+import { isNonce, newNonce } from "./action-tokens.js";
 import { sameFiles, type BoundFile } from "./files.js";
 import { globToRegExp, type AlsoMatched } from "./policy.js";
 import { readIfExists, withLock, writeAtomic } from "./state-file.js";
@@ -62,12 +69,21 @@ export interface Approval {
    * approval (--note). One line, cleaned by cleanNote(). A denial's reason is shown to the agent.
    */
   decisionNote?: string;
-  /** How the human confirmed an approval: "typed" (the read-back, then the id's last characters) or "--yes". */
+  /**
+   * How the human confirmed an approval: "typed" (the read-back, then the id's last characters),
+   * "--yes", or "token" (the request's action token, for an irreversible call).
+   */
   confirmation?: Confirmation;
   usedAt?: string;
+  /** An "irreversible" rule asked (ADR 0013): the approval needs the request's action token. */
+  irreversible?: true;
+  /** The random id the action token is bound to, picked when the call asked. Not a secret: the key is. */
+  nonce?: string;
+  /** Written by the CLI when the action token checked out: an HMAC the gateway checks before the call runs. */
+  tokenProof?: string;
 }
 
-export type Confirmation = "typed" | "--yes";
+export type Confirmation = "typed" | "--yes" | "token";
 
 /** Who decided and what they wrote: the optional extras of approve() and deny(). */
 export interface DecisionInput {
@@ -75,6 +91,27 @@ export interface DecisionInput {
   note?: string;
   /** Approvals only: how the human confirmed. */
   confirmation?: Confirmation;
+  /** Approvals of an irreversible request: the proof that its action token was given back, made from the record as it is now. */
+  prove?: (approval: Approval) => string;
+}
+
+/** What the gateway checks before an irreversible call uses an approval: its proof, and whether its token let a call through before. */
+export interface TokenCheck {
+  verify(approval: Approval): boolean;
+  spent(nonce: string): boolean;
+}
+
+/**
+ * Why an irreversible call did not use an approval: "used" (it let this call through already),
+ * "expired", "wrong-arguments" (it was for this tool with other arguments), "invalid" (no valid proof:
+ * not confirmed with its token, or the record was changed) or "replayed" (its token let a call through
+ * before: an old copy of the record came back).
+ */
+export type TokenRefusalReason = "used" | "expired" | "wrong-arguments" | "invalid" | "replayed";
+
+export interface TokenRefusal {
+  reason: TokenRefusalReason;
+  approval: Approval;
 }
 
 export interface AskRequest {
@@ -96,6 +133,8 @@ export interface AskRequest {
   rewrittenBy?: string[];
   /** The HTTP agent making the call; absent for the stdio gateway. */
   agent?: string;
+  /** An "irreversible" rule asked (ADR 0013): how to check an approval's action token. No standing approval answers. */
+  irreversible?: TokenCheck;
 }
 
 /**
@@ -141,8 +180,9 @@ export type AskOutcome =
   /**
    * Waiting for a human. `created` is false when the agent repeated a call that is already queued.
    * `replaced` is an approval of this call that went stale because a file it names changed.
+   * `refused`, for an irreversible call, is an approval it could not use, and why.
    */
-  | { kind: "pending"; approval: Approval; created: boolean; replaced?: Approval }
+  | { kind: "pending"; approval: Approval; created: boolean; replaced?: Approval; refused?: TokenRefusal }
   /** A human said no to this exact call. */
   | { kind: "denied"; approval: Approval };
 
@@ -225,6 +265,12 @@ export function isLive(approval: Approval, now: number): boolean {
 
 export class ApprovalStore {
   readonly file: string;
+  /**
+   * The nonces of the action tokens that let a call through (ADR 0013), with the expiry of their
+   * approvals: <stateDir>/spent-tokens.json, changed under the same lock as approvals.json, so every
+   * gateway process on the state directory sees a token another one spent. Kept a week past expiry.
+   */
+  readonly spentFile: string;
   private readonly lockDir: string;
 
   /** `now` is injectable so that tests can move the clock past the TTL. */
@@ -234,6 +280,7 @@ export class ApprovalStore {
     private readonly now: () => number = Date.now,
   ) {
     this.file = path.join(dir, "approvals.json");
+    this.spentFile = path.join(dir, "spent-tokens.json");
     this.lockDir = path.join(dir, "approvals.lock");
   }
 
@@ -307,8 +354,9 @@ export class ApprovalStore {
 
   /**
    * Called by the gateway for every "ask" verdict. In this order: a denial of this exact call wins;
-   * then an approval of this exact call is used; then, if the rule allows it, a standing approval
-   * that covers the call; then the call waits for a human.
+   * then an approval of this exact call is used (for an irreversible call, only with a valid proof and a
+   * token not spent before); then, if the rule allows it and the call is not irreversible, a standing
+   * approval that covers the call; then the call waits for a human.
    */
   resolveCall(request: AskRequest): CallOutcome {
     return this.update((approvals, now, standing): CallOutcome => {
@@ -320,26 +368,39 @@ export class ApprovalStore {
       const denied = sameCall.find((a) => a.status === "denied");
       if (denied) return { kind: "denied", approval: denied };
       const approved = sameCall.find((a) => a.status === "approved");
+      const tokens = request.irreversible;
       let replaced: Approval | undefined;
-      if (approved && sameFiles(approved.files, request.files)) {
-        approved.status = "used";
-        approved.usedAt = new Date(now).toISOString();
-        return { kind: "approved", approval: approved };
-      }
-      if (approved) {
+      let refused: TokenRefusal | undefined;
+      if (approved && !sameFiles(approved.files, request.files)) {
         // A file changed or went away since the human saw the request: this yes was for other content.
         approved.status = "stale";
         replaced = approved;
+      } else if (approved && tokens && (!isNonce(approved.nonce) || !tokens.verify(approved))) {
+        // Not confirmed with its action token, or written by something other than the CLI.
+        approved.status = "stale";
+        refused = { reason: "invalid", approval: approved };
+      } else if (approved && tokens && (tokens.spent(approved.nonce as string) || this.spent(now).has(approved.nonce as string))) {
+        // Its token let a call through before, in this process or another: an old copy of the record, brought back.
+        approved.status = "used";
+        refused = { reason: "replayed", approval: approved };
+      } else if (approved) {
+        approved.status = "used";
+        approved.usedAt = new Date(now).toISOString();
+        // Spent before the call goes on, where every gateway process on this state directory looks.
+        if (tokens) this.spend(approved.nonce as string, approved.expiresAt, now);
+        return { kind: "approved", approval: approved };
       }
-      // A standing approval answers only when the rule allows it, and never over a denial (above).
-      const grant = request.standing ? standing.find((g) => covers(g, request, now)) : undefined;
+      // A standing approval answers only when the rule allows it, never an irreversible call, and never over a denial (above).
+      const grant = request.standing && !tokens ? standing.find((g) => covers(g, request, now)) : undefined;
       if (grant) {
         grant.used++;
         grant.lastUsedAt = new Date(now).toISOString();
         return { kind: "standing", grant };
       }
       const pending = sameCall.find((a) => a.status === "pending");
-      if (pending) return { kind: "pending", approval: pending, created: false, ...(replaced ? { replaced } : {}) };
+      if (pending) return { kind: "pending", approval: pending, created: false, ...(replaced ? { replaced } : {}), ...(refused ? { refused } : {}) };
+      // A new request for an irreversible call: say which approval this call tried and could not use, if any.
+      if (tokens && !refused) refused = unusable(approvals, request, now);
       const created: Approval = {
         id: newId("ap", approvals),
         server: request.server,
@@ -356,19 +417,23 @@ export class ApprovalStore {
         status: "pending",
         createdAt: new Date(now).toISOString(),
         expiresAt: new Date(now + (request.ttlMs ?? this.ttlMs)).toISOString(),
+        ...(tokens ? { irreversible: true as const, nonce: newNonce() } : {}),
       };
       approvals.push(created);
-      return { kind: "pending", approval: created, created: true, ...(replaced ? { replaced } : {}) };
+      return { kind: "pending", approval: created, created: true, ...(replaced ? { replaced } : {}), ...(refused ? { refused } : {}) };
     });
   }
 
+  /** An irreversible request is approved only with `input.prove`: the proof that its action token was given back (ADR 0013). */
   approve(id: string, input: DecisionInput = {}): Approval {
     return this.update((approvals, now) => {
       const approval = find(approvals, id);
       if (approval.status !== "pending") throw new ApprovalError(`${id} is ${approval.status}; only a pending request can be approved`);
       if (!isLive(approval, now)) throw new ApprovalError(`${id} expired at ${approval.expiresAt}; the agent has to make the call again to ask again`, { ...approval });
+      if (approval.irreversible && !input.prove) throw new ApprovalError(`${id} is for an irreversible action (rule ${approval.rule}): it needs its action token, not only a yes`);
       approval.status = "approved";
       applyDecision(approval, now, input);
+      if (approval.irreversible && input.prove) approval.tokenProof = input.prove(approval);
       return approval;
     });
   }
@@ -385,6 +450,39 @@ export class ApprovalStore {
       applyDecision(approval, now, input);
       return approval;
     });
+  }
+
+  /**
+   * The spent nonces (ADR 0013) and the expiry of their approvals, as of `now`. Called under the lock.
+   * Fail closed: a damaged file is an error, never an empty list, because an empty list would let a
+   * replayed approval through.
+   */
+  private spent(now: number): Map<string, string> {
+    const spent = new Map<string, string>();
+    const content = readIfExists(this.spentFile);
+    if (content === undefined) return spent;
+    let data: unknown;
+    try {
+      data = JSON.parse(content);
+    } catch (err) {
+      throw new Error(`${this.spentFile} is not valid JSON (${(err as Error).message}); fix or remove it`);
+    }
+    const file = data as { version?: unknown; spent?: unknown } | null;
+    if (typeof file !== "object" || file === null || file.version !== FILE_VERSION || typeof file.spent !== "object" || file.spent === null || Array.isArray(file.spent)) {
+      throw new Error(`${this.spentFile} is not a version ${FILE_VERSION} spent-tokens file; fix or remove it`);
+    }
+    // An approval cannot be used past its expiry, so its nonce need not be kept much longer.
+    for (const [nonce, until] of Object.entries(file.spent as Record<string, unknown>)) {
+      if (typeof until === "string" && Date.parse(until) + KEEP_AFTER_EXPIRY_MS > now) spent.set(nonce, until);
+    }
+    return spent;
+  }
+
+  /** Records a nonce as spent. Called under the lock, before the call is forwarded. */
+  private spend(nonce: string, expiresAt: string, now: number): void {
+    const spent = this.spent(now);
+    spent.set(nonce, expiresAt);
+    writeAtomic(this.spentFile, `${JSON.stringify({ version: FILE_VERSION, spent: Object.fromEntries(spent) }, null, 2)}\n`);
   }
 
   private read(): { approvals: Approval[]; standing: StandingApproval[] } {
@@ -420,6 +518,23 @@ export class ApprovalStore {
       return result;
     });
   }
+}
+
+/**
+ * For a new request of an irreversible call: the approval this call came back for and could not use,
+ * if there is one. Of this exact call: the latest used one that has not expired yet ("used": a token
+ * lets one call through) or the latest approved one that expired ("expired"). Else an approval of this
+ * tool, for this agent, with other arguments that is still good ("wrong-arguments": it covers only its
+ * own call).
+ */
+function unusable(approvals: readonly Approval[], request: AskRequest, now: number): TokenRefusal | undefined {
+  const mine = approvals.filter((a) => a.server === request.server && a.tool === request.tool && a.agent === request.agent);
+  const latest = (list: Approval[]): Approval | undefined => list.reduce<Approval | undefined>((best, a) => (!best || a.createdAt > best.createdAt ? a : best), undefined);
+  const same = mine.filter((a) => a.argsHash === request.argsHash);
+  const spent = latest(same.filter((a) => (a.status === "used" && now < Date.parse(a.expiresAt)) || (a.status === "approved" && !isLive(a, now))));
+  if (spent) return { reason: spent.status === "used" ? "used" : "expired", approval: spent };
+  const other = latest(mine.filter((a) => a.argsHash !== request.argsHash && a.status === "approved" && isLive(a, now)));
+  return other ? { reason: "wrong-arguments", approval: other } : undefined;
 }
 
 /** Does this standing approval cover the call now: same server and tool, live, uses left, every listed argument a matching string? */

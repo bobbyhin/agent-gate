@@ -28,7 +28,8 @@
       ],
       "decision": "ask",
       "why": "Red line 1: this tool looks like it spends or moves money, or creates a cloud resource that is billed.",
-      "ttlMinutes": 15
+      "ttlMinutes": 15,
+      "irreversible": true
     },
     {
       "id": "red-line-2-public",
@@ -41,33 +42,38 @@
         "new event", "new meeting", "create calendar entry", "add calendar entry"
       ],
       "decision": "ask",
-      "why": "Red line 2: this tool looks like it posts or sends something from a real account, or puts an event or an invitation in front of other people."
+      "why": "Red line 2: this tool looks like it posts or sends something from a real account, or puts an event or an invitation in front of other people.",
+      "irreversible": true
     },
     {
       "id": "red-line-2-events",
       "tool": { "regex": "^(?!(?=(?:[Gg]et|[Ll]ist|[Rr]ead|[Ss]earch)(?:[_.\\-]|[A-Z]|$))(?!.*(?:[_.\\-](?:and|or|then)(?:[_.\\-]|$)|[a-z](?:And|Or|Then)(?:[A-Z]|$))))" },
       "toolWords": ["schedule", "invite", "rsvp"],
       "decision": "ask",
-      "why": "Red line 2: this tool looks like it schedules something, or sends or answers an invitation, which puts an event in front of other people."
+      "why": "Red line 2: this tool looks like it schedules something, or sends or answers an invitation, which puts an event in front of other people.",
+      "irreversible": true
     },
     {
       "id": "red-line-3-ship",
       "toolWords": ["push", "merge", "deploy", "create pull request", "create pr", "create release"],
       "decision": "ask",
       "why": "Red line 3: this tool looks like a push, merge, pull request, release or deploy.",
-      "ttlMinutes": 30
+      "ttlMinutes": 30,
+      "irreversible": true
     },
     {
       "id": "red-line-4-delete",
       "toolWords": ["delete", "remove", "drop", "destroy", "overwrite", "purge", "erase", "wipe", "truncate"],
       "decision": "ask",
-      "why": "Red line 4: this tool looks like it deletes or overwrites data."
+      "why": "Red line 4: this tool looks like it deletes or overwrites data.",
+      "irreversible": true
     },
     {
       "id": "red-line-4-overwrite",
       "toolWords": ["write", "edit", "move", "rename", "replace", "patch", "update file", "put object"],
       "decision": "ask",
-      "why": "Red line 4: this tool looks like it writes over, edits, moves or renames a file or other data."
+      "why": "Red line 4: this tool looks like it writes over, edits, moves or renames a file or other data.",
+      "irreversible": true
     },
     {
       "id": "red-line-5-memory",

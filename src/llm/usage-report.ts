@@ -54,11 +54,12 @@ export function readUsageLog(file: string): UsageFile {
   return { lines, unreadable };
 }
 
-/** Sums the lines per value of `by`, most expensive group first. */
+/** Sums the call lines per value of `by`, most expensive group first. Event lines (a run's score reports) are not calls and cost nothing: left out. */
 export function groupUsage(lines: ReadonlyArray<Record<string, unknown>>, by: GroupField): UsageGroup[] {
   const groups = new Map<string, UsageGroup>();
   const number = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
   for (const line of lines) {
+    if (line.event !== undefined) continue;
     const value = line[by];
     const name = typeof value === "string" && value !== "" ? value : "(none)";
     let g = groups.get(name);

@@ -11,7 +11,8 @@
 //                     echo sent straight to the fake server; and again with the example's loop limit
 //                     taken out, because that limit costs a locked, fsync'd write of repeats.json per call
 //   MCP ask, approve, delete_file through the gateway: the call that queues a request; the approval, as
-//   retry             `approvals approve --yes` does it (the approval store and its audit line), without
+//   retry             `approvals approve --token` does it (the approval store, the action token's proof
+//                     and its audit line: a delete is irreversible in the example policy), without
 //                     starting a new process; the same call again, now forwarded. And the CLI itself,
 //                     started as a new process, as a human would run it
 //   LLM call          a chat completion through the LLM gateway (leak guard, reserve, settle, a usage
@@ -64,6 +65,7 @@ const callTool = (client, name, args) => client.request({ method: "tools/call", 
 async function mcp(tmp, calls) {
   const { ApprovalStore } = dist("src/gateway/approvals.js");
   const { AuditLog } = dist("src/gateway/audit.js");
+  const { ActionTokens } = dist("src/gateway/action-tokens.js");
   const policy = JSON.parse(fs.readFileSync(path.join(ROOT, "policy.example.json"), "utf8"));
   const withoutLimit = path.join(tmp, "policy-no-loop-limit.json");
   fs.writeFileSync(withoutLimit, JSON.stringify({ ...policy, repeat: [] }));
@@ -97,10 +99,12 @@ async function mcp(tmp, calls) {
     const allowGateway = await run(gateway, "demo__echo");
     const allowNoLimit = await run(noLimit, "demo__echo");
 
-    // Ask, approve, retry, one delete at a time, as the CLI's approve --yes would answer it.
+    // Ask, approve, retry, one delete at a time, as the CLI's approve --token would answer it: a delete
+    // is irreversible in the example policy, so its approval carries the action token's proof (ADR 0013).
     const stateDir = path.join(tmp, "example");
     const store = new ApprovalStore(stateDir, 24 * 60 * 60 * 1000);
     const audit = new AuditLog(path.join(stateDir, "audit.jsonl"));
+    const tokens = new ActionTokens(path.join(stateDir, "action-token.key"));
     const asks = [];
     const approves = [];
     const retries = [];
@@ -116,8 +120,8 @@ async function mcp(tmp, calls) {
       approves.push(
         (
           await timed(() => {
-            const a = store.approve(id, { by: "bench", confirmation: "--yes" });
-            audit.writeEvent({ approvalId: a.id, server: a.server, tool: a.tool, rule: a.rule, argsHash: a.argsHash, decision: "approved", waitMs: 0, decidedBy: "bench", confirmation: "--yes" });
+            const a = store.approve(id, { by: "bench", confirmation: "token", prove: (r) => tokens.proof(r) });
+            audit.writeEvent({ approvalId: a.id, server: a.server, tool: a.tool, rule: a.rule, argsHash: a.argsHash, decision: "approved", waitMs: 0, decidedBy: "bench", confirmation: "token" });
           })
         ).ms,
       );
@@ -130,8 +134,10 @@ async function mcp(tmp, calls) {
     for (let i = 0; i < 5; i++) {
       const ask = await callTool(gateway, "demo__delete_file", { path: `notes/cli-${i}.md` });
       const id = /Approval id: (ap-[0-9a-f]+)/.exec(ask.content[0].text)?.[1];
+      // The human reads the action token first (the read-back, or approvals show); only the approve is timed.
+      const token = JSON.parse(spawnSync(process.execPath, [BIN, "approvals", "show", id, "--config", exampleConfig], { encoding: "utf8" }).stdout).actionToken;
       const t0 = performance.now();
-      const out = spawnSync(process.execPath, [BIN, "approvals", "approve", id, "--yes", "--config", exampleConfig], { encoding: "utf8" });
+      const out = spawnSync(process.execPath, [BIN, "approvals", "approve", id, "--token", token, "--config", exampleConfig], { encoding: "utf8" });
       cli.push(performance.now() - t0);
       if (out.status !== 0) throw new Error(`approvals approve failed: ${out.stderr}`);
     }

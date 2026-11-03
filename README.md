@@ -50,9 +50,11 @@ This repository has five parts:
   73 uploads of local files (suite G, added with v5.1). A third, `test/cases-heldout.json`, holds
   163 commands from a later red team that the analyzer was never tuned on (`npm run redteam`).
 - `src/gateway/`: an MCP gateway (TypeScript) that brings the same four decisions to MCP tool
-  calls and holds risky calls until a human approves them. See [MCP gateway](#mcp-gateway).
+  calls and holds risky calls until a human approves them; a call that cannot be undone is confirmed
+  with an action token the agent never sees. See [MCP gateway](#mcp-gateway).
 - `src/llm/`: an LLM gateway (TypeScript) in front of model providers, with routing, daily and
-  monthly budget caps per key, stop rules for loops, a leak guard for secrets and personal numbers in
+  monthly budget caps per key, stop rules for loops (a run ships, runs out of budget, or stops on a
+  flat line, under caps the agent cannot raise), a leak guard for secrets and personal numbers in
   prompts and answers (streamed ones too), and a way to keep calls with personal data on a local
   model. See [LLM gateway](#llm-gateway).
 
@@ -483,6 +485,11 @@ example `{ "name": "files", "command": "npx", "args": ["-y", "@modelcontextproto
 - `approvalTtlHours` (default 24) is how long a request stays open, unless the rule that asked sets
   its own `ttlMinutes`. `auditArguments` (default
   `false`) is explained under [Audit log](#audit-log).
+- `actionTokenKeyFile` (optional, default `<stateDir>/action-token.key`) is the key behind the action
+  tokens that confirm irreversible calls. Put it where the agent's own tools can neither read nor
+  change it (another OS user's file, or a path its sandbox denies); the gateway and the human's CLI
+  need to read it. See
+  [Irreversible calls take an action token](#irreversible-calls-take-an-action-token).
 - `expose` (optional, per server), for example `["read_*", "search_*"]`: globs of the tool names the
   agent may see and call; the others are hidden, and a call to one is blocked. `pinTools` (default
   `true`) pins each tool's definition the first time it is listed. See [Tool lists](#tool-lists).
@@ -622,11 +629,11 @@ sequenceDiagram
     participant H as Human (CLI)
     participant D as Downstream server
     A->>G: demo__delete_file, path notes/old.md
-    G->>Q: record a pending request
-    G-->>A: error result: needs a human, approval id ap-f646780e
-    H->>Q: agent-gate approvals approve ap-f646780e
+    G->>Q: record a pending request and its nonce
+    G-->>A: error result: needs a human, approval id ap-20f450cb
+    H->>Q: approvals approve ap-20f450cb: read-back, types the action token
     A->>G: the same call again
-    G->>Q: find the approval, mark it used
+    G->>Q: check the approval's proof, mark it used, spend the token
     G->>D: delete_file, path notes/old.md
     D-->>G: result
     G-->>A: the result, unchanged
@@ -639,51 +646,76 @@ result (`isError: true`) with this text:
 ```
 agent-gate: this call needs a human decision, so it was not run.
 Reason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)
-Approval id: ap-f646780e (expires 2026-10-15T08:55:58.716Z)
-A human can approve it with: agent-gate approvals approve ap-f646780e
+Approval id: ap-20f450cb (expires 2026-11-04T10:03:40.315Z)
+A human can approve it with: agent-gate approvals approve ap-20f450cb
+This action cannot be undone: the human confirms it at the CLI with an action token that is never shown to you.
 Once it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.
 Do not try to get the same result another way.
 ```
 
-The human looks at the queue and approves:
+The human looks at the queue:
 
 ```
 $ agent-gate approvals list
-ap-f646780e  pending  demo__delete_file
+ap-20f450cb  pending  demo__delete_file
   why:     Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)
+  token:   irreversible: approve it with its action token (the read-back of "approvals approve ap-20f450cb" shows it)
   args:    {"path":"notes/old.md"}
-  created: 2026-10-14T08:55:58.716Z  expires: 2026-10-15T08:55:58.716Z
-
-$ agent-gate approvals approve ap-f646780e --yes
-approved ap-f646780e: demo__delete_file {"path":"notes/old.md"}
-The agent can now make this exact call once, until 2026-10-15T08:55:58.716Z.
+  created: 2026-11-03T10:03:40.315Z  expires: 2026-11-04T10:03:40.315Z
 ```
 
-Without `--yes`, `approve` first reads the call back, with every argument in full, and waits for
-the last four characters of the id. The human approves what they just read, not an id that looks
-like another one. From another run:
+A delete cannot be undone, so its rule is irreversible (see
+[Irreversible calls take an action token](#irreversible-calls-take-an-action-token)), and `--yes` is
+refused:
 
 ```
-$ agent-gate approvals approve ap-cf8aaecd
-Approve this call? ap-cf8aaecd
+$ agent-gate approvals approve ap-20f450cb --yes
+agent-gate: ap-20f450cb is for an irreversible action (rule red-line-4-delete), so --yes is not enough: confirm it with its action token, typed after the read-back or passed with --token
+```
+
+`approve` reads the call back, with every argument in full, prints the request's action token under
+it, and waits for the token. The human approves what they just read, and the agent, which was shown
+the id but never the token, cannot tell them what to type:
+
+```
+$ agent-gate approvals approve ap-20f450cb
+Approve this call? ap-20f450cb
   call:     demo__delete_file
   args:     {
               "path": "notes/old.md"
             }
   rule:     red-line-4-delete: Red line 4: this tool looks like it deletes or overwrites data.
-  expires:  2026-11-01T00:10:11.971Z (in 1d 00h)
-Type the last 4 characters of the id (aecd) to approve it, anything else to stop: aecd
+  expires:  2026-11-04T10:03:40.315Z (in 1d 00h)
+  token:    at-HVXW-4CA2
+This cannot be undone. Type the action token (at-HVXW-4CA2) to approve it, anything else to stop: at-HVXW-4CA2
 
-approved ap-cf8aaecd: demo__delete_file {"path":"notes/old.md"}
-The agent can now make this exact call once, until 2026-11-01T00:10:11.971Z.
+approved ap-20f450cb: demo__delete_file {"path":"notes/old.md"}
+The agent can now make this exact call once, until 2026-11-04T10:03:40.315Z.
 ```
 
-Anything else, or the end of the input, approves nothing (exit code 1). With `fileBinding`, the
-read-back also lists each bound file and says whether it still matches what the request saw.
+Anything else, or the end of the input, approves nothing (exit code 1). A wrong token, `--yes` alone,
+and a request that was approved already are refused with an audit line of their own
+(`"event": "action-token-refused"`, with the reason). `--token at-HVXW-4CA2` gives the token without the
+prompt, for a human who read it in `approvals show`. With `fileBinding`, the read-back also lists each
+bound file and says whether it still matches what the request saw. A request from a rule that is not
+irreversible is read back the same way and waits for the last four characters of its id instead;
+`--yes` skips that, for scripts.
 
 The agent makes the same call again. This time it is forwarded, and the agent gets the downstream
-server's result, `pretended to delete notes/old.md`. If it makes the call a third time, it gets a
-new approval id: the approval was used up.
+server's result, `pretended to delete notes/old.md`. If it makes the call a third time, it is not
+run, and it is told why:
+
+```
+agent-gate: the approval of this exact call (ap-20f450cb) was used already; an action token lets one call through, so this one was not run.
+Reason: Red line 4: this tool looks like it deletes or overwrites data. (rule red-line-4-delete)
+Approval id: ap-4bb9560f (expires 2026-11-04T10:03:40.753Z)
+A human can approve it with: agent-gate approvals approve ap-4bb9560f
+This action cannot be undone: the human confirms it at the CLI with an action token that is never shown to you.
+Once it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.
+Do not try to get the same result another way.
+```
+
+Its audit line says the same: `"tokenRefused": "used"`, `"refusedApprovalId": "ap-20f450cb"`.
 
 A denial can say why, so that the agent changes its plan instead of looking for another way
 round. From a second run:
@@ -708,10 +740,12 @@ The CLI commands are:
 ```
 agent-gate approvals list [--all] [--json]          waiting requests (--all: also decided, used, expired)
 agent-gate approvals show <id>                      one request in full, with all of its arguments
-agent-gate approvals approve <id> [--note <text>] [--yes]
+agent-gate approvals approve <id> [--note <text>] [--yes | --token <token>]
                                                     reads the call back and waits for the id's last
                                                     4 characters; --yes skips that, for scripts;
-                                                    a note is kept with the approval
+                                                    an irreversible request waits for its action
+                                                    token instead (--token gives it; --yes is
+                                                    refused); a note is kept with the approval
 agent-gate approvals deny <id> [--reason <text>]    the reason is shown to the agent
 agent-gate approvals stats [--json]                 per rule: approved, denied, expired, waiting, deny rate, median wait
 agent-gate approvals grant <server>__<tool> --uses <n> --hours <h> [--arg <name>=<glob>]... [--agent <name>] [--note <text>]
@@ -744,8 +778,10 @@ Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.con
 - A denied call stays denied. Repeating it gets "a human denied this exact call", and nothing new is
   queued until the denial expires. `deny` also takes back an approval that has not been used yet.
 - An approval is confirmed. `approve` reads the call back and the human types the end of its id;
-  `--yes` skips that. The record and the audit line keep which it was (`"confirmation": "typed"`
-  or `"--yes"`), so the log shows that a human read the call, not only that an id was approved.
+  `--yes` skips that. For a rule that says `"irreversible": true`, the human gives back the request's
+  action token instead, and `--yes` is refused. The record and the audit line keep which it was
+  (`"confirmation": "typed"`, `"--yes"` or `"token"`), so the log shows that a human read the call, not
+  only that an id was approved.
 - A decision can carry words: `deny --reason` and `approve --note`. They are stored in the record
   as `decisionNote`, with `decidedBy`, the OS user who ran the command, and cut to one line of at
   most 500 characters with control characters and bidirectional-text marks removed. A denial's
@@ -771,7 +807,8 @@ Each takes `--config <file>` (default: `$AGENT_GATE_CONFIG`, then `./gateway.con
   says `"standing": true` (in the example, `sql-write` and `browser-input`). A denial of the exact call
   still wins, and an exact approval is used first. Each call it lets through has its id in the audit
   line; `approvals grants` lists them, and `approvals deny sa-…` revokes one. Why and how:
-  [ADR 0006](docs/adr/0006-standing-approvals.md).
+  [ADR 0006](docs/adr/0006-standing-approvals.md). A standing approval never answers an irreversible
+  call, and `approvals grant` refuses a tool that an irreversible rule decides on every call.
 - **Bound to file content** (with `fileBinding` in the config). An argument that names a file is
   only its text: approving "upload `/srv/agent-work/report.pdf`" did not say which report. When a call
   needs a human, the gateway hashes (SHA-256) each file that a listed argument names and keeps the
@@ -832,6 +869,47 @@ flowchart LR
 The limit is the line itself: an agent with a shell or file tools of its own, outside the gateway, can
 cross it if the state directory or the CLI is within its reach. Keep them out of reach.
 [ADR 0005](docs/adr/0005-approvals-are-action-tokens.md) has the reasoning.
+
+### Irreversible calls take an action token
+
+For an action that cannot be undone, a record that says "approved" is not enough. A rule that says
+`"irreversible": true` (the example policy says it for red lines 1 to 4: money, posting and
+invitations, shipping, deleting and overwriting) holds its calls to more:
+
+- **The gateway issues a token for the request.** When the call asks, the request gets a random
+  nonce. The token is an HMAC-SHA256, under the gateway's key (`actionTokenKeyFile`), over the
+  request's id, server, tool, `argsHash`, agent, expiry and nonce, and with `fileBinding` the hashes of
+  the files it names. The human sees its short form, `at-` and 8
+  characters, in the read-back of `approvals approve` and in `approvals show`.
+- **The confirmation carries it.** The human types the token back, or passes `--token`. `--yes` alone,
+  the end of the id, another request's token (another call, other arguments, an older request for the
+  same call), a request that was approved already, an expired one, and a CLI that cannot read the key
+  are each refused, and each refusal is an `action-token-refused` line in the audit log with its
+  reason (`no-token`, `mismatch`, `used`, `expired`, `no-key`). So is a record that is not what it
+  shows, as when approvals.json was edited (`changed`): arguments that do not hash to its `argsHash`, a
+  nonce the gateway did not make, or a call that changed between the read-back and the approval.
+- **The agent never sees it.** Not in a tool result, not in the audit log. It is told that a human
+  confirms the call at the CLI with a token, so it does not ask for one in the chat.
+- **The gateway checks before the call runs.** The approval must carry the proof the CLI wrote, made
+  with the key for this exact call, and its token must not have let a call through before: a spent
+  nonce goes to `<stateDir>/spent-tokens.json`, which every gateway process on the state directory
+  reads, and each process also remembers its own and reads the audit log when it starts. Otherwise the call
+  waits for a new yes, and its audit line names the approval it could not use and why
+  (`"tokenRefused"`): `used`, `expired`, `wrong-arguments` (an approval of this tool for other
+  arguments), `invalid` (no valid proof, as when approvals.json was edited by hand) or `replayed` (an
+  old copy of an approval that already let its call through). A call that ran names its `nonce`, and
+  `audit verify` reports a nonce that let two calls through.
+- **No standing approval answers it.** A rule cannot be both `irreversible` and `standing`; when any
+  rule that matches a call and would ask says irreversible, the call is irreversible, whichever rule
+  decided; and `approvals grant` refuses a tool that an irreversible rule decides on every call.
+
+The key is the boundary. By default it is `<stateDir>/action-token.key`, as well protected as the
+approval queue. Moved where the agent's own tools can neither read nor change it (another OS user's
+file, or a path its sandbox denies), it means an agent can run the CLI, edit approvals.json and read
+every printed token, and still cannot say yes for its human: the CLI cannot check a token or write a
+proof without the key. A key file the agent can write is no better than one it can read: it could put
+in a key it knows. Why it works this way, and what it leaves open:
+[ADR 0013](docs/adr/0013-action-tokens-for-irreversible-calls.md).
 
 ### Tool lists
 
@@ -895,12 +973,12 @@ first match alone gives.
 | `no-self-approval` | a shell tool whose command answers or grants an approval, accepts a changed tool, or touches `.agent-gate` | block |
 | `protect-gateway-state` | any tool whose `path` argument points into `.agent-gate` | block |
 | `shell-guard` | a shell tool (`run_command`, `exec`, `bash` and others): its `command` goes through the shell guard | the guard's decision |
-| `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order; and cloud resources that start a bill: provision, create instance, create cluster, create corpus, create rag corpus, create bucket, enable api, enable service, scale up, create key | ask; a request lives 15 minutes |
-| `red-line-2-public` | post, publish, send, tweet, retweet, reply, comment, email, share; and what puts an event or an invitation in front of other people: create event, create calendar event, add event, add calendar event, update event, update calendar, move event, create meeting, update meeting, reschedule, respond to event, cancel event, cancel meeting, cancel appointment, cancel booking, accept invitation, accept invite, decline invitation, decline invite, create appointment, book appointment, book meeting, book room, create booking, add attendee, add attendees, new event, new meeting, create calendar entry, add calendar entry | ask |
-| `red-line-2-events` | schedule, invite, rsvp (verbs in `schedule_meeting` and `invite_friend`, nouns in `get_schedule` and `list_invite`): asked about unless the name is a lookup, which starts with get, list, read or search and does not join two actions with and, or, then | ask |
-| `red-line-3-ship` | push, merge, deploy, create pull request, create pr, create release | ask; a request lives 30 minutes |
-| `red-line-4-delete` | delete, remove, drop, destroy, overwrite, purge, erase, wipe, truncate | ask |
-| `red-line-4-overwrite` | write, edit, move, rename, replace, patch, update file, put object | ask |
+| `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order; and cloud resources that start a bill: provision, create instance, create cluster, create corpus, create rag corpus, create bucket, enable api, enable service, scale up, create key | ask; a request lives 15 minutes; irreversible (action token) |
+| `red-line-2-public` | post, publish, send, tweet, retweet, reply, comment, email, share; and what puts an event or an invitation in front of other people: create event, create calendar event, add event, add calendar event, update event, update calendar, move event, create meeting, update meeting, reschedule, respond to event, cancel event, cancel meeting, cancel appointment, cancel booking, accept invitation, accept invite, decline invitation, decline invite, create appointment, book appointment, book meeting, book room, create booking, add attendee, add attendees, new event, new meeting, create calendar entry, add calendar entry | ask; irreversible (action token) |
+| `red-line-2-events` | schedule, invite, rsvp (verbs in `schedule_meeting` and `invite_friend`, nouns in `get_schedule` and `list_invite`): asked about unless the name is a lookup, which starts with get, list, read or search and does not join two actions with and, or, then | ask; irreversible (action token) |
+| `red-line-3-ship` | push, merge, deploy, create pull request, create pr, create release | ask; a request lives 30 minutes; irreversible (action token) |
+| `red-line-4-delete` | delete, remove, drop, destroy, overwrite, purge, erase, wipe, truncate | ask; irreversible (action token) |
+| `red-line-4-overwrite` | write, edit, move, rename, replace, patch, update file, put object | ask; irreversible (action token) |
 | `red-line-5-memory` | remember, memorize, add memory, save memory, store memory, update memory, memory insert, memory append, memory replace, add observations, create entities, create relations, set preference, update profile | ask |
 | `sql-write` | an `sql` argument with a write keyword (insert, update, delete, merge, upsert, into, drop, alter, truncate, create, grant, revoke, copy, call, exec, execute) anywhere, or more text after a `;` | ask; standing approvals allowed |
 | `browser-input` | `browser_*`, `puppeteer_*` and `playwright_*` tools with click, type, press, fill, submit, select, drag, upload, evaluate, run code, dialog | ask; standing approvals allowed |
@@ -1188,18 +1266,18 @@ errors too, so a typo cannot silently turn a rule off.
 
 Every call appends one JSON line to `<stateDir>/audit.jsonl` (mode 0600) before anything is
 forwarded, and a forwarded call gets a second line when it comes back. These lines are from a run of
-the steps above (with its own approval id, `ap-044ff37e`), in which the client also sent a trace
+the steps above (with its own approval id, `ap-59fc99d3`), in which the client also sent a trace
 context and an agent path, plus a blocked shell call; the user name is changed, and the
 `tool-pinned` lines of the first listing (see [Tool lists](#tool-lists)) are left out:
 
 ```json
-{"ts":"2026-10-31T03:07:09.098Z","connId":"cn-6c5ce60f","seq":1,"server":"demo","tool":"echo","decision":"allow","rule":"default","why":"no rule matched; the policy default is allow","argsHash":"sha256:cbbbdcd27692344de5dbab3abcaba413fb0f45307267de7081401576df1cb176","forwarded":true}
-{"ts":"2026-10-31T03:07:09.101Z","event":"call-result","connId":"cn-6c5ce60f","seq":1,"server":"demo","tool":"echo","argsHash":"sha256:cbbbdcd27692344de5dbab3abcaba413fb0f45307267de7081401576df1cb176","durationMs":2,"isError":false,"resultHash":"sha256:18687cbcbbbe577d59f89473d37a53854caea9bb3ebfe514c0637f290ae69a06","resultBytes":94}
-{"ts":"2026-10-31T03:07:09.110Z","connId":"cn-6c5ce60f","seq":2,"server":"demo","tool":"delete_file","decision":"ask","rule":"red-line-4-delete","why":"Red line 4: this tool looks like it deletes or overwrites data.","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","forwarded":false,"approvalId":"ap-044ff37e","traceId":"4bf92f3577b34da6a3ce929d0e0e4736","parentSpanId":"00f067aa0ba902b7","session":"sess-42","agentPath":"main>research-sub"}
-{"ts":"2026-10-31T03:07:09.250Z","event":"approval-decided","approvalId":"ap-044ff37e","server":"demo","tool":"delete_file","rule":"red-line-4-delete","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","decision":"approved","waitMs":141,"decidedBy":"alice","confirmation":"--yes"}
-{"ts":"2026-10-31T03:07:09.261Z","connId":"cn-6c5ce60f","seq":3,"server":"demo","tool":"delete_file","decision":"ask","rule":"red-line-4-delete","why":"Red line 4: this tool looks like it deletes or overwrites data.","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","forwarded":true,"approvalId":"ap-044ff37e","traceId":"4bf92f3577b34da6a3ce929d0e0e4736","parentSpanId":"00f067aa0ba902b7","session":"sess-42","agentPath":"main>research-sub"}
-{"ts":"2026-10-31T03:07:09.262Z","event":"call-result","connId":"cn-6c5ce60f","seq":3,"server":"demo","tool":"delete_file","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","durationMs":1,"isError":false,"resultHash":"sha256:2c439525489f5c192e7dc1890336d9ab6723bda91cd0bdb43d148e109a30058b","resultBytes":71}
-{"ts":"2026-10-31T03:07:09.264Z","connId":"cn-6c5ce60f","seq":4,"server":"demo","tool":"run_command","decision":"block","rule":"shell-guard","why":"shell guard: force push","argsHash":"sha256:2c29a8326969480173c60a2f1083c6dbf5b73aa28539723243a204c8793dc5e9","forwarded":false}
+{"ts":"2026-11-03T10:11:57.932Z","connId":"cn-a4f34d38","seq":1,"server":"demo","tool":"echo","decision":"allow","rule":"default","why":"no rule matched; the policy default is allow","argsHash":"sha256:cbbbdcd27692344de5dbab3abcaba413fb0f45307267de7081401576df1cb176","forwarded":true}
+{"ts":"2026-11-03T10:11:57.933Z","event":"call-result","connId":"cn-a4f34d38","seq":1,"server":"demo","tool":"echo","argsHash":"sha256:cbbbdcd27692344de5dbab3abcaba413fb0f45307267de7081401576df1cb176","durationMs":2,"isError":false,"resultHash":"sha256:18687cbcbbbe577d59f89473d37a53854caea9bb3ebfe514c0637f290ae69a06","resultBytes":94}
+{"ts":"2026-11-03T10:11:57.941Z","connId":"cn-a4f34d38","seq":2,"server":"demo","tool":"delete_file","decision":"ask","rule":"red-line-4-delete","why":"Red line 4: this tool looks like it deletes or overwrites data.","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","forwarded":false,"approvalId":"ap-59fc99d3","traceId":"4bf92f3577b34da6a3ce929d0e0e4736","parentSpanId":"00f067aa0ba902b7","session":"sess-42","agentPath":"main>research-sub"}
+{"ts":"2026-11-03T10:11:58.108Z","event":"approval-decided","approvalId":"ap-59fc99d3","server":"demo","tool":"delete_file","rule":"red-line-4-delete","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","decision":"approved","waitMs":165,"decidedBy":"alice","confirmation":"token"}
+{"ts":"2026-11-03T10:11:58.120Z","connId":"cn-a4f34d38","seq":3,"server":"demo","tool":"delete_file","decision":"ask","rule":"red-line-4-delete","why":"Red line 4: this tool looks like it deletes or overwrites data.","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","forwarded":true,"approvalId":"ap-59fc99d3","nonce":"nc-294c521aa7253e7bc748160b","traceId":"4bf92f3577b34da6a3ce929d0e0e4736","parentSpanId":"00f067aa0ba902b7","session":"sess-42","agentPath":"main>research-sub"}
+{"ts":"2026-11-03T10:11:58.120Z","event":"call-result","connId":"cn-a4f34d38","seq":3,"server":"demo","tool":"delete_file","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","durationMs":1,"isError":false,"resultHash":"sha256:2c439525489f5c192e7dc1890336d9ab6723bda91cd0bdb43d148e109a30058b","resultBytes":71}
+{"ts":"2026-11-03T10:11:58.122Z","connId":"cn-a4f34d38","seq":4,"server":"demo","tool":"run_command","decision":"block","rule":"shell-guard","why":"shell guard: force push","argsHash":"sha256:2c29a8326969480173c60a2f1083c6dbf5b73aa28539723243a204c8793dc5e9","forwarded":false}
 ```
 
 - `connId` names the gateway connection (one per `agent-gate serve` process, which serves one
@@ -1208,6 +1286,10 @@ context and an agent path, plus a blocked shell call; the user name is changed, 
   session. `agent` names the HTTP agent, known by its key, and `profile` the profile the connection
   runs with, when there is one.
 - `forwarded` says whether the call reached the downstream server.
+- An irreversible call (see [Irreversible calls take an action token](#irreversible-calls-take-an-action-token))
+  that ran names the nonce of the approval that let it through (`nonce`, never the token). One that came
+  back for an approval it could not use names that approval (`refusedApprovalId`) and why
+  (`tokenRefused`: `used`, `expired`, `wrong-arguments`, `invalid` or `replayed`).
 - `alsoMatched` names the rules after the deciding one that matched too. `originalArgsHash` and
   `rewrittenBy` appear when rewrite rules edited the arguments (see [Policy](#policy)); `argsHash`
   is then the hash of the edited call, the one that ran or waits for a human.
@@ -1343,6 +1425,17 @@ red-line-4-delete  0         1       0        0        100%       0s
 A request that expires with nobody answering leaves no line, so `stats` also counts the expired
 requests still in `approvals.json`; one that expired more than a week ago is no longer counted.
 
+For a request from an irreversible rule, the CLI writes one more kind of line when it refuses a
+confirmation: `"event": "action-token-refused"`, with the approval id, the rule, `argsHash`, who ran
+the command, and the reason: `no-token` (`--yes` alone), `mismatch` (not this request's token),
+`used` (approved already), `expired`, `no-key` (the CLI could not read the key, as from an agent's
+sandboxed shell), or `changed` (the call was changed between the read-back and the approval). This one is the `--yes` from [An approval, step by step](#an-approval-step-by-step),
+with the user name changed:
+
+```json
+{"ts":"2026-11-03T10:03:40.483Z","event":"action-token-refused","approvalId":"ap-20f450cb","server":"demo","tool":"delete_file","rule":"red-line-4-delete","argsHash":"sha256:2982c72ec2280a4ac4c81c3a63b93294acee61a8bbbf879694d0653e48515ddb","reason":"no-token","decidedBy":"alice"}
+```
+
 ### Tool results are untrusted data
 
 A tool's result goes straight into the model's context. When the tool reads a database, a web page,
@@ -1455,7 +1548,11 @@ time a client lists the tools.
   gateway. The example policy stops this through the gateway (`no-self-approval`,
   `protect-gateway-state`), but an agent's native shell, such as Claude Code's Bash tool, never
   passes through it. Keep the state directory out of the agent's reach, for example owned by
-  another OS user.
+  another OS user. For irreversible calls the line is narrower: approving one needs the action-token
+  key, so a key the agent can neither read nor change keeps it from approving its own red lines even
+  where it can write `<stateDir>`. With the key in its default place, inside `<stateDir>`, that is no stronger than
+  the state directory, and an agent that can rewrite both the queue and the audit log could replay one
+  used approval after a restart (ADR 0013).
 - Only tools are proxied. Resources, prompts, and requests from a downstream server back to the
   client (sampling, elicitation) are not.
 - Without `resultGuard`, it does not read tool results, so it cannot spot instructions an attacker
@@ -1491,7 +1588,7 @@ until steps 1 to 5 have passed.
 | 2. Check | The body must be JSON with a `model` alias and `messages`. | 400, 413 |
 | 3. Route | Route rules pick an upstream and a model from the alias and the `x-agent-task` header. | 404 |
 | 4. Leak guard | The message text is scanned for secrets. A block rule refuses the call; a redact rule replaces the match. With `divert`, a call that matches a divert rule goes to a local model instead (see [Keeping personal data local](#keeping-personal-data-local)). | 400 |
-| 5. Reserve | The call's estimated cost is reserved against the key's daily and monthly caps. | 429 |
+| 5. Reserve | The call's estimated cost is reserved against the key's daily and monthly caps, after its stop rules (calls per minute, and the run's limits and exits). | 429 |
 | 6. Call | The upstream is called, with retries and then the fallback on a 5xx, a timeout or a 429. A streamed answer is read as it comes (see [Streaming](#streaming)). | 502, 504; 429 if the upstreams keep rate limiting |
 | 7. Settle | The reservation is settled with the real cost from the answer's `usage`, or released if the call failed. | |
 | 8. Check the answer | The answer's text goes through the same leak guard. A block rule withholds it; a redact rule edits it. A stream is checked once it is complete. | 502 |
@@ -1588,8 +1685,10 @@ read from `$GATEWAY_KEY`. This is the example config:
 - `routes` are explained under [Routing](#routing).
 - `keys` has one entry per team or agent. `sha256` is the SHA-256 of the gateway key, not the key,
   so the config can be read without handing out access. `dailyUsd` and `monthlyUsd` are the caps;
-  both are required. `maxCallsPerMinute`, `runMaxCalls`, `runMaxUsd`, and `repeatMax` with
-  `repeatWindowSeconds`, are optional stop rules (see [Budgets](#budgets)).
+  both are required. `maxCallsPerMinute`, `runMaxCalls`, `runMaxUsd`, `runMaxSeconds`,
+  `runMaxTokens`, and `repeatMax` with `repeatWindowSeconds`, are optional stop rules, and
+  `runShipScore`, `runMaxRounds`, `runFlatRounds` and `runMinGain` give a run its loop exits (see
+  [Budgets](#budgets)).
 - `policy` is the leak guard's rule file. It and `stateDir` are resolved against the config file's
   directory.
 - Optional, with their defaults: `listen` (`127.0.0.1`, port 8787), `defaultMaxTokens` (1024),
@@ -1736,7 +1835,7 @@ room, and one second when calls in flight are what is in the way.
 
 **Stop rules.** Caps bound what a key spends in a day or a month. An agent stuck in a loop spends it
 fast, and a run that should have stopped after ten calls can make a thousand. A key can set more
-limits. The first is checked before anything is reserved; the other three are checked in this order
+limits. The first is checked before anything is reserved; the others are checked in this order
 before the caps, under the ledger's lock:
 
 | Field | What it bounds | Refused with |
@@ -1744,6 +1843,8 @@ before the caps, under the ledger's lock:
 | `repeatMax` with `repeatWindowSeconds` | the same request let through in any window of that many seconds | 429 `loop_suspected`, `Retry-After` until the oldest copy leaves the window |
 | `maxCallsPerMinute` | calls let through in any 60 seconds | 429 `rate_limited`, `Retry-After` until the oldest of them is a minute old |
 | `runMaxCalls` | calls in one run | 429 `run_limit_reached`, no `Retry-After`: waiting does not help |
+| `runMaxSeconds` | time since the run's first call (at most a day) | 429 `run_limit_reached`, no `Retry-After` |
+| `runMaxTokens` | a run's booked input and output tokens, plus what its calls in flight hold, plus this call's estimate | 429 `run_limit_reached`, no `Retry-After` |
 | `runMaxUsd` | a run's settled dollars, plus what its calls in flight hold, plus this call's estimate | 429 `run_limit_reached`, no `Retry-After` |
 
 "The same request" means the same `model`, `messages`, `tools`, `tool_choice` and `n`, in any key
@@ -1754,14 +1855,73 @@ gateway's memory, not in the ledger: one gateway process serves a state director
 ([ADR 0003](docs/adr/0003-single-writer-state.md)), and a restart forgets at most one window.
 
 A run is what the client names in its `x-run-id` header (a plain id, see [Tracing](#tracing)); the
-ledger forgets a run a day after its last call. The run caps are a stop rule for a loop that keeps its
+ledger forgets a run a day after its last call, admitted or refused, so a loop that keeps knocking on a
+stopped run stays stopped. The run caps are a stop rule for a loop that keeps its
 run id, not a security boundary: a client that sends no `x-run-id`, or a new one for every call, is
 held only to `maxCallsPerMinute` and the caps. Each refusal is a usage line with `error`, the limit
-as `rule`, and `runId`. `test/llm/limits.test.ts` runs a loop against a live gateway and checks
+as `rule`, `exit` (`budget`), `why`, and `runId`. `test/llm/limits.test.ts` runs a loop against a live gateway and checks
 that it is cut at the sixth call of a minute, that a run is cut at its third call and before it can
 pass its dollars, and that another run is not; and that with `repeatMax` 5 in 60 seconds the sixth
 copy of a request is refused, other requests and other keys are not, and the copy goes through again
 once the window has moved on.
+
+**Loop exits: ship, budget, flat line.** A loop that grades its own work (propose, judge, propose
+again) needs an end that the loop does not decide for itself. A key can give its runs three exits, and
+the loop asks the gateway after each graded round: `POST /v1/runs/score` with the same key and
+`x-run-id`, and `{"score": <number>}`. The gateway answers `continue`, `ship` or `stop`, checking in
+this order:
+
+| Exit | Field | When |
+| --- | --- | --- |
+| ship | `runShipScore` | the round's score is at least this |
+| budget | `runMaxRounds` | the run has reported this many scores; or a limit the gateway counts is used up: `runMaxCalls`, `runMaxSeconds`, `runMaxTokens`, `runMaxUsd` |
+| flat line | `runFlatRounds`, with `runMinGain` (default 0) | this many scored rounds in a row gained no more than `runMinGain` over the best score |
+
+From a run with `"runShipScore": 0.9, "runMaxRounds": 4, "runFlatRounds": 2, "runMinGain": 0.01` and
+`"runMaxCalls": 12, "runMaxSeconds": 600` on the key, after rounds that scored 0.62 and 0.81:
+
+```
+$ curl -s http://127.0.0.1:8787/v1/runs/score -H "authorization: Bearer $KEY" -H "x-run-id: rewrite-7" -d '{"score": 0.93}'
+{"run":"rewrite-7","decision":"ship","exit":"ship","rule":"runShipScore","why":"round 3 scored 0.93, at or above the ship score 0.9","stoppedAt":"2026-11-03T10:07:30.908Z","score":0.93,"round":3,"best":0.93,"flat":0,"spent":{"calls":3,"seconds":0,"tokens":330,"usd":0.00033},"limits":{"minGain":0.01,"calls":12,"rounds":4,"seconds":600,"shipScore":0.9,"flatRounds":2}}
+```
+
+A run starts with its first call (for a key with run limits, or a run that declared a budget), and a
+score for a run the key has no record of is refused with 404 `run_not_found`: a report costs nothing,
+so it cannot add runs to the ledger. Ship and stop end the run for good. Every later call in it is
+refused, and says why:
+
+```
+HTTP/1.1 429 Too Many Requests
+
+{"error":{"message":"agent-gate: run \"rewrite-7\" of key \"rewriter\" has shipped at 2026-11-03T10:07:30.908Z: round 3 scored 0.93, at or above the ship score 0.9 (runShipScore). Use its last result; the run takes no more calls.","type":"insufficient_quota","param":null,"code":"run_stopped","cap":"runShipScore","exit":"ship"}}
+```
+
+A later score changes nothing: the answer repeats the decision, with `"already": true`.
+
+**The caps are the key's.** The numbers come from the gateway's config, which the agent cannot change.
+A client may lower its run's limits with an `x-run-budget` header on its calls or its score reports
+(`calls=12, rounds=4, seconds=600, tokens=50000, usd=0.25`), as a loop that sets its own budget does,
+and the run keeps the lowest it ever declared. It can never raise them: a field above the key's cap
+leaves the cap in force, and every usage line of the call says so (`"budgetClamped": ["calls"]`).
+That is worth an alert: a loop that asks for more than it is allowed may have been changed to ask.
+A budget that cannot be read, or one sent without `x-run-id`, is refused with 400
+`invalid_run_budget`. The score is the client's claim, so it can only end a run early: a loop that
+reports nothing, or reports a rising score every round, is still held by the limits the gateway counts
+itself (calls, seconds, tokens, dollars), and those bound the money. A new run id is a new run; what
+bounds all of a key's runs together is its daily and monthly caps and `maxCallsPerMinute`.
+
+Every stop is in the usage log. A refused call has `error` (`run_limit_reached`, or `run_stopped`
+for a run that a score report ended), the limit as `rule`, `exit` and `why`. A score report is a line
+of its own, which costs nothing and which `usage --by` does not count as a call:
+
+```json
+{"ts":"2026-11-03T10:07:30.913Z","id":"req-5ad526e8","event":"run-score","key":"rewriter","status":200,"score":0.93,"round":3,"best":0.93,"flat":0,"decision":"ship","exit":"ship","rule":"runShipScore","why":"round 3 scored 0.93, at or above the ship score 0.9","inputTokens":0,"outputTokens":0,"costUsd":0,"latencyMs":5,"traceId":"b4aee0427bc401aac4d4d6a38b3cca07","spanId":"c58e2979434cba61","runId":"rewrite-7"}
+```
+
+`test/llm/loop-exits.test.ts` drives each exit on a live gateway, and checks that a run asking for
+more than the key's cap is held to the cap, that a run can lower its own budget but not raise it back,
+that a stopped run refuses its calls and ignores later scores, and that every stop is in the usage log
+with its reason.
 
 **Booked once.** A reservation is settled at most once. A second settle of the same id books
 nothing, and a settle whose reservation had already expired (a call that outlived its reservation)
@@ -2051,7 +2211,9 @@ dollars, not the conversation. `id` ties a line to the `x-agent-gate-request-id`
 estimate, and `attempts` and `fallback` show retries and fallbacks. `task` is the `x-agent-task`
 header, on one line and cut at 100 characters. `traceId` and `spanId` are the call's trace and the
 gateway's span in it (see [Tracing](#tracing)). A streamed call has `"stream": true` and `streamEnd`,
-how it ended (see [Streaming](#streaming)).
+how it ended (see [Streaming](#streaming)). A call that a run limit refused has `exit` and `why`, and
+a call whose `x-run-budget` asked for more than the key's caps has `budgetClamped`. A loop's score
+report is a line with `"event": "run-score"` and no cost (see Loop exits under [Budgets](#budgets)).
 
 `agent-gate usage --by task` adds the log up per task: which kind of work spends the money, and which
 one trips the leak guard. From the run above:
@@ -2064,7 +2226,7 @@ classify  1         1   23            9              $0.00000885  0             
 ```
 
 `--by` also takes `key`, `route`, `upstream`, `model`, `session` and `runId`; `--json` prints the
-rows as JSON.
+rows as JSON. It counts calls: score reports are left out.
 
 ### Tracing
 
@@ -2167,7 +2329,8 @@ provider key appears in any response, in the state files or in the gateway's log
   all at once, when it is complete; turning the scan off gives real streaming, unscanned (see
   [Streaming](#streaming)).
 - Other endpoints: embeddings, images, audio, the Responses API, legacy completions. Only
-  `POST /v1/chat/completions` and `GET /healthz` exist.
+  `POST /v1/chat/completions`, `POST /v1/runs/score` (a loop's score report, see Loop exits under
+  [Budgets](#budgets)) and `GET /healthz` exist.
 - Provider-specific features. The request body is forwarded as it is, apart from `model`, redacted
   `messages` and a missing `max_tokens`, so provider fields pass through, but nothing translates
   between provider APIs: an upstream has to speak the OpenAI chat completions format. A model that
@@ -2465,7 +2628,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 506 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 600 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
@@ -2504,13 +2667,22 @@ against a fake downstream server, talks to it with a real MCP client, answers ap
 real CLI, and checks what reached the downstream server and what was written to the audit log,
 including a call-result line, with the hash of what came back, for every forwarded call.
 Crash tests (`test/gateway/crash.test.ts`) kill the gateway and a writer with `kill -9` and check
-what survives.
+what survives. An action-token suite (`test/gateway/action-tokens.test.ts`) checks the key, the code
+and the proof (bound to every field of the request), the `irreversible` flag in a policy (and that it
+sticks past a standing rule), the store's refusals (reuse, expiry, other arguments, a forged record, a
+replayed one, a nonce the gateway did not make, file hashes edited after the yes, a standing
+approval), the CLI's (`--yes` alone, another request's token, a decided or expired request, a CLI
+without the key, a record whose arguments do not match their hash, a call changed after the
+read-back), each with its audit line, and running gateways: a forged approval refused, a replayed one
+refused by the process that spent it, by a second process on the same state directory and after a
+restart, a standing rule that cannot cover a `DROP` an irreversible rule also asks about, and an agent
+that never sees a token.
 One step plays a prompt injection: a tool result tells the agent to upload its SSH key, the agent
 obeys, and the gateway blocks the call before it reaches the server. Another denies a call with a
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
 
-The LLM gateway suite (`test/llm/`) runs 323 tests: a routing table; config validation; budget
+The LLM gateway suite (`test/llm/`) runs 349 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
 day and month rollover, reservations left by a crashed process, a damaged file, a settle that comes
 twice or after its reservation expired, calls per minute and run caps); a leak-guard table
@@ -2533,7 +2705,12 @@ key on the gateway's port, or a loopback listener with none) and the config rule
 stop-rule suite runs loops against a live gateway: cut at the sixth call of a minute, a run cut at its
 third call and before it passes its dollars, the sixth copy of the same request cut and let through
 again once its window moves on, each cut in the usage log; the end-to-end run also
-checks that `usage --verify` finds the usage log and the ledger in agreement. A response-guard
+checks that `usage --verify` finds the usage log and the ledger in agreement. A loop-exit suite
+(`test/llm/loop-exits.test.ts`) drives a run to each exit through a live gateway (ship at the ship
+score, stop on its scored rounds, its tokens and its time, stop on a flat line), holds a run that asks
+for more than the key's cap to the cap, lets a run lower its own budget but not raise it back (a
+budget declared on a refused call included), refuses a score for a run that made no call, and checks
+that a stopped run stays stopped and that every stop is a usage line with its reason. A response-guard
 suite runs every block rule on a request and on an answer, and a live gateway against providers
 whose answers carry a secret (withheld, booked) or a key assignment (redacted). A failure suite
 damages the ledger and the usage log and turns the upstream traceparent off. A PII suite checks each
@@ -2601,6 +2778,7 @@ src/gateway/downstream.ts                     keeps the downstream servers conne
 src/gateway/status.ts                         <stateDir>/status.json, for agent-gate status
 src/gateway/policy.ts                         the policy engine (pure but for path matchers): evaluate(policy, call) -> verdict
 src/gateway/approvals.ts                      the approval queue in <stateDir>/approvals.json
+src/gateway/action-tokens.ts                  action tokens for irreversible calls: the key, the code, the proof
 src/gateway/repeats.ts                        loop limits: recent runs per call in <stateDir>/repeats.json
 src/gateway/files.ts                          binds approvals to the content of the files a call names
 src/gateway/tool-pins.ts                      pinned tool definitions in <stateDir>/tools.json
@@ -2618,7 +2796,7 @@ src/llm/server.ts                             the LLM gateway: HTTP, keys, the s
 src/llm/routing.ts                            routing (pure): route(config, request) -> upstream and model
 src/llm/upstream.ts                           calls the upstreams: retries, backoff, fallback
 src/llm/stream.ts                             streamed answers: reads the events, puts messages back together
-src/llm/budget.ts                             the cost estimate and the ledger in <stateDir>/ledger.json
+src/llm/budget.ts                             the cost estimate and the ledger in <stateDir>/ledger.json; run limits and loop exits
 src/llm/repeats.ts                            repeatMax: the same request let through at most so often, in memory
 src/llm/leak-guard.ts                         the leak guard (pure): block or redact secrets in messages
 src/llm/validators.ts                         checks behind the PII rules: Luhn, My Number check digit, SSN and ITIN ranges
@@ -2696,6 +2874,8 @@ docs/adr/0009-pin-tool-definitions.md         why a tool whose definition change
 docs/adr/0010-retries.md                      why retries wait a random time up to a cap, and a 429 goes to the fallback first
 docs/adr/0011-streaming.md                    why a streamed answer is held until it is scanned, unless scanning is off
 docs/adr/0012-an-http-endpoint-for-agents.md  agents over HTTP: a key per agent, approvals bound to it; what deploying it needs
+docs/adr/0013-action-tokens-for-irreversible-calls.md
+                                              an irreversible call is confirmed with a token the gateway bound to it
 tsconfig.json                                 compiles src/ and test/ into dist/
 AGENTS.md                                     build, layout and rules for coding agents
 CLAUDE.md                                     one line that points Claude Code to AGENTS.md

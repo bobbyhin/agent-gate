@@ -145,7 +145,9 @@ describe("crash: the gateway is killed with one request pending and one approved
     const first = await startGateway();
     const approvedId = idIn(await call(first.client, { path: "notes/a.md" }));
     const pendingId = idIn(await call(first.client, { path: "notes/b.md" }));
-    assert.equal(cli("approvals", "approve", approvedId, "--yes").status, 0);
+    // A delete is irreversible (ADR 0013): the human approves it with the action token that "approvals show" prints.
+    const token = (JSON.parse(cli("approvals", "show", approvedId).stdout) as { actionToken: string }).actionToken;
+    assert.equal(cli("approvals", "approve", approvedId, "--token", token).status, 0);
 
     process.kill(first.pid, "SIGKILL"); // the night: no shutdown, no flush
     await waitUntilGone(first.pid);

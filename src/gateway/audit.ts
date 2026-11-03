@@ -5,13 +5,40 @@
 // its call by connId and seq). The CLI writes one when a human answers an approval request or finds
 // it expired (ApprovalEvent, "event": "approval-decided"); approvals.json forgets a request a week
 // after it expires, and these lines are the lasting record of who decided what and how long it waited.
+// For an irreversible call (ADR 0013), the CLI also writes a line when it refuses a confirmation
+// (ActionTokenEvent, "event": "action-token-refused"), and the call lines name the nonce of the token
+// that let a call through (nonce), or the approval a call could not use and why (tokenRefused,
+// refusedApprovalId).
+// No line ever holds an action token itself.
 // ponytail: the file is never rotated or shipped anywhere; that is left to the operator.
 
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
-import { canonicalJson } from "./approvals.js";
+import { canonicalJson, type Confirmation, type TokenRefusalReason } from "./approvals.js";
 import type { CallContext } from "./context.js";
 import type { Decision } from "./policy.js";
+
+/**
+ * Why the CLI refused to approve an irreversible request: "no-token" (only --yes), "mismatch" (not
+ * this request's token: another call, other arguments, or an old one), "used" (the request was approved
+ * already), "expired", "no-key" (the key could not be read, as by an agent's sandboxed shell), or
+ * "changed" (the call in approvals.json changed between the read-back and the approval).
+ */
+export type ActionTokenRefusal = "no-token" | "mismatch" | "used" | "expired" | "no-key" | "changed";
+
+export interface ActionTokenEvent {
+  ts: string;
+  event: "action-token-refused";
+  approvalId: string;
+  server: string;
+  tool: string;
+  rule: string;
+  argsHash: string;
+  reason: ActionTokenRefusal;
+  /** The OS user who ran the CLI. */
+  decidedBy?: string;
+  agent?: string;
+}
 
 export interface ApprovalEvent {
   ts: string;
@@ -28,8 +55,8 @@ export interface ApprovalEvent {
   decidedBy?: string;
   /** The human's reason or note, as stored in approvals.json (one line, at most 500 characters). */
   note?: string;
-  /** For "approved": "typed" after the read-back, or "--yes". */
-  confirmation?: "typed" | "--yes";
+  /** For "approved": "typed" after the read-back, "--yes", or "token" (the action token of an irreversible call). */
+  confirmation?: Confirmation;
   /** The HTTP agent the request belongs to; only its own call can use the approval. */
   agent?: string;
 }
@@ -79,6 +106,11 @@ export interface AuditEntry extends CallContext {
   rewrittenBy?: string[];
   /** Rules after the deciding one that matched too (policy.ts); they decided nothing. */
   alsoMatched?: string[];
+  /** An irreversible call that ran: the nonce of the approval that let it through (never the token). */
+  nonce?: string;
+  /** An irreversible call that did not run: the approval it could not use (refusedApprovalId), and why. */
+  tokenRefused?: TokenRefusalReason;
+  refusedApprovalId?: string;
   /** Only present when "auditArguments" is true in the gateway config. */
   args?: Record<string, unknown>;
 }
@@ -175,6 +207,13 @@ export class AuditLog {
   /** Appends one approval event, or throws. Like a call line, it holds the arguments' hash, never their values. */
   writeEvent(event: Omit<ApprovalEvent, "ts" | "event">, now = new Date()): ApprovalEvent {
     const line: ApprovalEvent = { ts: now.toISOString(), event: "approval-decided", ...event };
+    fs.appendFileSync(this.file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
+    return line;
+  }
+
+  /** Appends one refused confirmation of an irreversible request, or throws. */
+  writeTokenRefusal(event: Omit<ActionTokenEvent, "ts" | "event">, now = new Date()): ActionTokenEvent {
+    const line: ActionTokenEvent = { ts: now.toISOString(), event: "action-token-refused", ...event };
     fs.appendFileSync(this.file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
     return line;
   }

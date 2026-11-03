@@ -103,6 +103,15 @@ describe("gateway end to end", () => {
     return JSON.parse(cli("approvals", "list", "--all", "--json").out);
   }
 
+  /**
+   * Approves as a human at the CLI would: a request from an irreversible rule (ADR 0013) with the action
+   * token that "approvals show" prints for whoever can read the key, any other with --yes.
+   */
+  function approve(id: string): { code: number | null; out: string; err: string } {
+    const shown = JSON.parse(cli("approvals", "show", id).out) as { actionToken?: string };
+    return shown.actionToken ? cli("approvals", "approve", id, "--token", shown.actionToken) : cli("approvals", "approve", id, "--yes");
+  }
+
   it("lists every downstream tool as <server>__<tool>, otherwise unchanged", async () => {
     const viaGateway = await gateway.listTools();
     const unproxied = await direct.listTools();
@@ -147,7 +156,7 @@ describe("gateway end to end", () => {
 
   let secondId = "";
   it("after approval the identical call runs exactly once, then needs a new approval", async () => {
-    const approved = cli("approvals", "approve", firstId, "--yes");
+    const approved = approve(firstId);
     assert.equal(approved.code, 0, approved.err);
     assert.match(approved.out, new RegExp(`^approved ${firstId}: demo__delete_file \\{"path":"notes/old.md"\\}`));
 
@@ -164,7 +173,7 @@ describe("gateway end to end", () => {
   });
 
   it("an approval does not cover different arguments", async () => {
-    assert.equal(cli("approvals", "approve", secondId, "--yes").code, 0);
+    assert.equal(approve(secondId).code, 0);
     const other = await call("demo__delete_file", { path: "notes/other.md" });
     const otherId = approvalIdIn(other);
     assert.notEqual(otherId, secondId);
@@ -204,6 +213,7 @@ describe("gateway end to end", () => {
   });
 
   let expiredId = "";
+  let oldApprovalId = "";
   it("an expired approval never allows the call", async () => {
     // Create and approve a request as if it happened 25 hours ago, through the real store.
     const ttl = 24 * 60 * 60 * 1000;
@@ -217,6 +227,8 @@ describe("gateway end to end", () => {
     const id = approvalIdIn(result);
     assert.notEqual(id, old.approval.id);
     assert.equal(received().length, 3, "the expired approval did not let the call through");
+    oldApprovalId = old.approval.id;
+    assert.equal(text(result).split("\n")[0], `agent-gate: the approval of this exact call (${old.approval.id}) expired at ${old.approval.expiresAt}, so it was not run.`);
 
     expiredId = expiredPending.approval.id;
     const late = cli("approvals", "approve", expiredId);
@@ -320,8 +332,11 @@ describe("gateway end to end", () => {
     const outcomes = all.filter((line) => line.event === "call-result");
     // The first listing pinned each downstream tool once (tool-pins.ts).
     const pins = all.filter((line) => line.event === "tool-pinned");
+    // A confirmation of an irreversible request without its token: the read-back above, answered "no".
+    const refusals = all.filter((line) => line.event === "action-token-refused");
+    assert.deepEqual(refusals.map((r) => [r.approvalId, r.reason]), [[tracedId, "mismatch"]]);
     assert.deepEqual(pins.map((p) => p.tool).sort(), ["delete_file", "deploy", "echo", "execute_sql", "fail", "run_command", "search_notes", "set_echo_description"]);
-    assert.equal(lines.length + events.length + outcomes.length + pins.length, all.length);
+    assert.equal(lines.length + events.length + outcomes.length + pins.length + refusals.length, all.length);
     assert.deepEqual(
       events.map((e) => [e.approvalId, e.decision]),
       [
@@ -332,7 +347,7 @@ describe("gateway end to end", () => {
       ],
     );
     assert.equal(lines.length, toolCalls);
-    const callKeys = ["ts", "connId", "seq", "server", "tool", "decision", "rule", "why", "argsHash", "forwarded", "approvalId", "originalArgsHash", "rewrittenBy", "alsoMatched", "traceId", "parentSpanId", "session", "runId", "agentPath", "contextDropped"];
+    const callKeys = ["ts", "connId", "seq", "server", "tool", "decision", "rule", "why", "argsHash", "forwarded", "approvalId", "nonce", "tokenRefused", "refusedApprovalId", "originalArgsHash", "rewrittenBy", "alsoMatched", "traceId", "parentSpanId", "session", "runId", "agentPath", "contextDropped"];
     for (const line of lines) {
       assert.deepEqual(Object.keys(line).filter((k) => !callKeys.includes(k)), []);
       assert.match(line.argsHash, /^sha256:[0-9a-f]{64}$/);
@@ -379,6 +394,21 @@ describe("gateway end to end", () => {
       ],
     );
     assert.equal(lines[3].approvalId, firstId);
+    // Irreversible calls (ADR 0013): each that ran names the nonce that let it through, never the
+    // token; each that came back for an approval it could not use names that approval and why.
+    const ranDeletes = lines.filter((l) => l.tool === "delete_file" && l.forwarded);
+    assert.equal(ranDeletes.length, 2);
+    assert.ok(ranDeletes.every((l) => /^nc-[0-9a-f]{24}$/.test(l.nonce)), JSON.stringify(ranDeletes));
+    assert.equal(new Set(ranDeletes.map((l) => l.nonce)).size, 2, "one token per call");
+    assert.deepEqual(
+      lines.filter((l) => l.tokenRefused).map((l) => [l.tokenRefused, l.refusedApprovalId]),
+      [
+        ["used", firstId],
+        ["wrong-arguments", secondId],
+        ["expired", oldApprovalId],
+      ],
+    );
+    assert.equal(/at-[0-9A-Z]{4}-[0-9A-Z]{4}/.test(content), false, "no action token is ever in the audit log");
     assert.equal(lines.filter((l) => l.decision === "block").length, 2);
     const stats = JSON.parse(cli("audit", "stats", "--json").out);
     const del = stats.find((r: { tool: string }) => r.tool === "demo__delete_file");
@@ -402,7 +432,7 @@ describe("gateway end to end", () => {
     const first = approvalIdIn(await call("demo__delete_file", { path: file }));
     const record = queue().find((a) => a.id === first);
     assert.equal(record?.files?.length, 1, "the file is bound to the request");
-    assert.equal(cli("approvals", "approve", first, "--yes").code, 0);
+    assert.equal(approve(first).code, 0);
 
     fs.writeFileSync(file, "quarterly numbers v2"); // changed after the human said yes
     const changed = await call("demo__delete_file", { path: file });
@@ -412,21 +442,26 @@ describe("gateway end to end", () => {
     assert.equal(received().length, before, "nothing reached the server");
     assert.equal(queue().find((a) => a.id === first)?.status, "stale");
 
-    assert.equal(cli("approvals", "approve", second, "--yes").code, 0);
+    assert.equal(approve(second).code, 0);
     assert.equal(text(await call("demo__delete_file", { path: file })), `pretended to delete ${file}`);
     assert.equal(received().length, before + 1);
   });
 
-  it("the real CLI reads the call back and approves only when the human types the end of its id", async () => {
+  it("the real CLI reads an irreversible call back and approves it only when the human types its action token", async () => {
     const id = approvalIdIn(await call("demo__delete_file", { path: "notes/read-back.md" }));
     const typing = (input: string) => spawnSync(process.execPath, [BIN, "approvals", "approve", id, "--config", configFile], { encoding: "utf8", input });
     const wrong = typing("y\n");
     assert.equal(wrong.status, 1);
     assert.match(wrong.stdout, /^Approve this call\? ap-[0-9a-f]{8}\n  call:     demo__delete_file\n  args:     \{\n              "path": "notes\/read-back\.md"\n            \}\n/);
+    const token = /\n {2}token: {4}(at-[0-9A-Z]{4}-[0-9A-Z]{4})\n/.exec(wrong.stdout)?.[1] ?? assert.fail(wrong.stdout);
+    assert.match(wrong.stdout, new RegExp(`This cannot be undone\\. Type the action token \\(${token}\\) to approve it`));
+    // The end of the id, which the agent was shown, is no longer a confirmation, and neither is --yes.
+    assert.equal(typing(`${id.slice(-4)}\n`).status, 1);
+    assert.match(cli("approvals", "approve", id, "--yes").err, /is for an irreversible action \(rule red-line-4-delete\), so --yes is not enough/);
     assert.equal(queue().find((a) => a.id === id)?.status, "pending");
-    const right = typing(`${id.slice(-4)}\n`);
+    const right = typing(`${token.toLowerCase()}\n`);
     assert.equal(right.status, 0, right.stderr);
-    assert.equal(queue().find((a) => a.id === id)?.confirmation, "typed");
+    assert.equal(queue().find((a) => a.id === id)?.confirmation, "token");
     assert.equal(text(await call("demo__delete_file", { path: "notes/read-back.md" })), "pretended to delete notes/read-back.md");
   });
 

@@ -97,12 +97,14 @@ table).
 | [Google Cloud Data Agent Kit](https://docs.cloud.google.com/data-agent-kit) | No approval step of its own: it relies on the host agent's prompts and on IAM. | | |
 | agent-gate (one call) | One exact call: the server, the tool and the SHA-256 of the arguments, and with `fileBinding` the hashes of the files it names. It runs once. | `approvalTtlHours` (24 by default), or the rule's `ttlMinutes`. | `<stateDir>/approvals.json` (mode 0600), plus an append-only audit line for the request, the decision (who, how they confirmed) and the call. |
 | agent-gate (standing) | A bounded set of calls to one tool: argument globs, at most 100 uses, only for rules that allow it ([ADR 0006](adr/0006-standing-approvals.md)). | At most 168 hours. | The same files. |
+| agent-gate (irreversible) | One exact call, as above, confirmed with the action token the gateway bound to that request; `--yes` is refused and no standing approval applies ([ADR 0013](adr/0013-action-tokens-for-irreversible-calls.md)). | The rule's `ttlMinutes`, or `approvalTtlHours`. | The same files; the approval carries a proof made with a key the agent should not be able to read, and every refused confirmation or use is an audit line. |
 
 **The gap agent-gate closes.** A yes bound to a tool name or to a command prefix also covers calls the
 human never saw: `git push` approved once covers every later push, `mcp(server/tool)` every argument
 the tool can take. agent-gate binds the yes to the call that was read back to the human, spends it
 once, lets it expire, and records who said yes and when; the confirmation happens out of band, at the
-CLI, not in the chat the model reads ([ADR 0005](adr/0005-approvals-are-action-tokens.md)). Claude
+CLI, not in the chat the model reads ([ADR 0005](adr/0005-approvals-are-action-tokens.md)); for an
+irreversible call the human gives back a token the agent never sees ([ADR 0013](adr/0013-action-tokens-for-irreversible-calls.md)). Claude
 Code's documentation says the same about its own rules from the other side: a deny or ask rule "isn't
 a security boundary around the program", because `/bin/rm` or `bash -c` gets past a rule on `rm`.
 agent-gate's shell guard reads the command line itself, which catches more of those, but it is a

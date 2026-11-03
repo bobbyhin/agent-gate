@@ -136,6 +136,7 @@ export function verifyAudit(file: AuditFile, approvals: readonly Approval[] = []
   const forwardedCalls = new Map<string, number>(); // "connId seq" -> line
   const results = new Set<string>();
   const records = new Map(approvals.map((a) => [a.id, a]));
+  const tokens = new Map<string, number>(); // action token nonce -> line of the call it let through (ADR 0013)
 
   for (const { line, value: v } of file.lines) {
     const event = v.event;
@@ -143,6 +144,11 @@ export function verifyAudit(file: AuditFile, approvals: readonly Approval[] = []
       const id = typeof v.approvalId === "string" ? v.approvalId : undefined;
       const call = `${String(v.server)}__${String(v.tool)}`;
       if (v.forwarded === true && typeof v.connId === "string") forwardedCalls.set(`${v.connId} ${String(v.seq)}`, line);
+      if (v.forwarded === true && typeof v.nonce === "string") {
+        const before = tokens.get(v.nonce);
+        if (before !== undefined) problems.push({ line, why: `the action token with nonce ${v.nonce} let a second call through; it let one through on line ${before}` });
+        else tokens.set(v.nonce, line);
+      }
       if (v.decision === "block" && v.forwarded !== false) problems.push({ line, why: `a blocked call to ${call} was forwarded (rule ${String(v.rule)})` });
       if ((v.decision === "allow" || v.decision === "warn") && v.forwarded !== true) problems.push({ line, why: `an allowed call to ${call} was not forwarded` });
       if (v.decision !== "ask") continue;

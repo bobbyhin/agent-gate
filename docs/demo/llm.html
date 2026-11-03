@@ -148,8 +148,8 @@
    "upstreamCalls": 1,
    "usage": [
     {
-     "ts": "2026-10-31T11:36:24.427Z",
-     "id": "req-80dec9e3",
+     "ts": "2026-11-03T10:36:19.082Z",
+     "id": "req-f5b8487f",
      "key": "demo-agent",
      "task": "classify",
      "route": "classify-is-cheap",
@@ -162,22 +162,22 @@
      "usage": "upstream",
      "attempts": 1,
      "fallback": false,
-     "latencyMs": 18,
-     "traceId": "af2205494820e7c99a029a56536004e9",
-     "spanId": "c5d8d34baffe91ca"
+     "latencyMs": 16,
+     "traceId": "c646f2733f644c6af70d0091fbde4253",
+     "spanId": "2fb2f93915a1aa72"
     }
    ],
    "ledger": [
     {
      "key": "demo-agent",
-     "day": "2026-10-31",
+     "day": "2026-11-03",
      "dayUsd": 0.00000885,
      "dailyUsd": 0.01,
      "inFlight": 0
     }
    ],
    "log": [
-    "200 req-80dec9e3 key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 18ms"
+    "200 req-f5b8487f key=demo-agent route=classify-is-cheap upstream=cheap model=fake-small-1 cost=$0.00000885 16ms"
    ],
    "title": "A classification goes to the cheap model",
    "note": "The agent asks for the large model, but its x-agent-task header says classify, and the first route that applies sends that to the cheap upstream. The cost is reserved first and settled from the provider's own token count.",
@@ -212,8 +212,8 @@
    "upstreamCalls": 0,
    "usage": [
     {
-     "ts": "2026-10-31T11:36:24.429Z",
-     "id": "req-eeff5a77",
+     "ts": "2026-11-03T10:36:19.083Z",
+     "id": "req-6436a6ab",
      "key": "demo-agent",
      "route": "cheap-models",
      "upstream": "cheap",
@@ -226,21 +226,21 @@
      "outputTokens": 0,
      "costUsd": 0,
      "latencyMs": 0,
-     "traceId": "cf4e14c30893214951f29bf12f98ac34",
-     "spanId": "21dca4ea5b226860"
+     "traceId": "e670e60af1e6764582e933fa307b47e3",
+     "spanId": "0379b06d0246efdd"
     }
    ],
    "ledger": [
     {
      "key": "demo-agent",
-     "day": "2026-10-31",
+     "day": "2026-11-03",
      "dayUsd": 0.00000885,
      "dailyUsd": 0.01,
      "inFlight": 0
     }
    ],
    "log": [
-    "400 req-eeff5a77 key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0 error=secret_detected 0ms"
+    "400 req-6436a6ab key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0 error=secret_detected 0ms"
    ],
    "title": "A secret in the prompt never leaves",
    "note": "The leak guard reads the messages before anything is sent. A block rule matched, so the request is refused with the rule's name, never the text it matched, and the provider gets nothing.",
@@ -269,7 +269,7 @@
    "response": {
     "status": 429,
     "headers": {
-     "retry-after": "44616",
+     "retry-after": "48221",
      "content-type": "application/json"
     },
     "body": "{\"error\":{\"message\":\"agent-gate: this call could cost up to $0.01503, and key \\\"demo-agent\\\" has $0.00999115 left of its daily budget of $0.01 ($0.00000885 spent, $0 held by calls in flight). Try again later, or with a lower max_tokens.\",\"type\":\"insufficient_quota\",\"param\":null,\"code\":\"budget_exceeded\",\"cap\":\"daily\"}}"
@@ -277,8 +277,8 @@
    "upstreamCalls": 0,
    "usage": [
     {
-     "ts": "2026-10-31T11:36:24.437Z",
-     "id": "req-32b834eb",
+     "ts": "2026-11-03T10:36:19.091Z",
+     "id": "req-43f031e0",
      "key": "demo-agent",
      "route": "strong-models",
      "upstream": "strong",
@@ -290,21 +290,21 @@
      "outputTokens": 0,
      "costUsd": 0,
      "latencyMs": 5,
-     "traceId": "d8e19820c85547869d3fb78c33590adf",
-     "spanId": "bb9456e5c32d4d05"
+     "traceId": "57dfc7d9891ff799c28a26dfa4c5d609",
+     "spanId": "f056c48d5311a8fc"
     }
    ],
    "ledger": [
     {
      "key": "demo-agent",
-     "day": "2026-10-31",
+     "day": "2026-11-03",
      "dayUsd": 0.00000885,
      "dailyUsd": 0.01,
      "inFlight": 0
     }
    ],
    "log": [
-    "429 req-32b834eb key=demo-agent route=strong-models upstream=strong model=fake-large-1 cost=$0 error=budget_exceeded 5ms"
+    "429 req-43f031e0 key=demo-agent route=strong-models upstream=strong model=fake-large-1 cost=$0 error=budget_exceeded 5ms"
    ],
    "title": "A call that could pass the budget is refused before it is sent",
    "note": "This call could produce 1000 output tokens at $15 per million, more than the key's whole daily cap of $0.01. The gateway reserves the most a call can cost before sending it, so it refuses now, with the numbers and a Retry-After, and nothing is charged.",
@@ -343,8 +343,8 @@
    "upstreamCalls": 1,
    "usage": [
     {
-     "ts": "2026-10-31T11:36:24.452Z",
-     "id": "req-60d67c17",
+     "ts": "2026-11-03T10:36:19.104Z",
+     "id": "req-898cc89e",
      "key": "demo-agent",
      "route": "cheap-models",
      "upstream": "cheap",
@@ -359,21 +359,21 @@
      "stream": true,
      "streamEnd": "done",
      "latencyMs": 12,
-     "traceId": "7d3f521a3883af835dbb6ed755c1faae",
-     "spanId": "f7e4467020815e54"
+     "traceId": "066ec39c1092a884dfb740d558e3a8bf",
+     "spanId": "39729f63cd064f80"
     }
    ],
    "ledger": [
     {
      "key": "demo-agent",
-     "day": "2026-10-31",
+     "day": "2026-11-03",
      "dayUsd": 0.0000174,
      "dailyUsd": 0.01,
      "inFlight": 0
     }
    ],
    "log": [
-    "200 req-60d67c17 key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0.00000855 stream=done 12ms"
+    "200 req-898cc89e key=demo-agent route=cheap-models upstream=cheap model=fake-small-1 cost=$0.00000855 stream=done 12ms"
    ],
    "title": "A streamed answer is held until it has been read",
    "note": "With stream: true the client gets server-sent events. The gateway asks the provider for a usage chunk, reads the whole stream, runs the leak guard over the answer, and only then sends the events, with the cost settled from the provider's count.",
@@ -385,14 +385,14 @@
   {
    "actor": "human",
    "command": "$ agent-gate usage --verify",
-   "answer": "key         day         ledger      usage log   month    ledger      usage log   result\ndemo-agent  2026-10-31  $0.0000174  $0.0000174  2026-10  $0.0000174  $0.0000174  ok",
+   "answer": "key         day         ledger      usage log   month    ledger      usage log   result\ndemo-agent  2026-11-03  $0.0000174  $0.0000174  2026-11  $0.0000174  $0.0000174  ok",
    "exitCode": 0,
    "upstreamCalls": 0,
    "usage": [],
    "ledger": [
     {
      "key": "demo-agent",
-     "day": "2026-10-31",
+     "day": "2026-11-03",
      "dayUsd": 0.0000174,
      "dailyUsd": 0.01,
      "inFlight": 0
@@ -414,7 +414,7 @@
   "leakStep": {
    "id": "leakStep",
    "file": "src/llm/server.ts",
-   "line": 274,
+   "line": 300,
    "text": "    // 4. Leak guard. The error names the rule, never the text it matched.\n    const guarded = guardMessages(guardPolicy, messages);\n    if (guarded.action === \"block\") {\n      return finish(\n        400,\n        apiError(\n          \"secret_detected\",\n          `agent-gate: the messages contain text that looks like a secret (rule ${guarded.rule}), so the request was not sent. Remove it and try again; if it was a real secret, rotate it.`,\n          { param: \"messages\", rule: guarded.rule },\n        ),\n        { error: \"secret_detected\", rule: guarded.rule, side: \"prompt\" },\n      );\n    }"
   },
   "guardMessages": {
@@ -426,26 +426,26 @@
   "estimate": {
    "id": "estimate",
    "file": "src/llm/server.ts",
-   "line": 316,
+   "line": 342,
    "text": "    // 5. Reserve the most this call can cost on any upstream it may reach.\n    const promptChars = messageTexts(outgoing).reduce((sum, t) => sum + t.length, 0) + (body.tools === undefined ? 0 : JSON.stringify(body.tools).length);\n    const inputTokens = estimateInputTokens(promptChars);\n    const outputLimit = (body.max_completion_tokens ?? body.max_tokens ?? config.defaultMaxTokens) as number;\n    const outputTokens = outputLimit * ((body.n ?? 1) as number);\n    const estimate = Math.max(...targets.map((t) => costUsd(t.upstream.pricePerMTok, inputTokens, outputTokens)));"
   },
   "capCheck": {
    "id": "capCheck",
    "file": "src/llm/budget.ts",
-   "line": 177,
+   "line": 370,
    "text": "      const checks: Array\u003c[Cap, number, number, number]> = [\n        [\"daily\", key.dailyUsd, entry.dayUsd, nextUtcDay(now)],\n        [\"monthly\", key.monthlyUsd, entry.monthUsd, nextUtcMonth(now)],\n      ];\n      for (const [cap, capUsd, spentUsd, periodEnd] of checks) {\n        if (roundUsd(spentUsd + reservedUsd + usd) > capUsd) {\n          // If the settled spend alone leaves no room, only the next period helps.\n          const retryAfterSeconds = roundUsd(spentUsd + usd) > capUsd ? Math.max(1, Math.ceil((periodEnd - now) / 1000)) : 1;\n          return { ok: false, cap, capUsd, spentUsd, reservedUsd, requestedUsd: usd, retryAfterSeconds };\n        }\n      }"
   },
   "streamHeld": {
    "id": "streamHeld",
    "file": "src/llm/server.ts",
-   "line": 654,
+   "line": 772,
    "text": "    // Buffered: nothing has been sent yet.\n    if (end === \"client_closed\") return record(499, { ...spent, error: \"client_closed\" });\n    if (failed) return finish(failed.status, failed.body, { ...spent, error: failed.code });\n    // A shape the gateway cannot read is not guessed at: what it would pass on could not be scanned.\n    if (assembler.unreadable) {\n      return finish(\n        502,\n        apiError(\"bad_upstream_response\", `agent-gate: the upstream's stream had ${assembler.unreadable}, which the gateway cannot read and scan, so it was not passed on. The call was paid for.`, {\n          type: \"api_error\",\n        }),\n        { ...spent, error: \"bad_upstream_response\" },\n      );\n    }\n    // The answer put back together (a match can span chunks) and every chunk on its own (every field of"
   },
   "settle": {
    "id": "settle",
    "file": "src/llm/server.ts",
-   "line": 632,
-   "text": "    const used = readUsage({ usage: assembler.usage });\n    const cost = used ? costUsd(target.upstream.pricePerMTok, used.input, used.output) : reservation.usd;\n    const settled = settleOrLog(keyName, reservation, cost);\n    const spent: Outcome = {\n      inputTokens: used?.input ?? estimate.input,\n      outputTokens: used?.output ?? estimate.output,\n      costUsd: cost,\n      usage: used ? \"upstream\" : \"estimate\",\n      ...via,"
+   "line": 750,
+   "text": "    const used = readUsage({ usage: assembler.usage });\n    const cost = used ? costUsd(target.upstream.pricePerMTok, used.input, used.output) : reservation.usd;\n    const settled = settleOrLog(keyName, reservation, cost, (used?.input ?? estimate.input) + (used?.output ?? estimate.output));\n    const spent: Outcome = {\n      inputTokens: used?.input ?? estimate.input,\n      outputTokens: used?.output ?? estimate.output,\n      costUsd: cost,\n      usage: used ? \"upstream\" : \"estimate\",\n      ...via,"
   }
  }
 }

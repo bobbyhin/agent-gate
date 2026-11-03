@@ -1,6 +1,17 @@
-// Budgets: a daily and a monthly cap in US dollars for every gateway key, and three optional stop
-// rules per key: calls per minute (maxCallsPerMinute), and calls and dollars per run (runMaxCalls,
-// runMaxUsd), where a run is what a client names in its x-run-id header.
+// Budgets: a daily and a monthly cap in US dollars for every gateway key, and optional stop rules per
+// key: calls per minute (maxCallsPerMinute), and limits per run, where a run is what a client names in
+// its x-run-id header: calls, dollars, seconds and tokens (runMaxCalls, runMaxUsd, runMaxSeconds,
+// runMaxTokens).
+//
+// Loop exits. A loop that grades its own rounds (propose, judge, repeat) reports each round's score
+// (POST /v1/runs/score, src/llm/server.ts) and the ledger decides, in this order: SHIP when the score
+// reaches runShipScore; STOP on budget when the run has used its scored rounds (runMaxRounds) or any of
+// the limits above; STOP on a flat line after runFlatRounds rounds in a row that gain no more than
+// runMinGain over the best score. A run that has stopped stays stopped: every later call in it is
+// refused, and a later score changes nothing. The key's limits are hard caps: a client may lower them
+// for its own run (x-run-budget, kept as the lowest it ever declared), never raise them. The score is
+// the client's claim, so it can only end a run early; the limits the gateway counts itself (calls,
+// seconds, tokens, dollars) bound a run whatever it reports.
 //
 // Before a call, the gateway reserves an estimate of its cost; the reservation is refused if the
 // key's settled spend plus everything still reserved plus this estimate would pass a cap. After
@@ -45,7 +56,7 @@ export interface KeySpend {
   settled?: Record<string, string>;
   /** maxCallsPerMinute: when the calls of the last minute were let through (ms since the epoch). */
   recent?: number[];
-  /** runMaxCalls and runMaxUsd: each run's calls and settled dollars, by the client's run id. */
+  /** The run limits and exits: each run's calls, settled dollars and the rest, by the client's run id. */
   runs?: Record<string, RunSpend>;
 }
 
@@ -55,13 +66,154 @@ export interface Reservation {
   expiresAt: string;
   /** The run the call belongs to, when the key has a run cap. */
   runId?: string;
+  /** The call's estimated tokens, held against its run's runMaxTokens while it is in flight. */
+  tokens?: number;
 }
 
 export interface RunSpend {
   calls: number;
   usd: number;
-  /** The run is forgotten RUN_MEMORY_MS after this. */
+  /** The run is forgotten RUN_MEMORY_MS after this: its last call, admitted or refused, or its last score. */
   lastSeen: string;
+  /** When the ledger first saw the run: runMaxSeconds counts from here. */
+  startedAt?: string;
+  /** Input and output tokens booked: runMaxTokens. */
+  tokens?: number;
+  /** Scores reported: how many (runMaxRounds), the best one that counted as a gain, and the rounds since it (runFlatRounds). */
+  rounds?: number;
+  best?: number;
+  flat?: number;
+  /** The lowest limits the run declared for itself (x-run-budget). They can go down, never up. */
+  budget?: RunBudget;
+  /** Set once, by a score report that ended the run. Every later call in the run is refused. */
+  stopped?: RunStop;
+}
+
+/** What a client may declare for its own run with x-run-budget: limits under the key's, never over. */
+export interface RunBudget {
+  calls?: number;
+  rounds?: number;
+  seconds?: number;
+  tokens?: number;
+  usd?: number;
+}
+
+export const RUN_BUDGET_FIELDS = ["calls", "rounds", "seconds", "tokens", "usd"] as const;
+export type RunBudgetField = (typeof RUN_BUDGET_FIELDS)[number];
+
+/** How a run ended: ship (good enough), budget (a limit used up) or flat_line (no gain any more). */
+export type RunExit = "ship" | "budget" | "flat_line";
+
+export interface RunStop {
+  exit: RunExit;
+  /** The config field that ended it: runShipScore, runFlatRounds, runMaxRounds, runMaxCalls and so on. */
+  rule: string;
+  /** In words, from the gateway: the round, the score, the limit. */
+  why: string;
+  at: string;
+}
+
+/** The limits a run is held to now: the key's, each lowered by what the run declared. */
+export interface RunLimits {
+  calls?: number;
+  rounds?: number;
+  seconds?: number;
+  tokens?: number;
+  usd?: number;
+  shipScore?: number;
+  flatRounds?: number;
+  minGain: number;
+}
+
+/** True when the key has any per-run limit or exit, so its runs are counted. */
+export function hasRunRules(key: GatewayKey): boolean {
+  return [key.runMaxCalls, key.runMaxUsd, key.runMaxSeconds, key.runMaxTokens, key.runMaxRounds, key.runShipScore, key.runFlatRounds].some((v) => v !== undefined);
+}
+
+/** The key's caps, each lowered by every declared budget that sets it lower. Nothing here can raise a cap. */
+export function runLimits(key: GatewayKey, ...declared: Array<RunBudget | undefined>): RunLimits {
+  const caps: Record<RunBudgetField, number | undefined> = { calls: key.runMaxCalls, rounds: key.runMaxRounds, seconds: key.runMaxSeconds, tokens: key.runMaxTokens, usd: key.runMaxUsd };
+  const limits: RunLimits = { minGain: key.runMinGain ?? 0 };
+  for (const field of RUN_BUDGET_FIELDS) {
+    let limit = caps[field];
+    for (const budget of declared) {
+      const value = budget?.[field];
+      if (value !== undefined && (limit === undefined || value < limit)) limit = value;
+    }
+    if (limit !== undefined) limits[field] = limit;
+  }
+  if (key.runShipScore !== undefined) limits.shipScore = key.runShipScore;
+  if (key.runFlatRounds !== undefined) limits.flatRounds = key.runFlatRounds;
+  return limits;
+}
+
+/** The fields of a declared budget that ask for more than the key allows: clamped to the key's cap, and worth a line in the log. */
+export function overCaps(key: GatewayKey, budget: RunBudget | undefined): RunBudgetField[] {
+  const caps = runLimits(key);
+  return RUN_BUDGET_FIELDS.filter((field) => budget?.[field] !== undefined && caps[field] !== undefined && (budget[field] as number) > (caps[field] as number));
+}
+
+/**
+ * Reads an x-run-budget header: "calls=12, rounds=4, seconds=600, tokens=50000, usd=0.25", any of the
+ * five, each once. Counts are whole numbers from 1; usd is a positive number. Returns an error message
+ * for anything else: a budget that cannot be read is refused, not ignored.
+ */
+export function parseRunBudget(header: string): RunBudget | { error: string } {
+  const budget: RunBudget = {};
+  const parts = header.split(",").map((part) => part.trim());
+  if (parts.length === 0 || parts.some((part) => part === "")) return { error: 'x-run-budget must be a list such as "calls=12, rounds=4, seconds=600, tokens=50000, usd=0.25"' };
+  for (const part of parts) {
+    const m = /^([a-z]+)\s*=\s*([0-9]+(?:\.[0-9]+)?)$/.exec(part);
+    const field = m?.[1] as RunBudgetField | undefined;
+    if (!m || !field || !(RUN_BUDGET_FIELDS as readonly string[]).includes(field)) {
+      return { error: `x-run-budget: ${JSON.stringify(part.slice(0, 40))} is not one of ${RUN_BUDGET_FIELDS.map((f) => `${f}=<number>`).join(", ")}` };
+    }
+    if (budget[field] !== undefined) return { error: `x-run-budget sets ${field} twice` };
+    const value = Number(m[2]);
+    const whole = field !== "usd";
+    if (!(value > 0) || (whole && (!Number.isSafeInteger(value) || value > 1_000_000_000)) || !Number.isFinite(value)) {
+      return { error: `x-run-budget: ${field} must be ${whole ? "a whole number from 1 to 1000000000" : "a positive number"}` };
+    }
+    budget[field] = value;
+  }
+  return budget;
+}
+
+/** Field by field, the lower of two declared budgets: a run's declaration only ever goes down. */
+function lowerOf(a: RunBudget | undefined, b: RunBudget | undefined): RunBudget | undefined {
+  if (!a) return b && { ...b };
+  if (!b) return { ...a };
+  const out: RunBudget = { ...a };
+  for (const field of RUN_BUDGET_FIELDS) {
+    const value = b[field];
+    if (value !== undefined && (out[field] === undefined || value < (out[field] as number))) out[field] = value;
+  }
+  return out;
+}
+
+/** What a call brings to reserve() for its run: its estimated tokens, and the budget its x-run-budget declares. */
+export interface RunCall {
+  tokens?: number;
+  budget?: RunBudget;
+}
+
+/** What the gateway answers a score report with (POST /v1/runs/score). */
+export interface ScoreOutcome {
+  runId: string;
+  /** continue: another round; ship: use the last result; stop: give up, a limit or the flat line ended it. */
+  decision: "continue" | "ship" | "stop";
+  /** How the run ended, when it has. */
+  stop?: RunStop;
+  /** The run had ended before this score came in, so the score was not counted. */
+  already?: true;
+  score: number;
+  /** Scored rounds so far. */
+  round: number;
+  best?: number;
+  /** Scored rounds in a row without a gain. */
+  flat: number;
+  spent: { calls: number; seconds: number; tokens: number; usd: number };
+  limits: RunLimits;
 }
 
 /** What settle() did: booked the reservation; booked one it no longer had ("orphan"); or nothing, because it was settled before. */
@@ -83,10 +235,19 @@ export type ReserveOutcome =
     }
   /** The key made maxCallsPerMinute calls in the last 60 seconds. */
   | { ok: false; cap: "maxCallsPerMinute"; limit: number; retryAfterSeconds: number }
-  /** The run made runMaxCalls calls. Waiting does not help: the run has to stop. */
-  | { ok: false; cap: "runMaxCalls"; runId: string; limit: number; calls: number }
+  /**
+   * The run made runMaxCalls calls. Waiting does not help: the run has to stop. For each run limit,
+   * `declared` is set when the run's own x-run-budget set it, lower than the key's cap.
+   */
+  | { ok: false; cap: "runMaxCalls"; runId: string; limit: number; calls: number; declared?: true }
   /** The run's settled spend, plus what its calls in flight hold, plus this call, would pass runMaxUsd. */
-  | { ok: false; cap: "runMaxUsd"; runId: string; limit: number; spentUsd: number; reservedUsd: number; requestedUsd: number };
+  | { ok: false; cap: "runMaxUsd"; runId: string; limit: number; spentUsd: number; reservedUsd: number; requestedUsd: number; declared?: true }
+  /** runMaxSeconds have passed since the run's first call. */
+  | { ok: false; cap: "runMaxSeconds"; runId: string; limit: number; seconds: number; declared?: true }
+  /** The run's booked tokens, plus what its calls in flight hold, plus this call's estimate, would pass runMaxTokens. */
+  | { ok: false; cap: "runMaxTokens"; runId: string; limit: number; spentTokens: number; reservedTokens: number; requestedTokens: number; declared?: true }
+  /** A score report ended the run (ship, budget, flat line): it stays ended. */
+  | { ok: false; cap: "runStopped"; runId: string; stop: RunStop };
 
 export interface KeyUsage {
   key: string;
@@ -148,11 +309,12 @@ export class Ledger {
   }
 
   /**
-   * Holds `usd` for a call, or refuses it. In this order: the key's calls per minute, the run's
-   * calls, the run's dollars, the key's daily cap, its monthly cap. `runId` counts only for a key
-   * with a run cap; a client that sends none is held to the other limits only.
+   * Holds `usd` for a call, or refuses it. In this order: the key's calls per minute; then, for a run,
+   * whether a score report ended it, its calls, seconds, tokens and dollars; then the key's daily cap
+   * and its monthly cap. `runId` counts only for a key with a run limit, or a run that declared a
+   * budget (`call.budget`, from x-run-budget); a client that sends none is held to the other limits.
    */
-  reserve(key: GatewayKey, usd: number, runId?: string): ReserveOutcome {
+  reserve(key: GatewayKey, usd: number, runId?: string, call: RunCall = {}): ReserveOutcome {
     return this.update((spend, now): ReserveOutcome => {
       const entry = account(spend, key.name, now);
       const recent = (entry.recent ?? []).filter((t) => t > now - MINUTE_MS);
@@ -160,16 +322,47 @@ export class Ledger {
         const oldest = recent[recent.length - key.maxCallsPerMinute] ?? now;
         return { ok: false, cap: "maxCallsPerMinute", limit: key.maxCallsPerMinute, retryAfterSeconds: Math.max(1, Math.ceil((oldest + MINUTE_MS - now) / 1000)) };
       }
-      const capsRun = runId !== undefined && (key.runMaxCalls !== undefined || key.runMaxUsd !== undefined);
-      const run = capsRun && entry.runs && Object.prototype.hasOwnProperty.call(entry.runs, runId) ? entry.runs[runId] : undefined;
+      const known = runId !== undefined && entry.runs !== undefined && Object.prototype.hasOwnProperty.call(entry.runs, runId);
+      const capsRun = runId !== undefined && (hasRunRules(key) || call.budget !== undefined || known);
+      let run = known ? (entry.runs as Record<string, RunSpend>)[runId as string] : undefined;
       if (capsRun) {
+        const at = new Date(now).toISOString();
+        // A run that declares a budget is remembered from that call on, admitted or refused, with the
+        // lowest budget it ever declared: a declaration on a refused call still holds the next call.
+        if (!run && call.budget !== undefined) {
+          entry.runs ??= {};
+          run = { calls: 0, usd: 0, lastSeen: at, startedAt: at };
+          entry.runs[runId as string] = run;
+        }
+        if (run) {
+          // A refused call keeps its run in memory as well: a loop that keeps knocking stays stopped.
+          run.lastSeen = at;
+          const budget = lowerOf(run.budget, call.budget);
+          if (budget) run.budget = budget;
+        }
+        if (run?.stopped) return { ok: false, cap: "runStopped", runId, stop: run.stopped };
+        const limits = runLimits(key, run?.budget);
+        const caps = runLimits(key);
+        const declared = (field: RunBudgetField): { declared?: true } => ((limits[field] as number) < (caps[field] ?? Infinity) ? { declared: true } : {});
         const calls = run?.calls ?? 0;
-        if (key.runMaxCalls !== undefined && calls >= key.runMaxCalls) return { ok: false, cap: "runMaxCalls", runId, limit: key.runMaxCalls, calls };
-        if (key.runMaxUsd !== undefined) {
+        if (limits.calls !== undefined && calls >= limits.calls) return { ok: false, cap: "runMaxCalls", runId, limit: limits.calls, calls, ...declared("calls") };
+        if (limits.seconds !== undefined && run?.startedAt !== undefined) {
+          const seconds = Math.floor((now - Date.parse(run.startedAt)) / 1000);
+          if (!(seconds < limits.seconds)) return { ok: false, cap: "runMaxSeconds", runId, limit: limits.seconds, seconds, ...declared("seconds") };
+        }
+        if (limits.tokens !== undefined) {
+          const held = Object.values(entry.reservations).reduce((sum, r) => sum + (r.runId === runId ? (r.tokens ?? 0) : 0), 0);
+          const spentTokens = run?.tokens ?? 0;
+          const requestedTokens = call.tokens ?? 0;
+          if (spentTokens + held + requestedTokens > limits.tokens) {
+            return { ok: false, cap: "runMaxTokens", runId, limit: limits.tokens, spentTokens, reservedTokens: held, requestedTokens, ...declared("tokens") };
+          }
+        }
+        if (limits.usd !== undefined) {
           const held = roundUsd(Object.values(entry.reservations).reduce((sum, r) => sum + (r.runId === runId ? r.usd : 0), 0));
           const spent = run?.usd ?? 0;
-          if (roundUsd(spent + held + usd) > key.runMaxUsd) {
-            return { ok: false, cap: "runMaxUsd", runId, limit: key.runMaxUsd, spentUsd: spent, reservedUsd: held, requestedUsd: usd };
+          if (roundUsd(spent + held + usd) > limits.usd) {
+            return { ok: false, cap: "runMaxUsd", runId, limit: limits.usd, spentUsd: spent, reservedUsd: held, requestedUsd: usd, ...declared("usd") };
           }
         }
       }
@@ -186,11 +379,21 @@ export class Ledger {
         }
       }
       const id = newId(entry.reservations);
-      entry.reservations[id] = { usd, expiresAt: new Date(now + this.reservationTtlMs).toISOString(), ...(capsRun ? { runId } : {}) };
+      entry.reservations[id] = {
+        usd,
+        expiresAt: new Date(now + this.reservationTtlMs).toISOString(),
+        ...(capsRun ? { runId } : {}),
+        ...(capsRun && call.tokens !== undefined ? { tokens: call.tokens } : {}),
+      };
       if (key.maxCallsPerMinute !== undefined) entry.recent = [...recent, now];
       if (capsRun) {
         entry.runs ??= {};
-        entry.runs[runId] = { calls: (run?.calls ?? 0) + 1, usd: run?.usd ?? 0, lastSeen: new Date(now).toISOString() };
+        const at = new Date(now).toISOString();
+        const next: RunSpend = run ?? { calls: 0, usd: 0, lastSeen: at };
+        next.calls += 1;
+        next.lastSeen = at;
+        next.startedAt ??= at;
+        entry.runs[runId as string] = next;
       }
       return { ok: true, id, usd };
     });
@@ -200,8 +403,9 @@ export class Ledger {
    * Books the real cost of a finished call and drops its reservation, once per reservation id. A
    * second settle of the same id books nothing ("duplicate"). A settle whose reservation is gone, because
    * it expired before the call ended, books the cost (it was spent) and says "orphan" so it can be flagged.
+   * `tokens` (input plus output) are booked to the call's run, for runMaxTokens.
    */
-  settle(keyName: string, reservationId: string, usd: number): SettleOutcome {
+  settle(keyName: string, reservationId: string, usd: number, tokens?: number): SettleOutcome {
     return this.update((spend, now): SettleOutcome => {
       const entry = account(spend, keyName, now);
       entry.settled ??= {};
@@ -211,9 +415,79 @@ export class Ledger {
       entry.dayUsd = roundUsd(entry.dayUsd + usd);
       entry.monthUsd = roundUsd(entry.monthUsd + usd);
       entry.settled[reservationId] = new Date(now + this.reservationTtlMs).toISOString();
-      const run = reservation?.runId !== undefined && entry.runs ? entry.runs[reservation.runId] : undefined;
-      if (run) run.usd = roundUsd(run.usd + usd);
+      const runId = reservation?.runId;
+      const run = runId !== undefined && entry.runs && Object.prototype.hasOwnProperty.call(entry.runs, runId) ? entry.runs[runId] : undefined;
+      if (run) {
+        run.usd = roundUsd(run.usd + usd);
+        if (tokens !== undefined) run.tokens = (run.tokens ?? 0) + tokens;
+      }
       return reservation ? "booked" : "orphan";
+    });
+  }
+
+  /**
+   * A loop reports the score of its latest round, and the run's exits decide, in this order: ship
+   * (the score reaches runShipScore), budget (the run has used its scored rounds, or any limit the
+   * gateway counts: calls, seconds, tokens, dollars), flat line (runFlatRounds rounds in a row without
+   * a gain of more than runMinGain over the best score). A decision other than continue ends the run
+   * for good. A run that has already ended keeps its first decision: the score is not counted.
+   * undefined: the key has no such run. A run starts with its first call (for a key with run limits, or
+   * one that declares a budget), so a report, which costs nothing, cannot fill the ledger with runs.
+   */
+  score(key: GatewayKey, runId: string, score: number, budget?: RunBudget): ScoreOutcome | undefined {
+    return this.update((spend, now): ScoreOutcome | undefined => {
+      const entry = account(spend, key.name, now);
+      if (!entry.runs || !Object.prototype.hasOwnProperty.call(entry.runs, runId)) return undefined;
+      const at = new Date(now).toISOString();
+      const run = entry.runs[runId] as RunSpend;
+      run.lastSeen = at;
+      run.startedAt ??= at;
+      const declared = lowerOf(run.budget, budget);
+      if (declared) run.budget = declared;
+      const limits = runLimits(key, run.budget);
+      const seconds = Math.floor((now - Date.parse(run.startedAt)) / 1000);
+      const result = (already: boolean): ScoreOutcome => ({
+        runId,
+        decision: run.stopped === undefined ? "continue" : run.stopped.exit === "ship" ? "ship" : "stop",
+        ...(run.stopped ? { stop: run.stopped } : {}),
+        ...(already ? { already: true as const } : {}),
+        score,
+        round: run.rounds ?? 0,
+        ...(run.best !== undefined ? { best: run.best } : {}),
+        flat: run.flat ?? 0,
+        spent: { calls: run.calls, seconds, tokens: run.tokens ?? 0, usd: run.usd },
+        limits,
+      });
+      if (run.stopped) return result(true);
+
+      const round = (run.rounds ?? 0) + 1;
+      run.rounds = round;
+      if (run.best === undefined || score > run.best + limits.minGain) {
+        run.best = score;
+        run.flat = 0;
+      } else run.flat = (run.flat ?? 0) + 1;
+
+      const stop = (exit: RunExit, rule: string, why: string): void => {
+        run.stopped = { exit, rule, why, at };
+      };
+      const ownBudget = (field: RunBudgetField): string => ((limits[field] as number) < (runLimits(key)[field] ?? Infinity) ? " (its own x-run-budget)" : "");
+      if (limits.shipScore !== undefined && score >= limits.shipScore) {
+        stop("ship", "runShipScore", `round ${round} scored ${score}, at or above the ship score ${limits.shipScore}`);
+      } else if (limits.rounds !== undefined && round >= limits.rounds) {
+        stop("budget", "runMaxRounds", `${round} scored rounds, the run's limit${ownBudget("rounds")}`);
+      } else if (limits.calls !== undefined && run.calls >= limits.calls) {
+        stop("budget", "runMaxCalls", `${run.calls} calls, the run's limit${ownBudget("calls")}`);
+      } else if (limits.seconds !== undefined && seconds >= limits.seconds) {
+        stop("budget", "runMaxSeconds", `${seconds} s since the run's first call, its limit is ${limits.seconds} s${ownBudget("seconds")}`);
+      } else if (limits.tokens !== undefined && (run.tokens ?? 0) >= limits.tokens) {
+        stop("budget", "runMaxTokens", `${run.tokens ?? 0} tokens booked, the run's limit is ${limits.tokens}${ownBudget("tokens")}`);
+      } else if (limits.usd !== undefined && run.usd >= limits.usd) {
+        stop("budget", "runMaxUsd", `$${formatUsd(run.usd)} booked, the run's limit is $${formatUsd(limits.usd)}${ownBudget("usd")}`);
+      } else if (limits.flatRounds !== undefined && (run.flat ?? 0) >= limits.flatRounds) {
+        const gain = limits.minGain > 0 ? ` of more than ${limits.minGain}` : "";
+        stop("flat_line", "runFlatRounds", `${run.flat ?? 0} scored rounds in a row without a gain${gain} over the best score ${run.best}`);
+      }
+      return result(false);
     });
   }
 

@@ -40,8 +40,9 @@ import {
   type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { ApprovalStore, hashArguments, type Approval } from "./approvals.js";
-import { AuditLog, hashJson } from "./audit.js";
+import { ActionTokens, spentNonces, type TokenBinding } from "./action-tokens.js";
+import { ApprovalStore, hashArguments, type Approval, type TokenCheck, type TokenRefusal } from "./approvals.js";
+import { AuditLog, hashJson, type AuditEntry } from "./audit.js";
 import type { GatewayConfig } from "./config.js";
 import { contextFromMeta, type CallContext } from "./context.js";
 import { ConfigError } from "./validate.js";
@@ -146,6 +147,33 @@ export async function createCore(
   fs.mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
   const approvals = new ApprovalStore(config.stateDir, config.approvalTtlMs);
   const audit = new AuditLog(path.join(config.stateDir, "audit.jsonl"), config.auditArguments);
+  // Irreversible calls (ADR 0013): an approval counts only with a proof made under the key, and a token
+  // that let a call through once never does again. The spent tokens come from the audit log at startup,
+  // then from this process; an old approvals.json put back is refused as a replay.
+  const tokens = new ActionTokens(config.actionTokenKeyFile);
+  const irreversibleRules = policies.some((p) => p.rules.some((r) => r.irreversible));
+  const spentTokens = irreversibleRules ? spentNonces(audit.file, log) : new Set<string>();
+  if (irreversibleRules) {
+    // The key exists from the gateway's first start, before any request could be approved. A key that
+    // cannot be made or read is reported; every proof then fails, so no irreversible call runs.
+    try {
+      tokens.key(true);
+    } catch (err) {
+      log(`irreversible calls cannot be approved: ${errorText(err)}`);
+    }
+  }
+  const tokenCheck: TokenCheck = {
+    verify(approval) {
+      try {
+        return tokens.verify(approval as TokenBinding, approval.tokenProof);
+      } catch (err) {
+        // Fail closed: a key that cannot be read makes every proof invalid.
+        log(`could not check the action token of ${approval.id}, so it is not used: ${errorText(err)}`);
+        return false;
+      }
+    },
+    spent: (nonce) => spentTokens.has(nonce),
+  };
   const windows = policies.flatMap((p) => p.repeat.map((limit) => limit.windowMs));
   const repeats = windows.length > 0 ? new RepeatStore(config.stateDir, Math.max(...windows)) : undefined;
   const pins = config.pinTools ? new ToolPins(config.stateDir) : undefined;
@@ -311,7 +339,7 @@ export async function createCore(
         }
       }
       const rewritten = verdict.rewrittenBy ? { originalArgsHash: hashArguments(call.args), rewrittenBy: verdict.rewrittenBy } : {};
-      const record = (forwarded: boolean, approvalId?: string) =>
+      const record = (forwarded: boolean, approvalId?: string, token: Pick<AuditEntry, "nonce" | "tokenRefused" | "refusedApprovalId"> = {}) =>
         audit.write(
           {
             connId,
@@ -324,6 +352,7 @@ export async function createCore(
             argsHash,
             forwarded,
             ...(approvalId ? { approvalId } : {}),
+            ...token,
             ...(servers.get(call.server)?.url ? { transport: "http" as const } : {}),
             ...(spec.agent !== undefined ? { agent: spec.agent } : {}),
             ...(spec.profile !== undefined ? { profile: spec.profile } : {}),
@@ -363,15 +392,20 @@ export async function createCore(
             ...(verdict.alsoMatched ? { alsoMatched: verdict.alsoMatched } : {}),
             ...(verdict.rewrittenBy ? { rewrittenBy: verdict.rewrittenBy } : {}),
             ...(spec.agent !== undefined ? { agent: spec.agent } : {}),
+            ...(verdict.irreversible ? { irreversible: tokenCheck } : {}),
           });
           if (outcome.kind === "approved" || outcome.kind === "standing") {
+            // An action token lets one call through: spent before the call goes on, so a copy cannot follow it.
+            const nonce = outcome.kind === "approved" && verdict.irreversible ? outcome.approval.nonce : undefined;
+            if (nonce !== undefined) spentTokens.add(nonce);
             // the audit line names the approval, or the standing approval, that let it through
-            record(true, outcome.kind === "approved" ? outcome.approval.id : outcome.grant.id);
+            record(true, outcome.kind === "approved" ? outcome.approval.id : outcome.grant.id, nonce !== undefined ? { nonce } : {});
             if (repeats && limited) repeats.record(limits, call.server, call.tool, argsHash, spec.agent);
             return run();
           }
-          record(false, outcome.approval.id);
-          return refuse(errorResult(outcome.kind === "denied" ? deniedText(outcome.approval) : pendingText(outcome.approval, outcome.created, outcome.replaced)));
+          const refused = outcome.kind === "pending" ? outcome.refused : undefined;
+          record(false, outcome.approval.id, refused ? { tokenRefused: refused.reason, refusedApprovalId: refused.approval.id } : {});
+          return refuse(errorResult(outcome.kind === "denied" ? deniedText(outcome.approval) : pendingText(outcome.approval, outcome.created, outcome.replaced, refused)));
         }
       }
     }
@@ -494,16 +528,29 @@ function errorResult(message: string): CallToolResult {
 
 const DO_NOT_WORK_AROUND = "Do not try to get the same result another way.";
 
-function pendingText(approval: Approval, created: boolean, replaced?: Approval): string {
+/** Why an irreversible call could not use an approval, as the first line the agent reads. */
+const REFUSED_TEXT: Readonly<Record<TokenRefusal["reason"], (a: Approval) => string>> = {
+  used: (a) => `agent-gate: the approval of this exact call (${a.id}) was used already; an action token lets one call through, so this one was not run.`,
+  expired: (a) => `agent-gate: the approval of this exact call (${a.id}) expired at ${a.expiresAt}, so it was not run.`,
+  "wrong-arguments": (a) => `agent-gate: ${a.id} approved this tool with other arguments; an action token covers only the call it was issued for, so this call was not run.`,
+  invalid: (a) => `agent-gate: the approval of this call (${a.id}) carries no valid action token, so it was not used and the call was not run.`,
+  replayed: (a) => `agent-gate: the action token of ${a.id} let a call through already; an old confirmation cannot be used again, so this call was not run.`,
+};
+
+function pendingText(approval: Approval, created: boolean, replaced?: Approval, refused?: TokenRefusal): string {
   return [
-    replaced
-      ? `agent-gate: a file this call names changed after it was approved (approval ${replaced.id}), so it was not run and needs a new decision.`
-      : created
-        ? "agent-gate: this call needs a human decision, so it was not run."
-        : "agent-gate: this call is still waiting for a human decision, so it was not run.",
+    refused
+      ? REFUSED_TEXT[refused.reason](refused.approval)
+      : replaced
+        ? `agent-gate: a file this call names changed after it was approved (approval ${replaced.id}), so it was not run and needs a new decision.`
+        : created
+          ? "agent-gate: this call needs a human decision, so it was not run."
+          : "agent-gate: this call is still waiting for a human decision, so it was not run.",
     `Reason: ${approval.why} (rule ${approval.rule})`,
     `Approval id: ${approval.id} (expires ${approval.expiresAt})`,
     `A human can approve it with: agent-gate approvals approve ${approval.id}`,
+    // The token itself is never in a result: the agent cannot give it, so it should not ask for it.
+    ...(approval.irreversible ? ["This action cannot be undone: the human confirms it at the CLI with an action token that is never shown to you."] : []),
     "Once it is approved, make exactly the same call again (same tool, same arguments) and it will run once. Different arguments need a new approval.",
     DO_NOT_WORK_AROUND,
   ].join("\n");

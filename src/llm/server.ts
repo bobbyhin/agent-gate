@@ -1,6 +1,8 @@
 // The LLM gateway: an OpenAI-compatible HTTP endpoint in front of one or more upstream providers.
 //
 //   POST /v1/chat/completions   Authorization: Bearer <gateway key>, optional x-agent-task header
+//   POST /v1/runs/score         the same key and an x-run-id: a loop reports its latest round's score,
+//                               and the run's exits answer continue, ship or stop (src/llm/budget.ts)
 //   GET  /healthz
 //   GET  /metrics               only with "metrics" in the config (metrics.ts): behind a key of its
 //                               own here, or without one on a loopback listener of its own
@@ -31,9 +33,9 @@ import type { AddressInfo } from "node:net";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import { cleanNote } from "../gateway/approvals.js";
-import { contextFromHeaders, parseTraceparent } from "../gateway/context.js";
+import { contextFromHeaders, parseTraceparent, type CallContext } from "../gateway/context.js";
 import { ConfigError } from "../gateway/validate.js";
-import { costUsd, estimateInputTokens, formatUsd, Ledger, roundUsd, type ReserveOutcome, type SettleOutcome } from "./budget.js";
+import { costUsd, estimateInputTokens, formatUsd, Ledger, overCaps, parseRunBudget, roundUsd, type ReserveOutcome, type RunBudget, type RunBudgetField, type SettleOutcome } from "./budget.js";
 import { hashKey, type GatewayKey, type LlmConfig, type Upstream } from "./config.js";
 import { guardMessages, guardResponse, messageTexts, type LeakPolicy } from "./leak-guard.js";
 import { CONTENT_TYPE, Metrics } from "./metrics.js";
@@ -61,7 +63,10 @@ export interface LlmGateway {
 }
 
 type ExtraHeaders = Record<string, string | number>;
-type Outcome = Partial<Pick<UsageEntry, "error" | "rule" | "side" | "inputTokens" | "outputTokens" | "costUsd" | "usage" | "attempts" | "fallback" | "upstream429" | "settle" | "responseRedacted" | "streamEnd">>;
+type Outcome = Partial<Pick<UsageEntry, "error" | "rule" | "side" | "inputTokens" | "outputTokens" | "costUsd" | "usage" | "attempts" | "fallback" | "upstream429" | "settle" | "responseRedacted" | "streamEnd" | "exit" | "why">>;
+
+/** Where a loop reports a round's score. */
+export const RUNS_SCORE_PATH = "/v1/runs/score";
 /** Writes the usage line (and the log line and the metrics) of a call, without answering it. */
 type Record_ = (status: number, outcome?: Outcome) => void;
 type Finish = (status: number, body: unknown, outcome?: Outcome, headers?: ExtraHeaders) => void;
@@ -149,8 +154,10 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
       return send(res, 200, { status: "ok" });
     }
     if (pathname === "/metrics") return serveMetrics(req, res, true);
-    if (pathname !== "/v1/chat/completions") return send(res, 404, apiError("not_found", "agent-gate serves POST /v1/chat/completions and GET /healthz"));
-    if (req.method !== "POST") return send(res, 405, apiError("method_not_allowed", "use POST /v1/chat/completions"), { allow: "POST" });
+    if (pathname !== "/v1/chat/completions" && pathname !== RUNS_SCORE_PATH) {
+      return send(res, 404, apiError("not_found", `agent-gate serves POST /v1/chat/completions, POST ${RUNS_SCORE_PATH} and GET /healthz`));
+    }
+    if (req.method !== "POST") return send(res, 405, apiError("method_not_allowed", `use POST ${pathname}`), { allow: "POST" });
 
     const key = authenticate(req.headers.authorization);
     if (!key) {
@@ -166,6 +173,16 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     const spanId = randomBytes(8).toString("hex");
     const traceparent = `00-${traceId}-${spanId}-${parseTraceparent(req.headers.traceparent)?.flags ?? "00"}`;
     res.setHeader("x-agent-gate-trace-id", traceId);
+    if (pathname === RUNS_SCORE_PATH) {
+      try {
+        await scoreRun(req, res, key, context, { id, traceId, spanId, started });
+      } catch (err) {
+        log(`${id} failed: ${errorText(err)}`);
+        if (res.headersSent) res.destroy();
+        else send(res, 500, apiError("gateway_error", "agent-gate failed while handling this request; the gateway log has the details"));
+      }
+      return;
+    }
     const taskHeader = req.headers["x-agent-task"];
     const task = typeof taskHeader === "string" ? cleanNote(taskHeader, TASK_MAX_CHARS) : undefined;
 
@@ -193,6 +210,9 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
         ...(outcome.responseRedacted === undefined ? {} : { responseRedacted: outcome.responseRedacted }),
         ...(where.stream ? { stream: true as const } : {}),
         ...(outcome.streamEnd === undefined ? {} : { streamEnd: outcome.streamEnd }),
+        ...(outcome.exit === undefined ? {} : { exit: outcome.exit }),
+        ...(outcome.why === undefined ? {} : { why: outcome.why }),
+        ...(where.budgetClamped ? { budgetClamped: where.budgetClamped } : {}),
         latencyMs: Math.round(performance.now() - started),
         traceId,
         spanId,
@@ -256,6 +276,12 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
     }
     const problem = checkRequest(body);
     if (problem) return finish(400, apiError(problem.code, `agent-gate: ${problem.message}`, { param: problem.param }), { error: problem.code });
+    // A run may declare a budget of its own, under the key's caps: it can lower them, never raise them.
+    const declared = readRunBudget(req, runId);
+    if (declared && "error" in declared) return finish(400, apiError("invalid_run_budget", `agent-gate: ${declared.error}`, { param: "x-run-budget" }), { error: "invalid_run_budget" });
+    const budget: RunBudget | undefined = declared;
+    const clamped = overCaps(key, budget);
+    if (clamped.length > 0) where.budgetClamped = clamped;
     const model = body.model as string;
     const messages = body.messages as unknown[];
     const streaming = body.stream === true;
@@ -339,7 +365,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
       }
     }
 
-    const reservation = ledger.reserve(key, estimate, runId);
+    const reservation = ledger.reserve(key, estimate, runId, { tokens: inputTokens + outputTokens, ...(budget ? { budget } : {}) });
     if (!reservation.ok) {
       const refused = refusal(reservation, key.name);
       return finish(429, refused.body, refused.outcome, refused.headers);
@@ -437,7 +463,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
             return finish(failedRead.status, failedRead.body, { error: failedRead.code, ...via, streamEnd: why });
           }
           open = false;
-          const settledLate = settleOrLog(key.name, reservation, reservation.usd);
+          const settledLate = settleOrLog(key.name, reservation, reservation.usd, inputTokens + outputTokens);
           const spentLate: Outcome = { inputTokens, outputTokens, costUsd: reservation.usd, usage: "estimate", ...via, ...(settledLate === "booked" ? {} : { settle: settledLate }), streamEnd: why };
           if (why === "client_closed") return record(499, { ...spentLate, error: "client_closed" });
           const failedLate = streamFailure(why, false);
@@ -470,7 +496,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
       const used = readUsage(json);
       const cost = used ? costUsd(outcome.target.upstream.pricePerMTok, used.input, used.output) : reservation.usd;
       open = false;
-      const settled = settleOrLog(key.name, reservation, cost);
+      const settled = settleOrLog(key.name, reservation, cost, (used?.input ?? inputTokens) + (used?.output ?? outputTokens));
       const spent: Outcome = {
         inputTokens: used?.input ?? inputTokens,
         outputTokens: used?.output ?? outputTokens,
@@ -529,15 +555,107 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
    * stays until it expires; "orphan" (the call outlived its reservation, so the cost was booked without
    * one) is reported too.
    */
-  function settleOrLog(keyName: string, reservation: { id: string }, cost: number): SettleOutcome {
+  function settleOrLog(keyName: string, reservation: { id: string }, cost: number, tokens: number): SettleOutcome {
     let settled: SettleOutcome = "booked";
     try {
-      settled = ledger.settle(keyName, reservation.id, cost);
+      settled = ledger.settle(keyName, reservation.id, cost, tokens);
     } catch (err) {
       log(`could not settle ${reservation.id} for key "${keyName}" ($${formatUsd(cost)}): ${errorText(err)}; its reservation stays until it expires`);
     }
     if (settled !== "booked") log(`settled ${reservation.id} for key "${keyName}" ($${formatUsd(cost)}) as ${settled}`);
     return settled;
+  }
+
+  /**
+   * POST /v1/runs/score: a loop reports its latest round's score ({"score": <number>}) for the run in
+   * x-run-id, and the ledger decides continue, ship or stop (budget.ts). The answer and the usage line
+   * ("event": "run-score") carry the decision; a stop carries its exit, rule and why. Nothing is sent
+   * upstream and nothing is charged. The run belongs to the key: another key's report cannot touch it.
+   */
+  async function scoreRun(req: http.IncomingMessage, res: http.ServerResponse, key: GatewayKey, context: CallContext, call: { id: string; traceId: string; spanId: string; started: number }): Promise<void> {
+    const write = (status: number, fields: Partial<UsageEntry>): void => {
+      const entry: Omit<UsageEntry, "ts"> = {
+        id: call.id,
+        event: "run-score",
+        key: key.name,
+        status,
+        ...fields,
+        inputTokens: 0,
+        outputTokens: 0,
+        costUsd: 0,
+        latencyMs: Math.round(performance.now() - call.started),
+        traceId: call.traceId,
+        spanId: call.spanId,
+        ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {}),
+        ...(context.session ? { session: context.session } : {}),
+        ...(context.runId ? { runId: context.runId } : {}),
+        ...(context.contextDropped ? { contextDropped: context.contextDropped } : {}),
+      };
+      try {
+        usageLog.write(entry, new Date(now()));
+      } catch (err) {
+        log(`could not write the usage log: ${errorText(err)}`);
+      }
+      log(`${status} ${call.id} key=${key.name} run-score${context.runId ? ` run=${context.runId}` : ""}${fields.decision ? ` decision=${fields.decision}` : ""}${fields.rule ? ` rule=${fields.rule}` : ""}${fields.error ? ` error=${fields.error}` : ""}`);
+    };
+    const refuse = (status: number, code: string, message: string, param: string): void => {
+      write(status, { error: code });
+      send(res, status, apiError(code, `agent-gate: ${message}`, { param }));
+    };
+
+    let raw: string;
+    try {
+      raw = await readBody(req, config.maxBodyBytes);
+    } catch (err) {
+      if (!(err instanceof BodyTooLarge)) throw err;
+      write(413, { error: "request_too_large" });
+      return send(res, 413, apiError("request_too_large", `agent-gate: the request body is larger than ${config.maxBodyBytes} bytes`), { connection: "close" });
+    }
+    const runId = context.runId;
+    if (runId === undefined) {
+      return refuse(400, "invalid_request", 'a score report needs an x-run-id header naming its run (1 to 128 letters, digits, ".", "_", ":" or "-")', "x-run-id");
+    }
+    const declared = readRunBudget(req, runId);
+    if (declared && "error" in declared) return refuse(400, "invalid_run_budget", declared.error, "x-run-budget");
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = undefined;
+    }
+    const score = isRecord(body) ? body.score : undefined;
+    if (!isRecord(body) || Object.keys(body).some((field) => field !== "score") || typeof score !== "number" || !Number.isFinite(score)) {
+      return refuse(400, "invalid_request", 'the body must be a JSON object with one field, "score": a number', "score");
+    }
+
+    const outcome = ledger.score(key, runId, score, declared);
+    if (!outcome) {
+      return refuse(404, "run_not_found", `key "${key.name}" has no run ${JSON.stringify(runId)}: a run starts with its first call, and a score belongs to a round that made calls`, "x-run-id");
+    }
+    const clamped = overCaps(key, declared);
+    write(200, {
+      score,
+      round: outcome.round,
+      ...(outcome.best !== undefined ? { best: outcome.best } : {}),
+      flat: outcome.flat,
+      decision: outcome.decision,
+      ...(outcome.stop ? { exit: outcome.stop.exit, rule: outcome.stop.rule, why: outcome.stop.why } : {}),
+      ...(outcome.already ? { already: true as const } : {}),
+      ...(clamped.length > 0 ? { budgetClamped: clamped } : {}),
+    });
+    send(res, 200, {
+      run: runId,
+      decision: outcome.decision,
+      ...(outcome.stop ? { exit: outcome.stop.exit, rule: outcome.stop.rule, why: outcome.stop.why, stoppedAt: outcome.stop.at } : {}),
+      ...(outcome.already ? { already: true } : {}),
+      score,
+      round: outcome.round,
+      ...(outcome.best !== undefined ? { best: outcome.best } : {}),
+      flat: outcome.flat,
+      spent: outcome.spent,
+      limits: outcome.limits,
+      ...(clamped.length > 0 ? { budgetClamped: clamped } : {}),
+    });
   }
 
   /**
@@ -631,7 +749,7 @@ export async function startLlmGateway(config: LlmConfig, policy: LeakPolicy, opt
 
     const used = readUsage({ usage: assembler.usage });
     const cost = used ? costUsd(target.upstream.pricePerMTok, used.input, used.output) : reservation.usd;
-    const settled = settleOrLog(keyName, reservation, cost);
+    const settled = settleOrLog(keyName, reservation, cost, (used?.input ?? estimate.input) + (used?.output ?? estimate.output));
     const spent: Outcome = {
       inputTokens: used?.input ?? estimate.input,
       outputTokens: used?.output ?? estimate.output,
@@ -784,10 +902,58 @@ function closeServer(server: http.Server): Promise<void> {
   });
 }
 
+/**
+ * x-run-budget, when the request has one: the budget it declares, or why it cannot be read. A budget
+ * belongs to a run, so it needs x-run-id too. Node joins a repeated header into one value, which then
+ * names its fields twice and is refused.
+ */
+function readRunBudget(req: http.IncomingMessage, runId: string | undefined): RunBudget | { error: string } | undefined {
+  const header = req.headers["x-run-budget"];
+  if (header === undefined) return undefined;
+  if (typeof header !== "string") return { error: "x-run-budget must be sent once" };
+  if (runId === undefined) return { error: "x-run-budget is a run's own budget, so it needs an x-run-id header too" };
+  return parseRunBudget(header);
+}
+
 /** The 429 for a call the ledger refused: which limit, in words the caller can act on. */
 function refusal(r: Extract<ReserveOutcome, { ok: false }>, keyName: string): { body: unknown; outcome: Outcome; headers: ExtraHeaders } {
   const stop = "Retrying will not help: the run should stop.";
+  // A run limit set by the run's own x-run-budget, under the key's cap, says so.
+  const limitOf = (declared: true | undefined, rule: string): string => (declared ? `its own budget (x-run-budget, under the key's ${rule})` : `its limit (${rule})`);
+  const run = (runId: string): string => `run ${JSON.stringify(runId)} of key "${keyName}"`;
   switch (r.cap) {
+    case "runStopped": {
+      const how = r.stop.exit === "ship" ? "has shipped" : r.stop.exit === "flat_line" ? "was stopped on a flat line" : "was stopped on its budget";
+      const next = r.stop.exit === "ship" ? "Use its last result; the run takes no more calls." : "The run takes no more calls.";
+      return {
+        body: apiError("run_stopped", `agent-gate: ${run(r.runId)} ${how} at ${r.stop.at}: ${r.stop.why} (${r.stop.rule}). ${next}`, {
+          type: "insufficient_quota",
+          cap: r.stop.rule,
+          exit: r.stop.exit,
+        }),
+        outcome: { error: "run_stopped", rule: r.stop.rule, exit: r.stop.exit, why: r.stop.why },
+        headers: {},
+      };
+    }
+    case "runMaxSeconds": {
+      const why = `${run(r.runId)} has run for ${r.seconds} s; ${limitOf(r.declared, "runMaxSeconds")} is ${r.limit} s`;
+      return {
+        body: apiError("run_limit_reached", `agent-gate: ${why}. ${stop}`, { type: "insufficient_quota", cap: r.cap }),
+        outcome: { error: "run_limit_reached", rule: r.cap, exit: "budget", why },
+        headers: {},
+      };
+    }
+    case "runMaxTokens": {
+      const left = Math.max(0, r.limit - r.spentTokens - r.reservedTokens);
+      const why =
+        `this call could use up to ${r.requestedTokens} tokens, and ${run(r.runId)} has ${left} left of ${limitOf(r.declared, "runMaxTokens")} of ${r.limit} ` +
+        `(${r.spentTokens} booked, ${r.reservedTokens} held by its calls in flight)`;
+      return {
+        body: apiError("run_limit_reached", `agent-gate: ${why}. ${stop}`, { type: "insufficient_quota", cap: r.cap }),
+        outcome: { error: "run_limit_reached", rule: r.cap, exit: "budget", why },
+        headers: {},
+      };
+    }
     case "maxCallsPerMinute":
       return {
         body: apiError("rate_limited", `agent-gate: key "${keyName}" has made ${r.limit} calls in the last minute, its limit (maxCallsPerMinute). Try again in ${r.retryAfterSeconds} s.`, {
@@ -797,25 +963,22 @@ function refusal(r: Extract<ReserveOutcome, { ok: false }>, keyName: string): { 
         outcome: { error: "rate_limited", rule: r.cap },
         headers: { "retry-after": r.retryAfterSeconds },
       };
-    case "runMaxCalls":
+    case "runMaxCalls": {
+      const why = `${run(r.runId)} has made ${r.calls} calls, ${limitOf(r.declared, "runMaxCalls")}`;
       return {
-        body: apiError("run_limit_reached", `agent-gate: run ${JSON.stringify(r.runId)} of key "${keyName}" has made ${r.calls} calls, its limit (runMaxCalls). ${stop}`, {
-          type: "insufficient_quota",
-          cap: r.cap,
-        }),
-        outcome: { error: "run_limit_reached", rule: r.cap },
+        body: apiError("run_limit_reached", `agent-gate: ${why}. ${stop}`, { type: "insufficient_quota", cap: r.cap }),
+        outcome: { error: "run_limit_reached", rule: r.cap, exit: "budget", why },
         headers: {},
       };
+    }
     case "runMaxUsd": {
       const left = Math.max(0, roundUsd(r.limit - r.spentUsd - r.reservedUsd));
+      const why =
+        `this call could cost up to $${formatUsd(r.requestedUsd)}, and ${run(r.runId)} has $${formatUsd(left)} left of its ${r.declared ? "own budget (x-run-budget)" : "budget"} ` +
+        `of $${formatUsd(r.limit)} ($${formatUsd(r.spentUsd)} spent, $${formatUsd(r.reservedUsd)} held by its calls in flight)`;
       return {
-        body: apiError(
-          "run_limit_reached",
-          `agent-gate: this call could cost up to $${formatUsd(r.requestedUsd)}, and run ${JSON.stringify(r.runId)} of key "${keyName}" has $${formatUsd(left)} left of its ` +
-            `budget of $${formatUsd(r.limit)} ($${formatUsd(r.spentUsd)} spent, $${formatUsd(r.reservedUsd)} held by its calls in flight). ${stop}`,
-          { type: "insufficient_quota", cap: r.cap },
-        ),
-        outcome: { error: "run_limit_reached", rule: r.cap },
+        body: apiError("run_limit_reached", `agent-gate: ${why}. ${stop}`, { type: "insufficient_quota", cap: r.cap }),
+        outcome: { error: "run_limit_reached", rule: r.cap, exit: "budget", why },
         headers: {},
       };
     }
@@ -956,6 +1119,8 @@ interface Where {
   diverted?: string[];
   /** A streamed request ("stream": true). */
   stream?: boolean;
+  /** x-run-budget fields that asked for more than the key's caps (which held). */
+  budgetClamped?: RunBudgetField[];
 }
 
 function clip(value: string): string {

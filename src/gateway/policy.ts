@@ -28,6 +28,10 @@
 // A rule then either has a fixed "decision" and "why", or is a shell rule ("type": "shell") that
 // runs the slice-1 shell analyzer on one string argument and maps its answer. A rule that can ask may
 // set "ttlMinutes": how long its approval requests live, instead of the config's approvalTtlHours.
+// It may also say "irreversible": true (docs/adr/0013-action-tokens-for-irreversible-calls.md): its
+// approval needs the request's action token, not only a yes, and no standing approval answers it. That
+// sticks: a call asked about is irreversible when any rule that matches it and would ask says so, not
+// only the one that decided, so the order of rules cannot let a standing rule cover a red line.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -64,6 +68,8 @@ export interface Verdict {
   ttlMs?: number;
   /** For an ask: a standing approval (a bounded grant, ADR 0006) may answer it. Only rules that say so. */
   standing?: true;
+  /** For an ask: the action cannot be undone, so its approval needs the action token (ADR 0013), and standing approvals do not apply. */
+  irreversible?: true;
   /** Every later rule that matched the call too, in policy order. Information for the human; it changes nothing. */
   alsoMatched?: AlsoMatched[];
   /** With rewrite rules that changed something: the arguments the call runs with, and those rules in order. */
@@ -85,6 +91,8 @@ export interface CompiledRule {
   readonly verdict?: (call: ToolCall) => Verdict;
   /** A rule that decides with a fixed decision (not a shell rule): that decision. */
   readonly fixed?: Decision;
+  /** "irreversible": true: the asks of this rule need an action token. */
+  readonly irreversible?: true;
   /** A rule that rewrites the arguments instead. */
   readonly rewrite?: { why: string; apply: (args: Record<string, unknown>) => RewriteResult };
 }
@@ -150,6 +158,7 @@ export function evaluate(policy: Policy, call: ToolCall): Verdict {
   let decided: Verdict | undefined;
   const also: AlsoMatched[] = [];
   const rewrittenBy: string[] = [];
+  let irreversible = false;
   for (const rule of policy.rules) {
     if (!matches(rule, current)) continue;
     if (rule.rewrite) {
@@ -167,14 +176,21 @@ export function evaluate(policy: Policy, call: ToolCall): Verdict {
       continue;
     }
     const verdict = (rule.verdict as (call: ToolCall) => Verdict)(current);
+    if (verdict.irreversible) irreversible = true;
     if (decided) also.push({ rule: rule.id, decision: verdict.decision, why: verdict.why });
     else decided = verdict;
   }
-  return {
+  const result: Verdict = {
     ...(decided ?? { decision: policy.default, rule: "default", why: `no rule matched; the policy default is ${policy.default}` }),
     ...(also.length > 0 ? { alsoMatched: also } : {}),
     ...(rewrittenBy.length > 0 ? { args: current.args, rewrittenBy } : {}),
   };
+  // Irreversible sticks to an ask (see the top): a later irreversible rule makes it so, and takes away a standing approval.
+  if (result.decision === "ask" && irreversible) {
+    delete result.standing;
+    result.irreversible = true;
+  }
+  return result;
 }
 
 function matches(rule: Pick<CompiledRule, "server" | "tool" | "toolWords" | "args">, call: ToolCall): boolean {
@@ -258,8 +274,8 @@ function shellVerdict(rule: string, argument: string, call: ToolCall): Verdict {
 
 // ── parsing ─────────────────────────────────────────────────────────────────────────────────
 
-const MATCH_KEYS = ["id", "server", "tool", "toolWords", "args", "decision", "why", "ttlMinutes", "standing", "rewrite"] as const;
-const SHELL_KEYS = ["id", "type", "server", "tool", "toolWords", "args", "argument", "ttlMinutes"] as const;
+const MATCH_KEYS = ["id", "server", "tool", "toolWords", "args", "decision", "why", "ttlMinutes", "standing", "irreversible", "rewrite"] as const;
+const SHELL_KEYS = ["id", "type", "server", "tool", "toolWords", "args", "argument", "ttlMinutes", "irreversible"] as const;
 
 /** Checks policy JSON and compiles it. Throws ConfigError naming the bad field. */
 export function parsePolicy(json: unknown): Policy {
@@ -320,16 +336,20 @@ function compileRule(raw: unknown, at: string, ids: Set<string>): CompiledRule {
   };
 
   const ttlMs = rule.ttlMinutes === undefined ? undefined : minutes(rule.ttlMinutes, `${at}.ttlMinutes`);
-  // The lifetime belongs to approval requests, so it is attached only to an ask.
-  const withTtl = (verdict: Verdict): Verdict => (ttlMs !== undefined && verdict.decision === "ask" ? { ...verdict, ttlMs } : verdict);
+  if (rule.irreversible !== undefined && rule.irreversible !== true && rule.irreversible !== false) fail(`${at}.irreversible must be true or false`);
+  const irreversible = rule.irreversible === true;
+  // The lifetime and the action token belong to approval requests, so they are attached only to an ask.
+  const withTtl = (verdict: Verdict): Verdict =>
+    verdict.decision !== "ask" ? verdict : { ...verdict, ...(ttlMs !== undefined ? { ttlMs } : {}), ...(irreversible ? { irreversible: true as const } : {}) };
+  const flag = irreversible ? { irreversible: true as const } : {};
   if (shell) {
     // A shell rule without a tool filter would send every other tool's call to a human.
     if (!match.tool && !match.toolWords) fail(`${at} is a shell rule, so it needs "tool" or "toolWords"`);
     const argument = rule.argument === undefined ? "command" : text(rule.argument, `${at}.argument`);
-    return { ...match, verdict: (call) => withTtl(shellVerdict(id, argument, call)) };
+    return { ...match, ...flag, verdict: (call) => withTtl(shellVerdict(id, argument, call)) };
   }
   if (rule.decision === "rewrite") {
-    for (const key of ["ttlMinutes", "standing"] as const) if (rule[key] !== undefined) fail(`${at}.${key} does not apply to a rewrite rule, which decides nothing`);
+    for (const key of ["ttlMinutes", "standing", "irreversible"] as const) if (rule[key] !== undefined) fail(`${at}.${key} does not apply to a rewrite rule, which decides nothing`);
     if (rule.rewrite === undefined) fail(`${at} is a rewrite rule, so it needs "rewrite"`);
     const why = text(rule.why, `${at}.why`);
     return { ...match, rewrite: { why, apply: compileRewrite(rule.rewrite, `${at}.rewrite`, id) } };
@@ -342,7 +362,28 @@ function compileRule(raw: unknown, at: string, ids: Set<string>): CompiledRule {
     if (rule.standing && fixed.decision !== "ask") fail(`${at}.standing only applies to a rule whose decision is ask`);
     if (rule.standing) fixed.standing = true;
   }
-  return { ...match, fixed: fixed.decision, verdict: () => withTtl({ ...fixed }) };
+  if (irreversible && fixed.decision !== "ask") fail(`${at}.irreversible only applies to a rule whose decision is ask`);
+  if (irreversible && fixed.standing) fail(`${at} cannot be both irreversible and standing: an irreversible action takes one approval per call, with its action token`);
+  return { ...match, ...flag, fixed: fixed.decision, verdict: () => withTtl({ ...fixed }) };
+}
+
+/**
+ * The irreversible rule that decides every call to this tool, when one does (pure): walking the rules
+ * as alwaysBlocked() does, the first that matches the name and leaves no call to a later rule. The CLI
+ * refuses a standing approval for such a tool: it could never be used.
+ */
+export function irreversibleRuleFor(policy: Policy, server: string, tool: string): string | undefined {
+  const call: ToolCall = { server, tool, args: {} };
+  for (const rule of policy.rules) {
+    if (!matches({ ...rule, args: [] }, call)) continue;
+    if (rule.rewrite) continue;
+    if (rule.args.length > 0) {
+      if (rule.fixed === "block") continue; // blocks the calls it matches; the others go on
+      return undefined;
+    }
+    return rule.fixed === "ask" && rule.irreversible ? rule.id : undefined;
+  }
+  return undefined;
 }
 
 // ── rewrite rules ───────────────────────────────────────────────────────────────────────────

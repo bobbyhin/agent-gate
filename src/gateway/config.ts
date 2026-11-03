@@ -15,8 +15,10 @@
 // "fileBinding" ({ "roots": [...], "arguments": [...] }: bind approvals to the content of the files
 // those arguments name, see src/gateway/files.ts), and per server "env" (extra environment
 // variables; a downstream server otherwise gets only the SDK's short list of safe variables such as
-// PATH and HOME, not the gateway's whole environment).
-// Relative "policy", "stateDir" and fileBinding roots are resolved against the config file's directory.
+// PATH and HOME, not the gateway's whole environment), and "actionTokenKeyFile" (default
+// <stateDir>/action-token.key: the key behind the action tokens of irreversible calls, see
+// src/gateway/action-tokens.ts; put it where the agent's own tools can neither read nor change it).
+// Relative "policy", "stateDir", "actionTokenKeyFile" and fileBinding roots are resolved against the config file's directory.
 // "command" and "args" are passed to the downstream process unchanged. A server with "url" instead is
 // reached over Streamable HTTP; "headersFromEnv" names, for each header, the environment variable
 // that holds its value, so no token is ever in this file. Plain http:// is accepted only for a
@@ -36,6 +38,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { KEY_FILE_NAME } from "./action-tokens.js";
 import type { FileBindingConfig } from "./files.js";
 import { parsePolicy, type Policy } from "./policy.js";
 import { array, ConfigError, fail, integerIn, object, onlyKeys, text } from "./validate.js";
@@ -76,6 +79,8 @@ export interface GatewayConfig {
   profiles?: ReadonlyMap<string, ReadonlyMap<string, string[]>>;
   /** serve --http: where to listen, and the agents that may connect. */
   http?: HttpConfig;
+  /** The key behind action tokens (ADR 0013). Default: <stateDir>/action-token.key. */
+  actionTokenKeyFile: string;
 }
 
 /** An agent that may connect over HTTP. */
@@ -125,7 +130,7 @@ export function loadPolicy(file: string): Policy {
 
 export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
   const config = object(json, "config");
-  onlyKeys(config, ["servers", "policy", "stateDir", "approvalTtlHours", "auditArguments", "pinTools", "resultGuard", "fileBinding", "profiles", "http"], "config");
+  onlyKeys(config, ["servers", "policy", "stateDir", "approvalTtlHours", "auditArguments", "pinTools", "resultGuard", "fileBinding", "profiles", "http", "actionTokenKeyFile"], "config");
 
   const servers = array(config.servers, "config.servers").map((raw, i) => server(raw, `config.servers[${i}]`));
   if (servers.length === 0) fail("config.servers must list at least one server");
@@ -142,10 +147,13 @@ export function parseConfig(json: unknown, baseDir: string): GatewayConfig {
   const pinTools = config.pinTools ?? true;
   if (typeof pinTools !== "boolean") fail("config.pinTools must be true or false");
 
+  const stateDir = path.resolve(baseDir, text(config.stateDir, "config.stateDir"));
   const result: GatewayConfig = {
     servers,
     policyFile: path.resolve(baseDir, text(config.policy, "config.policy")),
-    stateDir: path.resolve(baseDir, text(config.stateDir, "config.stateDir")),
+    stateDir,
+    actionTokenKeyFile:
+      config.actionTokenKeyFile === undefined ? path.join(stateDir, KEY_FILE_NAME) : path.resolve(baseDir, text(config.actionTokenKeyFile, "config.actionTokenKeyFile")),
     approvalTtlMs: Math.round(hours * 60 * 60 * 1000),
     auditArguments,
     pinTools,

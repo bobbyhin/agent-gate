@@ -1,6 +1,6 @@
 // The README's table of example rules (under "### Policy") mirrors policy.example.json: the same rules
 // in the same order, every word a rule matches on named in its row, and each decision, request
-// lifetime and standing-approval flag as the policy file has it.
+// lifetime, standing-approval flag and irreversible flag as the policy file has it.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -16,6 +16,7 @@ interface RawRule {
   decision?: string;
   ttlMinutes?: number;
   standing?: boolean;
+  irreversible?: boolean;
 }
 
 const policy = JSON.parse(fs.readFileSync(path.join(ROOT, "policy.example.json"), "utf8")) as { default: string; rules: RawRule[]; repeat?: Array<{ id: string; decision: string }> };
@@ -65,13 +66,19 @@ describe("README: the example policy's table mirrors policy.example.json", () =>
     assert.ok(checked.length >= 3, `the plain rows checked: ${checked.join(", ")}`);
   });
 
-  it("gives each rule its decision, request lifetime and standing-approval flag", () => {
+  it("gives each rule its decision, request lifetime, standing-approval flag and irreversible flag", () => {
     for (const rule of policy.rules) {
       const cell = byId.get(rule.id)?.decision ?? "";
       assert.ok(cell.startsWith(rule.type === "shell" ? "the guard's decision" : (rule.decision as string)), `${rule.id}: ${cell}`);
       assert.equal(cell.includes(`lives ${rule.ttlMinutes} minutes`), rule.ttlMinutes !== undefined, `${rule.id}: ttlMinutes`);
       assert.equal(cell.includes("standing approvals allowed"), rule.standing === true, `${rule.id}: standing`);
+      assert.equal(cell.includes("irreversible (action token)"), rule.irreversible === true, `${rule.id}: irreversible`);
     }
+    // Red lines 1 to 4 cannot be undone, so each of their rules says so (ADR 0013); red line 5, memory, can be corrected.
+    assert.deepEqual(
+      policy.rules.filter((r) => r.irreversible).map((r) => r.id),
+      policy.rules.filter((r) => /^red-line-[1-4]-/.test(r.id)).map((r) => r.id),
+    );
     assert.equal(byId.get("default")?.decision, policy.default);
   });
 });

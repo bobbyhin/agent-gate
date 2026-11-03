@@ -64,6 +64,17 @@ after(() => {
 
 const quiet = { out: () => undefined, err: () => undefined };
 
+/**
+ * How the human confirms a held call: a request from an irreversible rule (ADR 0013) with the action
+ * token that "approvals show" prints, any other with --yes.
+ */
+async function confirmation(id: string, configFile: string): Promise<string[]> {
+  let shown = "";
+  await main(["approvals", "show", id, "--config", configFile], { out: (text) => (shown += text), err: () => undefined });
+  const token = (JSON.parse(shown) as { actionToken?: string }).actionToken;
+  return token ? ["--token", token] : ["--yes"];
+}
+
 /** Replays one trajectory; returns each call's outcome and rule, and the audit file it left. */
 async function replay(t: Trajectory): Promise<{ got: Array<[Outcome, string]>; auditFile: string; ran: Array<{ tool: string; argsHash: string }> }> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-gate-trajectory-"));
@@ -85,7 +96,7 @@ async function replay(t: Trajectory): Promise<{ got: Array<[Outcome, string]>; a
     for (const step of t.steps) {
       if ("human" in step) {
         assert.ok(lastHeld, `${t.id}: a human step needs a call held before it`);
-        const argv = step.human === "approve" ? ["approvals", "approve", lastHeld, "--yes"] : ["approvals", "deny", lastHeld, ...(step.reason ? ["--reason", step.reason] : [])];
+        const argv = step.human === "approve" ? ["approvals", "approve", lastHeld, ...(await confirmation(lastHeld, configFile))] : ["approvals", "deny", lastHeld, ...(step.reason ? ["--reason", step.reason] : [])];
         assert.equal(await main([...argv, "--config", configFile], quiet), 0, `${t.id}: ${step.human} ${lastHeld}`);
         continue;
       }
