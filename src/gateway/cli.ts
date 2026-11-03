@@ -2,7 +2,6 @@
 // the LLM gateway and show what each gateway key has spent.
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { parseArgs } from "node:util";
@@ -11,12 +10,12 @@ import { formatUsd } from "../llm/budget.js";
 import { loadLeakPolicy, loadLlmConfig } from "../llm/config.js";
 import { openLedger, startLlmGateway } from "../llm/server.js";
 import { GROUP_FIELDS, groupUsage, readUsageLog, verifyUsage, type GroupField } from "../llm/usage-report.js";
-import { ActionTokens, isNonce, type TokenBinding } from "./action-tokens.js";
-import { ApprovalError, ApprovalStore, canonicalJson, cleanNote, hashArguments, isLive, type Approval, type Confirmation, type StandingApproval } from "./approvals.js";
-import { AuditLog, type ActionTokenRefusal, type ApprovalEvent } from "./audit.js";
+import { ApprovalError, ApprovalStore, canonicalJson, cleanNote, isLive, type Approval, type Confirmation, type StandingApproval } from "./approvals.js";
+import { startApprovalsUi } from "./approvals-ui.js";
+import { AuditLog, type ApprovalEvent } from "./audit.js";
 import { auditStats, loadExpected, readAudit, scoreTrajectory, trajectoryOf, verifyAudit } from "./audit-tools.js";
 import { loadConfig, loadPolicy, type GatewayConfig } from "./config.js";
-import { bindFiles } from "./files.js";
+import { checkIrreversible, confirmIrreversible, currentUser, decide, describeCall, duration, preview, readBack, refuseToken, TokenRefused, withToken } from "./decisions.js";
 import { irreversibleRuleFor } from "./policy.js";
 import { startHttpGateway } from "./http-server.js";
 import { createGateway, SEPARATOR } from "./server.js";
@@ -24,6 +23,9 @@ import { readStatus } from "./status.js";
 import { downstreamCandidates, openApiCandidates, shownName, suggest, type Candidate } from "./suggest.js";
 import { ToolPins } from "./tool-pins.js";
 import { ConfigError } from "./validate.js";
+
+// The read-back and the wait format moved to decisions.ts, which the approvals page shares; still exported from here.
+export { duration, readBack };
 
 const USAGE = `Usage:
   agent-gate serve [--profile <name>] [--config <file>]
@@ -40,6 +42,9 @@ const USAGE = `Usage:
   agent-gate approvals stats [--json] [--config <file>]   decisions per rule: counts, wait, deny rate
   agent-gate approvals grant <server>__<tool> --uses <n> --hours <h> [--arg <name>=<glob>]... [--agent <name>] [--note <text>] [--config <file>]
   agent-gate approvals grants [--all] [--json] [--config <file>]   standing approvals
+  agent-gate approvals ui [--port <n>] [--config <file>]
+                                                      a page on 127.0.0.1, on a new port each start, to read
+                                                      and decide requests; it prints a link that opens it once
   agent-gate llm serve [--config <file>]              run the LLM gateway (HTTP)
   agent-gate usage [--json] [--config <file>]         LLM spend per gateway key: today, this month, caps
   agent-gate usage --by <field> [--json] [--config <file>]
@@ -67,6 +72,9 @@ the read-back (and "show") prints it, and you type it back or pass it with --tok
 "grant" makes a standing approval: up to <n> calls to one tool within <h> hours, whose listed
 arguments match their globs; only policy rules with "standing": true use it. "deny sa-..." revokes it.
 With --agent it covers that HTTP agent's calls only; without, only calls that come with no agent (stdio).
+"ui" serves the same decisions as a web page for the human who started it: it listens on 127.0.0.1
+only and prints a link whose key opens one browser session; approve and deny there write the same
+records and audit lines as here, and an irreversible request still needs its action token, typed.
 A deny --reason is shown to the agent the next time it makes the call; an approve --note is kept
 with the approval. Both are stored, with the OS user who ran the command, in approvals.json and
 in the audit log.
@@ -86,6 +94,7 @@ const COMMANDS: Readonly<Record<string, { options: readonly string[]; required?:
   "approvals stats": { options: ["json"] },
   "approvals grant": { options: ["uses", "hours", "arg", "note", "agent"], required: ["uses", "hours"], id: true },
   "approvals grants": { options: ["all", "json"] },
+  "approvals ui": { options: ["port"] },
   "llm serve": { options: [] },
   usage: { options: ["json", "by", "verify"] },
   "audit stats": { options: ["json"] },
@@ -148,6 +157,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
         profile: { type: "string" },
         http: { type: "boolean", default: false },
         agent: { type: "string" },
+        port: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
       },
     });
@@ -206,6 +216,7 @@ export async function main(argv: string[], io: Io = processIo): Promise<number> 
     if (action === "stats") return stats(store, audit.file, values.json, io);
     if (action === "grants") return grants(store, values.all, values.json, io);
     if (action === "grant") return grant(store, audit, config, id as string, values, io);
+    if (action === "ui") return await approvalsUi(config, values.port, io);
     if (action === "show") {
       io.out(`${JSON.stringify((id as string).startsWith("sa-") ? store.getStanding(id as string) : withToken(store.get(id as string), config), null, 2)}\n`);
     } else if (action === "deny" && (id as string).startsWith("sa-")) {
@@ -617,60 +628,12 @@ function writeStanding(audit: AuditLog, g: StandingApproval, decision: "granted"
   });
 }
 
-/** The OS user running the CLI, recorded as who decided. */
-function currentUser(): string | undefined {
-  try {
-    return cleanNote(os.userInfo().username, 64);
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * What the human is approving, in full: the call, every argument, the rule and its reason, the files
- * the request is bound to (hashed again now, to show whether they still match), and the time left.
- */
-export function readBack(a: Approval, config: Pick<GatewayConfig, "fileBinding">, now = Date.now()): string {
-  const args = JSON.stringify(JSON.parse(canonicalJson(a.args)), null, 2).split("\n");
-  const current = a.files && config.fileBinding ? bindFiles(a.args, config.fileBinding) : [];
-  const files = (a.files ?? []).map((f) => {
-    const again = current.find((c) => c.argument === f.argument);
-    const state = again && again.path === f.path && again.sha256 === f.sha256 ? "unchanged since the request" : "CHANGED since the request: the agent will be asked again";
-    return `  file:     ${f.path} ${f.sha256 ?? "(did not exist)"}, ${state}`;
-  });
-  return [
-    `Approve this call? ${a.id}`,
-    `  call:     ${a.server}${SEPARATOR}${a.tool}`,
-    ...(a.agent !== undefined ? [`  agent:    ${a.agent} (known by its key; only its own call can use this approval)`] : []),
-    ...(a.agentPath ? [`  agents:   ${a.agentPath} (as the client states it)`] : []),
-    `  args:     ${args[0]}`,
-    ...args.slice(1).map((line) => `            ${line}`),
-    `  rule:     ${a.rule}: ${a.why}`,
-    ...(a.alsoMatched ?? []).map((m) => `  also:     ${m.rule} (${m.decision}: ${m.why})`),
-    ...(a.rewrittenBy ? [`  edited:   by ${a.rewrittenBy.join(", ")}; these args are what will run, not what the agent sent`] : []),
-    ...files,
-    `  expires:  ${a.expiresAt} (in ${duration(Math.max(0, Date.parse(a.expiresAt) - now))})`,
-    "",
-  ].join("\n");
-}
-
-/** A pending irreversible request as "approvals show" prints it: with its action token, for the human who can read the key. */
-function withToken(a: Approval, config: Pick<GatewayConfig, "actionTokenKeyFile">): Approval & { actionToken?: string | null; actionTokenError?: string } {
-  if (!a.irreversible || a.status !== "pending") return a;
-  const problem = recordProblem(a);
-  if (problem) return { ...a, actionToken: null, actionTokenError: problem };
-  try {
-    return { ...a, actionToken: new ActionTokens(config.actionTokenKeyFile).code(a as TokenBinding) };
-  } catch (err) {
-    return { ...a, actionToken: null, actionTokenError: (err as Error).message };
-  }
-}
-
 /**
  * approve <id> for a request from an irreversible rule (ADR 0013): the confirmation must carry the
  * request's action token, typed after the read-back or passed with --token. --yes alone, a token of
  * another request, a request that was decided already or has expired, and a CLI that cannot read the
- * key are each refused, with an action-token-refused line in the audit log.
+ * key are each refused, with an action-token-refused line in the audit log. The checks are the ones the
+ * approvals page makes too (decisions.ts).
  */
 async function approveIrreversible(
   store: ApprovalStore,
@@ -681,134 +644,73 @@ async function approveIrreversible(
   io: Io,
 ): Promise<number> {
   const by = currentUser();
-  const refuse = (reason: ActionTokenRefusal, message: string): number => {
-    try {
-      audit.writeTokenRefusal({ approvalId: request.id, server: request.server, tool: request.tool, rule: request.rule, argsHash: request.argsHash, reason, ...(by ? { decidedBy: by } : {}), ...(request.agent !== undefined ? { agent: request.agent } : {}) });
-    } catch {
-      // the refusal below is what the human needs to see
-    }
-    io.err(`agent-gate: ${message}\n`);
-    return 1;
-  };
-  // Confirming a request that was approved already is a token used twice; a denied or stale one is simply not pending.
-  if (request.status === "approved" || request.status === "used") return refuse("used", `${request.id} is ${request.status}: its action token confirmed it once already, so it was not approved again`);
-  if (request.status !== "pending") throw new ApprovalError(`${request.id} is ${request.status}; only a pending request can be approved`);
-  if (!isLive(request, Date.now())) {
-    try {
-      writeEvent(audit, request, "expired", by);
-    } catch {
-      // the refusal below is what the human needs to see
-    }
-    return refuse("expired", `${request.id} expired at ${request.expiresAt}; the agent has to make the call again to ask again`);
-  }
-  // A record whose call is not what it shows (its arguments do not hash to argsHash) or whose nonce the
-  // gateway did not make was written by something else: the human would confirm one call and run another.
-  const problem = recordProblem(request);
-  if (problem) return refuse("changed", `${request.id} was not approved: ${problem}`);
-  const tokens = new ActionTokens(config.actionTokenKeyFile);
-  const binding = request as TokenBinding;
-  let expected: string;
   try {
-    expected = tokens.code(binding);
-  } catch (err) {
-    return refuse("no-key", `${request.id} is for an irreversible action, and its action token needs the gateway's key, which cannot be used here (${(err as Error).message}); only someone who can read the key can approve it`);
-  }
-  if (values.token === undefined && values.yes) {
-    return refuse("no-token", `${request.id} is for an irreversible action (rule ${request.rule}), so --yes is not enough: confirm it with its action token, typed after the read-back or passed with --token`);
-  }
-  let presented = values.token;
-  if (presented === undefined) {
-    io.out(`${readBack(request, config)}  token:    ${expected}\nThis cannot be undone. Type the action token (${expected}) to approve it, anything else to stop: `);
-    presented = io.readLine ? await io.readLine() : undefined;
-    io.out("\n");
+    const { tokens, expected } = checkIrreversible(audit, config, request, by);
+    if (values.token === undefined && values.yes) {
+      throw refuseToken(audit, request, "no-token", `${request.id} is for an irreversible action (rule ${request.rule}), so --yes is not enough: confirm it with its action token, typed after the read-back or passed with --token`, by);
+    }
+    let presented = values.token;
     if (presented === undefined) {
-      io.err(`agent-gate: nothing was typed, so ${request.id} was not approved. In a script, pass --token.\n`);
-      return 1;
-    }
-  }
-  if (!tokens.matches(binding, presented)) {
-    return refuse("mismatch", `that is not the action token of ${request.id}, so it was not approved; a token belongs to one request: this call, with these arguments, until it expires`);
-  }
-  // The proof is made from the record as it is when it is approved, under the lock. If the call changed
-  // since the read-back (another writer of approvals.json), the human did not confirm this one.
-  let approval: Approval;
-  try {
-    approval = decide(store, audit, request.id, "approved", values.note, "token", (a) => {
-      if (!sameBinding(a, request) || recordProblem(a) !== undefined) throw new BindingChanged();
-      return tokens.proof(a as TokenBinding);
-    });
-  } catch (err) {
-    if (err instanceof BindingChanged) return refuse("changed", `${request.id} changed after it was read back, so it was not approved; read it back again`);
-    throw err;
-  }
-  io.out(`approved ${describeCall(approval)}\nThe agent can now make this exact call once, until ${approval.expiresAt}.\n`);
-  return 0;
-}
-
-/** Thrown from inside the approval's lock when the call is not the one that was read back. */
-class BindingChanged extends Error {}
-
-/** The fields an action token is bound to are the same in both records. */
-function sameBinding(a: Approval, b: Approval): boolean {
-  return (
-    a.id === b.id &&
-    a.server === b.server &&
-    a.tool === b.tool &&
-    a.argsHash === b.argsHash &&
-    a.agent === b.agent &&
-    a.expiresAt === b.expiresAt &&
-    a.nonce === b.nonce &&
-    canonicalJson(a.files ?? null) === canonicalJson(b.files ?? null)
-  );
-}
-
-/** Why an irreversible request cannot be the call it shows, or undefined when it can be. */
-function recordProblem(a: Approval): string | undefined {
-  if (!isNonce(a.nonce)) return "its nonce is not one the gateway makes, so approvals.json was edited";
-  if (typeof a.args !== "object" || a.args === null || hashArguments(a.args) !== a.argsHash) return "its arguments do not hash to its argsHash, so approvals.json was edited: what it shows is not the call that would run";
-  return undefined;
-}
-
-/** Records a human's decision in approvals.json, then as an approval-decided line in the audit log. */
-function decide(store: ApprovalStore, audit: AuditLog, id: string, decision: "approved" | "denied", note: string | undefined, confirmation?: Confirmation, prove?: (a: Approval) => string): Approval {
-  const by = currentUser();
-  let approval: Approval;
-  try {
-    approval = decision === "approved" ? store.approve(id, { by, note, ...(confirmation ? { confirmation } : {}), ...(prove ? { prove } : {}) }) : store.deny(id, { by, note });
-  } catch (err) {
-    // A request found expired is worth a line too: it shows how long requests wait unanswered.
-    if (err instanceof ApprovalError && err.expired) {
-      try {
-        writeEvent(audit, err.expired, "expired", by);
-      } catch {
-        // the expiry error below is what the human needs to see
+      io.out(`${readBack(request, config)}  token:    ${expected}\nThis cannot be undone. Type the action token (${expected}) to approve it, anything else to stop: `);
+      presented = io.readLine ? await io.readLine() : undefined;
+      io.out("\n");
+      if (presented === undefined) {
+        io.err(`agent-gate: nothing was typed, so ${request.id} was not approved. In a script, pass --token.\n`);
+        return 1;
       }
     }
+    const approval = confirmIrreversible(store, audit, request, tokens, presented, values.note, by);
+    io.out(`approved ${describeCall(approval)}\nThe agent can now make this exact call once, until ${approval.expiresAt}.\n`);
+    return 0;
+  } catch (err) {
+    if (err instanceof TokenRefused) {
+      io.err(`agent-gate: ${err.message}\n`);
+      return 1;
+    }
     throw err;
   }
-  try {
-    writeEvent(audit, approval, decision, approval.decidedBy);
-  } catch (err) {
-    throw new ApprovalError(`${id} is ${decision}, but the audit log could not be written: ${(err as Error).message}`);
-  }
-  return approval;
 }
 
-function writeEvent(audit: AuditLog, a: Approval, decision: ApprovalEvent["decision"], by: string | undefined): void {
-  const end = Date.parse(decision === "expired" ? a.expiresAt : (a.decidedAt ?? ""));
-  audit.writeEvent({
-    approvalId: a.id,
-    server: a.server,
-    tool: a.tool,
-    rule: a.rule,
-    argsHash: a.argsHash,
-    decision,
-    waitMs: Math.max(0, end - Date.parse(a.createdAt)) || 0,
-    ...(by ? { decidedBy: by } : {}),
-    ...(decision !== "expired" && a.decisionNote ? { note: a.decisionNote } : {}),
-    ...(decision === "approved" && a.confirmation ? { confirmation: a.confirmation } : {}),
-    ...(a.agent !== undefined ? { agent: a.agent } : {}),
+/**
+ * approvals ui: the approvals page (src/gateway/approvals-ui.ts) for the human who runs this, until
+ * Ctrl-C. The link it prints is the only way in, so it goes to this terminal and nowhere else.
+ */
+async function approvalsUi(config: GatewayConfig, portText: string | undefined, io: Io): Promise<number> {
+  // No --port: a new port, so a new origin, every start (see approvals-ui.ts).
+  const port = portText === undefined ? 0 : Number(portText);
+  if (portText !== undefined && (!/^\d{1,5}$/.test(portText) || port > 65535)) {
+    io.err(`agent-gate: --port takes a whole number from 0 to 65535 (0 picks a free port)\n`);
+    return 2;
+  }
+  let ui;
+  try {
+    ui = await startApprovalsUi(config, { port, log: (line) => io.out(`${line}\n`) });
+  } catch (err) {
+    const hint = port === 0 ? "" : "; another port, or none (a new one each start), may work";
+    io.err(`agent-gate: the approvals page cannot listen on 127.0.0.1:${port}: ${(err as Error).message}${hint}\n`);
+    return 1;
+  }
+  io.out(
+    [
+      `agent-gate approvals ui: listening on ${ui.url}, on this machine only.`,
+      // Before the link, so that it is read before the link is opened.
+      ...(port === 0
+        ? []
+        : [
+            `Note: --port ${port} keeps the page's origin the same from one start to the next. A server that held that port before could have left a service worker or a cached page in your browser that reads the link; without --port, every start gets a new port.`,
+          ]),
+      "Open this link in your browser. It works once: the first tab that opens it gets the session, and the link is then spent.",
+      `  ${ui.launchUrl}`,
+      "Decisions made there are written to approvals.json and the audit log, as from this CLI. Stop with Ctrl-C.",
+      "",
+    ].join("\n"),
+  );
+  await new Promise<void>((resolve) => {
+    process.once("SIGINT", resolve);
+    process.once("SIGTERM", resolve);
   });
+  await ui.close();
+  return 0;
 }
 
 export interface RuleStats {
@@ -894,24 +796,6 @@ function median(values: number[]): number | null {
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? (sorted[mid] ?? 0) : Math.round(((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2);
-}
-
-/** 4m 12s · 1h 05m · 2d 03h */
-export function duration(ms: number): string {
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
-  return `${Math.floor(s / 86400)}d ${String(Math.floor((s % 86400) / 3600)).padStart(2, "0")}h`;
-}
-
-function describeCall(a: Approval): string {
-  return `${a.id}: ${a.server}${SEPARATOR}${a.tool} ${preview(canonicalJson(a.args))}`;
-}
-
-const PREVIEW_CHARS = 300;
-function preview(json: string): string {
-  return json.length <= PREVIEW_CHARS ? json : `${json.slice(0, PREVIEW_CHARS)}... (${json.length} characters; "approvals show <id>" prints all of it)`;
 }
 
 /**

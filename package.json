@@ -23,6 +23,7 @@
     "redteam": "node scripts/redteam.js",
     "demo": "node scripts/demo-transcript.js",
     "demo:llm": "node scripts/demo-llm-transcript.js",
+    "demo:approvals": "node scripts/demo-approvals.js",
     "loadtest": "node scripts/loadtest.js",
     "bench": "node scripts/bench.js"
   },

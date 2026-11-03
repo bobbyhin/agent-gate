@@ -211,6 +211,7 @@ describe("policy.example.json: the shell rule runs the slice-1 analyzer", () => 
     expectVerdict("run_command", "block", "no-self-approval", { command: "node bin/agent-gate.js approvals approve ap-1234abcd" });
     expectVerdict("bash", "block", "no-self-approval", { command: "agent-gate approvals deny ap-1234abcd" });
     expectVerdict("bash", "block", "no-self-approval", { command: "agent-gate approvals grant demo__execute_sql --uses 100 --hours 168" });
+    expectVerdict("bash", "block", "no-self-approval", { command: "agent-gate approvals ui --port 9000" });
     expectVerdict("run_command", "block", "no-self-approval", { command: "cat .agent-gate/approvals.json" });
     expectVerdict("write_file", "block", "protect-gateway-state", { path: "/srv/work/.agent-gate/approvals.json" });
     expectVerdict("delete_file", "block", "protect-gateway-state", { path: ".agent-gate" });

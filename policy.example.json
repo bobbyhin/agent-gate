@@ -4,7 +4,7 @@
     {
       "id": "no-self-approval",
       "tool": ["run_command", "run_shell_command", "execute_command", "exec", "shell", "shell_exec", "bash"],
-      "args": { "command": { "regex": "approvals\\s+(approve|deny|grant)\\b|tools\\s+accept\\b|\\.agent-gate\\b" } },
+      "args": { "command": { "regex": "approvals\\s+(approve|deny|grant|ui)\\b|tools\\s+accept\\b|\\.agent-gate\\b" } },
       "decision": "block",
       "why": "An agent must not answer its own approval requests, accept a changed tool, or touch the gateway's state."
     },

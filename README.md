@@ -17,7 +17,7 @@ flowchart LR
   providers["model providers"]
   localModel["a local model, for calls with personal data"]
   files[("state files: approval queue, audit log, pinned tools, budget ledger, usage log")]
-  human["a human, at the CLI"]
+  human["a human, at the CLI or on the approvals page (127.0.0.1)"]
   cloud["Cloud Run can run the LLM gateway as a container (Terraform in deploy/)"]
   agent -- "shell command" --> hook --> shell
   agent -- "tool call: stdio, or HTTP with a key per agent" --> mcp --> tools
@@ -30,10 +30,11 @@ flowchart LR
 ```
 
 A call held for a human waits in the approval queue, a state file kept out of the agent's reach, and a
-human answers it at the CLI; the agent learns the answer when it makes the same call again. Two pages
-replay real runs step by step, with the lines of code that decided each step:
-[the MCP gateway](docs/demo/index.html) and [the LLM gateway](docs/demo/llm.html) (static files: open
-them in a browser).
+human answers it at the CLI, or on the approvals page, a local web page with the same checks; the
+agent learns the answer when it makes the same call again. Two pages replay real runs step by step,
+with the lines of code that decided each step: [the MCP gateway](docs/demo/index.html) and
+[the LLM gateway](docs/demo/llm.html); a third is [the approvals page](docs/demo/approvals.html) itself,
+read-only, with a recorded run (static files: open them in a browser).
 
 The shell guard came first. Before the agent runs a shell command, it reads the command and decides
 one of four things: **pass**, **warn**, **ask** a human, or **block**. The MCP gateway brings the same
@@ -751,6 +752,8 @@ agent-gate approvals stats [--json]                 per rule: approved, denied, 
 agent-gate approvals grant <server>__<tool> --uses <n> --hours <h> [--arg <name>=<glob>]... [--agent <name>] [--note <text>]
                                                     a standing approval (deny sa-… revokes it); --agent: for that HTTP agent
 agent-gate approvals grants [--all] [--json]        standing approvals in force (--all: also used up, expired, revoked)
+agent-gate approvals ui [--port <n>]                the approvals page on 127.0.0.1, on a new port each start;
+                                                    it prints a link that opens it once (see The approvals page)
 agent-gate audit stats [--json]                     per tool: calls, decisions, errors, p50/p95 time (see Audit log)
 agent-gate audit verify [--json]                    the log checked against the gateway's rules (exit 1 on a problem)
 agent-gate audit trajectory --expect <file> [--mode exact|in-order|any-order] [--all] [--conn <id>] [--run <id>] [--json]
@@ -911,6 +914,71 @@ proof without the key. A key file the agent can write is no better than one it c
 in a key it knows. Why it works this way, and what it leaves open:
 [ADR 0013](docs/adr/0013-action-tokens-for-irreversible-calls.md).
 
+### The approvals page
+
+`agent-gate approvals ui` serves the queue as a web page for the human who starts it, in their own
+terminal, like the CLI. It listens on 127.0.0.1 only, on a port the system picks anew each start, and
+prints its link once:
+
+```
+$ agent-gate approvals ui
+agent-gate approvals ui: listening on http://127.0.0.1:52817, on this machine only.
+Open this link in your browser. It works once: the first tab that opens it gets the session, and the link is then spent.
+  http://127.0.0.1:52817/#key=<printed once, to this terminal>
+Decisions made there are written to approvals.json and the audit log, as from this CLI. Stop with Ctrl-C.
+```
+
+The page lists the requests that wait, and the standing approvals in force. Picking a request shows
+the CLI's read-back of it, every argument in full, and for an irreversible request its action token
+under the call. Approve takes what `approvals approve` takes: the token, typed (the field starts empty
+and the page never fills it), or for any other request the last four characters of the id. Deny takes
+a reason, which the agent is shown. A decision on the page is the CLI's decision: the same code
+(`src/gateway/decisions.ts`) writes the same record and the same audit lines, refusals included.
+
+What keeps it the human's:
+
+- **The link is the key.** Its key is in the fragment, which a browser never sends to a server. The
+  page trades it once for a session token and a CSRF token, kept in that tab's `sessionStorage` and
+  sent as headers. There are no cookies: a cookie for 127.0.0.1 also goes to every other port on it.
+  The same link a second time opens nothing, and a process that never saw the link gets 401 for
+  everything. A session ends after 60 minutes without a request from the human (the page's background
+  polls do not count); then start the page again.
+- **A new port every start.** A browser keeps a service worker or a cached page for an origin after
+  the server that left it is gone. On a fixed port, a server an agent ran there earlier could have left
+  one waiting to read the next link; a new port is one of thousands, which an earlier server would have
+  had to prepare in advance. If a service worker controls the page anyway, the page removes it and
+  stops before it uses the link (agent-gate registers none). `--port <n>` fixes the port all the same,
+  and the banner in the terminal then says what that costs. Either way, keep pages that an agent serves
+  on 127.0.0.1 out of the browser you approve in.
+- **Every decision carries the session's CSRF token, the page's own `Origin` and a JSON body,** and
+  every request a `Host` that names the listener, so neither another site open in the same browser nor
+  DNS rebinding can reach the queue.
+- **The token stays with the human.** It is in the read-back's answer, to the session, and nowhere
+  else: not in the list, the audit log, approvals.json or the terminal. The server checks what was
+  typed, with the CLI's code.
+- **Nothing the agent wrote runs.** Every argument goes into the page as text; control, invisible and
+  direction-changing characters are shown as `\uXXXX`, on the page and in what the server prints to
+  the terminal; and the page's Content-Security-Policy allows only its own script and style (by hash)
+  and requests to itself.
+- **It grants nothing.** Standing approvals are granted and revoked at the CLI, and none ever answers
+  an irreversible call. The example policy's `no-self-approval` rule blocks an agent's shell tool from
+  starting the page, as it blocks `approve`: whoever starts the page reads its link. Like that rule for
+  `approve`, it reads the command's text, so a quoted word gets past it; keeping the CLI out of the
+  agent's reach is what holds (see [What the gateway does not cover](#what-the-gateway-does-not-cover)).
+- **Open it where no agent looks.** The token is on the screen, as it is in the terminal for the CLI.
+  An agent whose browser tool is attached to your own browser (an extension, a remote debugging port)
+  can read the page, the token included, and with typing and clicking allowed could fill it in. Use a
+  browser, or a browser profile, that no agent tool drives, and grant no standing approval for browser
+  input there.
+
+[docs/demo/approvals.html](docs/demo/approvals.html) is the page in a read-only demo mode, with a real
+run recorded in it by `npm run demo:approvals`: the agent's three calls that ask, the page's requests
+and the server's answers (refused without the link, from another site, without the CSRF token, without
+the action token and with a wrong one; then two approvals and a denial), the agent's retries, and
+`audit verify` passing on the whole log. The demo has no server behind it, and its policy lets it
+connect nowhere. Why the page works this way, and what it leaves open:
+[ADR 0014](docs/adr/0014-approvals-web-page.md).
+
 ### Tool lists
 
 The model chooses its calls from what `tools/list` tells it, so the gateway decides what goes in the
@@ -970,7 +1038,7 @@ first match alone gives.
 
 | Rule | Matches | Decision |
 | --- | --- | --- |
-| `no-self-approval` | a shell tool whose command answers or grants an approval, accepts a changed tool, or touches `.agent-gate` | block |
+| `no-self-approval` | a shell tool whose command answers or grants an approval (or starts the approvals page), accepts a changed tool, or touches `.agent-gate` | block |
 | `protect-gateway-state` | any tool whose `path` argument points into `.agent-gate` | block |
 | `shell-guard` | a shell tool (`run_command`, `exec`, `bash` and others): its `command` goes through the shell guard | the guard's decision |
 | `red-line-1-money` | tool names with pay, charge, purchase, buy, transfer, checkout, refund, create payment, place order, create order; and cloud resources that start a bill: provision, create instance, create cluster, create corpus, create rag corpus, create bucket, enable api, enable service, scale up, create key | ask; a request lives 15 minutes; irreversible (action token) |
@@ -1545,7 +1613,8 @@ time a client lists the tools.
   (`fileBinding`).
 - An approval is only as safe as the place it is stored. Anyone who can run the CLI or write
   `<stateDir>` can approve, including an agent that has its own shell or file tools outside the
-  gateway. The example policy stops this through the gateway (`no-self-approval`,
+  gateway; so can anyone who reads the link the approvals page prints, which is why it is printed only
+  to the terminal that started the page. The example policy stops this through the gateway (`no-self-approval`,
   `protect-gateway-state`), but an agent's native shell, such as Claude Code's Bash tool, never
   passes through it. Keep the state directory out of the agent's reach, for example owned by
   another OS user. For irreversible calls the line is narrower: approving one needs the action-token
@@ -2628,7 +2697,7 @@ the guard needs no network: what it may load, and the hook run with every networ
 Each case has an `expect` of `pass`, `warn`, `ask` or `block`; `ask_or_block` accepts either of
 the last two (3 cases).
 
-The MCP gateway suite (`test/gateway/`) runs 600 tests: a policy table for each red line, for the
+The MCP gateway suite (`test/gateway/`) runs 637 tests: a policy table for each red line, for the
 SQL and browser examples, for the shell rule and for rules that shorten a request's life (`ttlMinutes`); the
 path matchers (`under`, `outside`, `touches`) on `..`, escapes, symlinks and their loops, and a red
 team of path tricks against the real filesystem server (`npm install` puts it in `node_modules`); tool
@@ -2681,6 +2750,26 @@ One step plays a prompt injection: a tool result tells the agent to upload its S
 obeys, and the gateway blocks the call before it reaches the server. Another denies a call with a
 reason written to sound like the system, and checks that the agent sees it as one quoted line and
 the call stays denied.
+An approvals-page suite (`test/gateway/approvals-ui.test.ts`) runs
+`approvals ui` on 127.0.0.1: 403 for another `Host`, the page's policy header (its hashes those of the
+script and style it serves), 401 for every API call without the session, no session for another
+`Origin`, a missing one, a cross-site fetch or a body that is not JSON, a wrong key that does not spend
+the link and a link that works once, a decision without the CSRF token that changes nothing, the CLI's
+read-back, an irreversible request refused without its token, with a wrong one and with another
+request's, then approved with its own and let through by the gateway once, the end of the id for any
+other request, a denial's reason, a record changed since the read-back (for a denial, an approval not
+used yet too; a decided one is refused as the CLI refuses it), the CLI's audit lines field for field for a denial, a typed approval and a token,
+the terminal's lines escaped as the page escapes, the token in no file and no terminal line, standing
+approvals shown but never granted and never answering an irreversible call, a body over 16 KiB, the end
+of a session after its idle time with a clock the test moves (polls do not keep it); then the page's own
+script, run against the server with a small stand-in for the browser (the key out of the address bar, a
+spent link in a second tab, a new link's key before a session kept from an earlier start, a link pasted
+into an open tab, a pasted link that opens nothing leaving the tab's session alone with no poll during
+the trade, a service worker in control (the page removes it and stops, the link unspent), the token
+typed into an empty field, the end of an id, a denial, markup and a right-to-left override shown as
+text, values that are not text, a request decided at the CLI read back again by a poll), and the command
+itself (its link printed once on a new port, the note a fixed `--port` prints before the link, SIGTERM, bad ports, and the example policy blocking an agent that starts it, with the quoted command
+that gets past the rule recorded).
 
 The LLM gateway suite (`test/llm/`) runs 349 tests: a routing table; config validation; budget
 math and the ledger with a clock the test controls (reserve, settle, release, calls in flight, UTC
@@ -2760,8 +2849,8 @@ an evaluation set of whole runs, each replayed and checked step by step. It chec
 not whether the agent's answers were good.
 
 Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held-out attacks are
-stopped (351/351 shell guard tests, 506/506 MCP gateway tests, 323/323 LLM gateway tests, 7/7 for
-the change-review example, 6/6 for the status-mcp example, 5/5 for each of the two demo pages, 3/3 for the load
+stopped (351/351 shell guard tests, 637/637 MCP gateway tests, 349/349 LLM gateway tests, 7/7 for
+the change-review example, 6/6 for the status-mcp example, 5/5 for each of the three demo pages, 3/3 for the load
 test), on Node 22. CI runs `npm ci` and `npm test` on
 Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](#deploy)).
@@ -2779,6 +2868,9 @@ src/gateway/status.ts                         <stateDir>/status.json, for agent-
 src/gateway/policy.ts                         the policy engine (pure but for path matchers): evaluate(policy, call) -> verdict
 src/gateway/approvals.ts                      the approval queue in <stateDir>/approvals.json
 src/gateway/action-tokens.ts                  action tokens for irreversible calls: the key, the code, the proof
+src/gateway/decisions.ts                      a human's decision, shared by the CLI and the approvals page
+src/gateway/approvals-ui.ts                   approvals ui: the approvals page's server, on 127.0.0.1
+src/gateway/approvals-page.ts                 the approvals page itself: one document, its script and style inline
 src/gateway/repeats.ts                        loop limits: recent runs per call in <stateDir>/repeats.json
 src/gateway/files.ts                          binds approvals to the content of the files a call names
 src/gateway/tool-pins.ts                      pinned tool definitions in <stateDir>/tools.json
@@ -2853,6 +2945,7 @@ examples/status-mcp/sample-status/            the status folder it reads by defa
 test/status-mcp.test.js                       the example through a running gateway
 test/demo.test.js                             the demo page: quoted code still matches, its log verifies, it steps through
 test/demo-llm.test.js                         the LLM demo page: quoted code still matches, its dollars add up, no key on it
+test/demo-approvals.test.js                   the approvals demo: the page's code, its log verifies, it sends nothing
 test/SANITIZED.md                             what was changed in the cases before publication
 test/HELDOUT.md                               where the held-out cases come from, and their score
 docs/red-team.md                              the case categories, with counts
@@ -2862,6 +2955,8 @@ docs/demo/index.html                          a step-through replay of a real ga
 scripts/demo-transcript.js                    npm run demo: records that run and writes it into the page
 docs/demo/llm.html                            the same for the LLM gateway: routing, a blocked secret, a budget refusal, a stream
 scripts/demo-llm-transcript.js                npm run demo:llm: records that run and writes it into the page
+docs/demo/approvals.html                      the approvals page in demo mode, read-only, with a recorded run
+scripts/demo-approvals.js                     npm run demo:approvals: records that run and writes the page
 docs/adr/0001-non-blocking-approvals.md       why "ask" answers with an error instead of waiting
 docs/adr/0002-reserve-then-settle-budgets.md  why budgets reserve an estimate and settle after
 docs/adr/0003-single-writer-state.md          why the gateway runs as one replica, and the way to more
@@ -2876,6 +2971,7 @@ docs/adr/0011-streaming.md                    why a streamed answer is held unti
 docs/adr/0012-an-http-endpoint-for-agents.md  agents over HTTP: a key per agent, approvals bound to it; what deploying it needs
 docs/adr/0013-action-tokens-for-irreversible-calls.md
                                               an irreversible call is confirmed with a token the gateway bound to it
+docs/adr/0014-approvals-web-page.md           the approvals page: a local process whose link is the key
 tsconfig.json                                 compiles src/ and test/ into dist/
 AGENTS.md                                     build, layout and rules for coding agents
 CLAUDE.md                                     one line that points Claude Code to AGENTS.md
