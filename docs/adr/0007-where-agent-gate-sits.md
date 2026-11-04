@@ -39,7 +39,7 @@ run next to the agent, on its machine.
 | Container image | Done: multi-stage, distroless, non-root, pinned base images | `Dockerfile` |
 | Infrastructure as code | Done, not applied: Cloud Run, registry, secrets, state bucket, least-privilege service account | `deploy/terraform/`, `deploy/README.md` |
 | Kubernetes manifests | Done, not applied | `deploy/k8s/` |
-| CI | Done: tests on Node 20 and 22; the deploy job (Terraform tests, kubeconform, image build, compose demo) waits for them | `.github/workflows/ci.yml` |
+| CI | Done: tests on Node 22 and 24; the deploy job (Terraform tests, kubeconform, image build, compose demo) waits for them | `.github/workflows/ci.yml` |
 | Health check | Done: `GET /healthz`, used by the image's `HEALTHCHECK` and the Cloud Run probes | `src/llm/server.ts:91` |
 | Cost control | Done: daily and monthly caps per key, reserve then settle (ADR 0002); an optional budget alert for the cloud project | `src/llm/budget.ts`, `deploy/terraform/budget.tf` |
 | Audit | Done: a usage log without prompt text; the MCP gateway's audit log | `src/llm/usage-log.ts`, `src/gateway/audit.ts` |

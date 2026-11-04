@@ -42,7 +42,7 @@ An OpenAI-compatible endpoint between the agent and its model providers.
 
 ### 1. Clone and install
 
-Needs Node 20 or newer.
+Needs Node 22 or newer.
 
 ```
 git clone https://github.com/bobbyhin/agent-gate.git

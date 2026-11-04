@@ -9,7 +9,7 @@ npm install
 npm test
 ```
 
-`npm test` compiles the TypeScript and then runs `node --test` (Node 20 or newer) over three suites.
+`npm test` compiles the TypeScript and then runs `node --test` (Node 22 or newer) over three suites.
 
 The shell guard suite needs no dependencies; `node --test test/command-guard.test.js` runs it on
 its own. It runs 351 tests: the 239 cases in `test/cases.json` and a check that the file is well
@@ -165,7 +165,7 @@ thresholds, run by pytest):
 | eval set: inputs with the expected outcome | `test/cases.json` (239 commands, each with `expect`) and `test/cases-exfil.json` (73) |
 | a held-out split | `test/cases-heldout.json` (163 commands the analyzer was never tuned on), with a baseline score |
 | test config: metric and threshold | an exact match on the decision for every case; for the held-out set, recall and false asks no worse than `test/heldout-baseline.json` |
-| the runner and the gate | `npm test`, in CI on Node 20 and 22; the deploy job does not start until it passes |
+| the runner and the gate | `npm test`, in CI on Node 22 and 24; the deploy job does not start until it passes |
 
 The difference is the judge. The analyzer is deterministic, so a case is checked by an exact match on
 the decision, with no model judging and no tolerance band. And it is evaluated one call at a time.
@@ -179,7 +179,7 @@ Current result: **239/239 cases and 73/73 upload cases pass**, and 8 of 122 held
 stopped (351/351 shell guard tests, 637/637 MCP gateway tests, 349/349 LLM gateway tests, 7/7 for
 the change-review example, 6/6 for the status-mcp example, 5/5 for each of the three demo pages, 3/3 for the load
 test), on Node 22. CI runs `npm ci` and `npm test` on
-Node 20 and 22; a second job, which starts only after those pass, checks the deploy files (see
+Node 22 and 24; a second job, which starts only after those pass, checks the deploy files (see
 [Deploy](operations.md#deploy)).
 
 ## Repository layout
@@ -302,7 +302,7 @@ docs/adr/0014-approvals-web-page.md           the approvals page: a local proces
 tsconfig.json                                 compiles src/ and test/ into dist/
 AGENTS.md                                     build, layout and rules for coding agents
 CLAUDE.md                                     one line that points Claude Code to AGENTS.md
-.github/workflows/ci.yml                      npm test on Node 20 and 22; checks and a build of the deploy files
+.github/workflows/ci.yml                      npm test on Node 22 and 24; checks and a build of the deploy files
 ```
 
 `package.json` maps `#command-guard` to `src/command-guard.js` (its `imports` field), so the

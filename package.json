@@ -28,7 +28,7 @@
     "bench": "node scripts/bench.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "keywords": [
     "ai-agents",
