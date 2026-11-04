@@ -83,15 +83,15 @@ capitals are placeholders.
    nodes):
 
    ```
-   docker build -t REGISTRY/llm-gateway:0.1.0 .
-   docker push REGISTRY/llm-gateway:0.1.0
+   docker build -t REGISTRY/llm-gateway:0.2.0 .
+   docker push REGISTRY/llm-gateway:0.2.0
    ```
 
 2. Edit `deploy/k8s/llm-gateway.config.json`: the upstreams (`baseUrl`, `models`, `pricePerMTok`),
    and one entry in `keys` per team or agent, with the SHA-256 of its gateway key and its caps.
 3. Point the manifests at the image: in `deploy/k8s/kustomization.yaml`, set `newName` under
    `images` to `REGISTRY/llm-gateway`, or run
-   `kustomize edit set image agent-gate-llm-gateway=REGISTRY/llm-gateway:0.1.0` in that directory.
+   `kustomize edit set image agent-gate-llm-gateway=REGISTRY/llm-gateway:0.2.0` in that directory.
 4. Apply the manifests, and create the Secret with the provider keys. Its keys are the `apiKeyEnv`
    names from the config.
 
@@ -186,8 +186,8 @@ printf %s "$PROVIDER_B_API_KEY" | gcloud secrets versions add llm-gateway-provid
 
 # 3. The image. Cloud Run runs linux/amd64 images, so say so when building on an ARM machine.
 gcloud auth configure-docker REGION-docker.pkg.dev
-docker build --platform linux/amd64 -t REGION-docker.pkg.dev/PROJECT_ID/agent-gate/llm-gateway:0.1.0 ../..
-docker push REGION-docker.pkg.dev/PROJECT_ID/agent-gate/llm-gateway:0.1.0
+docker build --platform linux/amd64 -t REGION-docker.pkg.dev/PROJECT_ID/agent-gate/llm-gateway:0.2.0 ../..
+docker push REGION-docker.pkg.dev/PROJECT_ID/agent-gate/llm-gateway:0.2.0
 
 # 4. Everything else.
 terraform apply

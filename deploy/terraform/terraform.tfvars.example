@@ -2,7 +2,7 @@
 
 project_id = "your-project-id"
 region     = "europe-west1"
-image_tag  = "0.1.0"
+image_tag  = "0.2.0"
 
 # Who may call the gateway. Each caller also needs a gateway key from the config.
 invoker_members = [

@@ -24,7 +24,7 @@ import { cleanNote } from "./approvals.js";
 import { DEFAULT_MAX_RESTARTS, type GatewayConfig, type ServerConfig } from "./config.js";
 import type { ServerStatus, StatusFile } from "./status.js";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 // ponytail: a server that keeps returning a nextCursor is cut off after this many pages.
 const MAX_LIST_PAGES = 100;
 const MAX_BACKOFF_MS = 30_000;

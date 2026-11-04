@@ -31,4 +31,4 @@ configMapGenerator:
 
 images:
   - name: agent-gate-llm-gateway
-    newTag: 0.1.0
+    newTag: 0.2.0

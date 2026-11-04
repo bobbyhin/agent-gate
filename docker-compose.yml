@@ -14,7 +14,7 @@ services:
     build:
       context: .
       target: fake-upstream
-    image: agent-gate-fake-upstream:0.1.0
+    image: agent-gate-fake-upstream:0.2.0
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -23,7 +23,7 @@ services:
     build:
       context: .
       target: runtime
-    image: agent-gate-llm-gateway:0.1.0
+    image: agent-gate-llm-gateway:0.2.0
     depends_on: [fake-upstream]
     ports:
       - "127.0.0.1:8787:8787" # reachable from this machine only

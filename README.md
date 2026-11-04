@@ -180,7 +180,7 @@ The demo pages are static files: open them in a browser.
 
 ## Status
 
-- v0.1.0: extracted from the guard that runs daily on the author's own agent setup. A newer private copy is in use there.
+- v0.2.0: extracted from the guard that runs daily on the author's own agent setup. A newer private copy is in use there.
 - `npm test` runs 1,368 tests, including the 239 red-team regression cases.
 
 ## License

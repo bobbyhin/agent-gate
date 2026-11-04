@@ -160,7 +160,7 @@ content-type: application/json
 mcp-session-id: b017edba-61f0-4166-bd1c-08d27b878280
 content-length: 165
 
-{"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"agent-gate","version":"0.1.0"}},"jsonrpc":"2.0","id":1}
+{"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"agent-gate","version":"0.2.0"}},"jsonrpc":"2.0","id":1}
 ```
 
 After `notifications/initialized`, the builder calls `demo__delete_file` in that session and gets the

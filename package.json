@@ -1,6 +1,6 @@
 {
   "name": "agent-gate",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Guards between an AI agent and its actions: a shell command guard, an MCP gateway that holds risky tool calls for a human, and an LLM gateway with routing, budget caps and a leak guard.",
   "license": "MIT",
   "author": "Bodinwit Jitsomruetaikul",

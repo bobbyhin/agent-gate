@@ -2,7 +2,7 @@
 #
 # The LLM gateway as a container image.
 #
-#   docker build -t agent-gate-llm-gateway:0.1.0 .
+#   docker build -t agent-gate-llm-gateway:0.2.0 .
 #   docker build --platform linux/amd64 ...   for Cloud Run, which runs linux/amd64 images only
 #
 # Stages: build (npm ci, tsc) and prod-deps (npm ci --omit=dev) on Node 22 slim; then two small

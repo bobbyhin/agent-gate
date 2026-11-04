@@ -16,7 +16,7 @@ variable "region" {
 variable "image_tag" {
   description = "Tag of the llm-gateway image in this project's agent-gate Artifact Registry repository. Tags there are immutable, so a tag names exactly one build. The image must be pushed before the first full apply."
   type        = string
-  default     = "0.1.0"
+  default     = "0.2.0"
 }
 
 variable "gateway_config_file" {
