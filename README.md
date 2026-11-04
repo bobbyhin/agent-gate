@@ -1,82 +1,185 @@
 # agent-gate
 
-Guards between an AI agent and its actions: a shell command guard, an MCP gateway that holds risky
-tool calls for a human, and an LLM gateway with routing, budget caps and a leak guard. Each one
-decides in code, before the action runs.
+Guards between an AI agent and its actions. Each guard decides in code, before the action runs.
+
+[![CI](https://github.com/bobbyhin/agent-gate/actions/workflows/ci.yml/badge.svg)](https://github.com/bobbyhin/agent-gate/actions/workflows/ci.yml)
+
+## Features
+
+### Shell guard
+
+A Claude Code hook: Claude Code runs it before every shell command.
+
+- **Four decisions** - pass, warn, ask a human, or block
+- **Reads like a shell** - quotes, heredocs, wrappers and `sh -c`
+- **Upload check** - blocks secret files; asks before other uploads
+- **No model, no network** - same input, same answer, in milliseconds
+- **Red-team cases** - 239 commands, each with its expected decision
+
+### MCP gateway
+
+MCP is the protocol agents use to call tools. The gateway sits between the agent and its MCP servers.
+
+- **Policy** - allow, warn, ask or block each tool call
+- **Approvals** - a human's one-time yes for one exact call
+- **Approvals page** - a local web page on 127.0.0.1
+- **Audit log** - a line before every call; hashes, not values
+- **Pinned tools** - a changed tool definition is withheld
+- **Result guard** - optional; withholds secrets, flags instruction-like text
+
+### LLM gateway
+
+An OpenAI-compatible endpoint between the agent and its model providers.
+
+- **Routing** - picks the model; retries, then falls back
+- **Budget caps** - daily and monthly dollar caps per key
+- **Leak guard** - blocks or redacts secrets in prompts and answers
+- **Local model** - calls with personal data can stay local
+- **Held streams** - streamed answers are read before release, by default
+- **Usage log and metrics** - a line per call, trace ids, Prometheus
+
+## Quick Start
+
+### 1. Install
+
+Put this repository on your machine. Then install its dependencies (Node 20 or newer):
+
+```
+npm install
+```
+
+### 2. Run the tests
+
+`npm test` compiles the TypeScript, then runs every suite with `node --test`.
+
+```
+npm test
+```
+
+### 3. Use the shell guard as a Claude Code hook
+
+Add this to `.claude/settings.json` (or `~/.claude/settings.json`). Replace `/path/to/agent-gate` with the real path.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /path/to/agent-gate/bin/claude-pretooluse-hook.js"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+To try the hook without Claude Code, see [the hook section](docs/shell-guard.md#use-it-as-a-claude-code-hook).
+The gateways have their own setup steps: [MCP gateway](docs/mcp-gateway.md#set-it-up), [LLM gateway](docs/llm-gateway.md#set-it-up).
+
+## How it works
+
+An agent can run shell commands, call tools and call models. agent-gate puts a guard in front of each one.
 
 ```mermaid
 flowchart LR
   agent["AI agent"]
   subgraph gate["agent-gate"]
-    hook["shell guard: a Claude Code hook"]
-    mcp["MCP gateway: policy, approvals, audit log"]
-    llm["LLM gateway: routing, budgets, leak guard"]
+    hook["shell guard"]
+    mcp["MCP gateway"]
+    llm["LLM gateway"]
   end
-  shell["shell"]
-  tools["MCP servers: local over stdio, remote over Streamable HTTP"]
-  providers["model providers"]
-  localModel["a local model, for calls with personal data"]
-  files[("state files: approval queue, audit log, pinned tools, budget ledger, usage log")]
-  human["a human, at the CLI or on the approvals page (127.0.0.1)"]
-  cloud["Cloud Run can run the LLM gateway as a container (Terraform in deploy/)"]
-  agent -- "shell command" --> hook --> shell
-  agent -- "tool call: stdio, or HTTP with a key per agent" --> mcp --> tools
-  agent -- "chat completion, with a gateway key" --> llm --> providers
-  llm -.->|"divert"| localModel
-  mcp --- files
+  agent -- "shell command" --> hook --> shell["shell"]
+  agent -- "tool call" --> mcp --> tools["MCP servers"]
+  agent -- "model call" --> llm --> providers["model providers"]
+  llm -.->|"personal data"| localModel["local model"]
+  mcp --- files[("state files")]
   llm --- files
-  human -- "approve or deny, out of band" --> files
-  llm -.- cloud
+  human["human: CLI or approvals page"] -- "approve or deny" --> files
 ```
 
-A call held for a human waits in the approval queue, a state file kept out of the agent's reach, and a
-human answers it at the CLI, or on the approvals page, a local web page with the same checks; the
-agent learns the answer when it makes the same call again. Two pages replay real runs step by step,
-with the lines of code that decided each step: [the MCP gateway](docs/demo/index.html) and
-[the LLM gateway](docs/demo/llm.html); a third is [the approvals page](docs/demo/approvals.html) itself,
-read-only, with a recorded run (static files: open them in a browser).
+- A call that needs a human waits in the approval queue. The queue is a state file kept out of the agent's reach.
+- A human answers at the CLI, or on the approvals page.
+- The agent learns the answer when it makes the same call again.
 
-The shell guard came first. Before the agent runs a shell command, it reads the command and decides
-one of four things: **pass**, **warn**, **ask** a human, or **block**. The MCP gateway brings the same
-decisions to tool calls; the LLM gateway decides which model serves a call, whether the caller's
-budget allows it, and what may leave the machine.
+### The four decisions
 
-This repository has five parts:
+| Decision | What happens | Example |
+| --- | --- | --- |
+| pass | The command runs. | `git status` |
+| warn | A note goes to stderr, and the command runs. | `kill -9 4242` |
+| ask | A human is asked to confirm first. | `git push origin main` |
+| block | The command is refused (exit code 2). | `rm -rf ~` |
 
-- `src/command-guard.js`: the analyzer. One function, no dependencies. `analyze(command)`
-  returns `{ action, label, why }`.
-- `bin/claude-pretooluse-hook.js`: a Claude Code `PreToolUse` hook built on the analyzer.
-- `test/cases.json`: 239 commands, each with the decision it must get. They come from red-team
-  rounds against earlier versions of the analyzer. A second suite, `test/cases-exfil.json`, holds
-  73 uploads of local files (suite G, added with v5.1). A third, `test/cases-heldout.json`, holds
-  163 commands from a later red team that the analyzer was never tuned on (`npm run redteam`).
-- `src/gateway/`: an MCP gateway (TypeScript) that brings the same four decisions to MCP tool
-  calls and holds risky calls until a human approves them; a call that cannot be undone is confirmed
-  with an action token the agent never sees. See [MCP gateway](docs/mcp-gateway.md).
-- `src/llm/`: an LLM gateway (TypeScript) in front of model providers, with routing, daily and
-  monthly budget caps per key, stop rules for loops (a run ships, runs out of budget, or stops on a
-  flat line, under caps the agent cannot raise), a leak guard for secrets and personal numbers in
-  prompts and answers (streamed ones too), and a way to keep calls with personal data on a local
-  model. See [LLM gateway](docs/llm-gateway.md).
+### The four red lines
 
-The LLM gateway also comes as a container image, with Kubernetes manifests and Terraform for Google
-Cloud Run. See [Deploy](docs/operations.md#deploy).
+These actions should always involve a human. They are hard to undo, or they leave the machine.
 
-Status: v0.1.0. It is extracted from the guard that runs daily on the author's own agent setup,
-where a newer private copy is in use. It is a heuristic reader of shell commands, not a sandbox.
-See [Known limits](docs/shell-guard.md#known-limits).
+1. Spending money
+2. Posting publicly to a real account
+3. `git push`, merge, pull request, deploy, publish
+4. Permanently deleting or overwriting something the agent did not create
 
-## Documentation
+The shell guard enforces lines 3 and 4. The MCP gateway's example policy has a rule for each of the four.
 
-The reference sections now live in `docs/`:
+## Why it asks instead of blocking
 
-- [docs/shell-guard.md](docs/shell-guard.md): the shell guard, its limits, its red-team history and its origin
-- [docs/mcp-gateway.md](docs/mcp-gateway.md): the MCP gateway
-- [docs/llm-gateway.md](docs/llm-gateway.md): the LLM gateway
-- [docs/examples.md](docs/examples.md): a status server behind the MCP gateway, and a change review as a workflow
-- [docs/operations.md](docs/operations.md): failure behavior, performance and deploy
-- [docs/development.md](docs/development.md): the tests and the repository layout
-- [docs/related-work.md](docs/related-work.md): related work
+- The first version blocked dangerous commands outright.
+- In 46 days of the author's logs, it blocked 33 times.
+- About 32 of those were legitimate work. None stopped a real disaster.
+- So most rules now ask a human instead of blocking.
+
+## Known limits
+
+- It is a heuristic reader of shell commands. It is not a sandbox, and not a full shell parser.
+- Aliases, variables, scripts run later and code that calls a shell itself get past it.
+- Spending and posting usually go through APIs, MCP tools or a browser. The shell guard alone cannot enforce red lines 1 and 2.
+- On 163 held-out red-team commands, it stops 8 of the 122 it should. Most misses are actions it does not check.
+- Nothing has been deployed to a real cloud. The deploy files are only checked, locally and in CI.
+
+The full lists: [shell guard](docs/shell-guard.md#known-limits), [MCP gateway](docs/mcp-gateway.md#what-the-gateway-does-not-cover), [LLM gateway](docs/llm-gateway.md#what-the-llm-gateway-does-not-cover).
+
+## Project Structure
+
+```
+bin/                   the Claude Code hook and the agent-gate CLI
+src/command-guard.js   the shell analyzer: analyze(command) -> { action, label, why }
+src/gateway/           the MCP gateway: policy, approvals, audit log
+src/llm/               the LLM gateway: routing, budgets, leak guard
+test/                  the shell cases and the gateway test suites
+examples/              a status server and a change review
+docs/                  the manual, design records and demo pages
+deploy/                Compose, Kubernetes and Cloud Run files (checked, not deployed)
+```
+
+## Docs
+
+| File | What is inside |
+| --- | --- |
+| [docs/shell-guard.md](docs/shell-guard.md) | How the shell guard reads a command, its limits, the hook, red-team history, origin |
+| [docs/mcp-gateway.md](docs/mcp-gateway.md) | MCP gateway: setup, approvals, policy, audit log, tool results |
+| [docs/llm-gateway.md](docs/llm-gateway.md) | LLM gateway: setup, routing, budgets, leak guard, streaming, metrics |
+| [docs/examples.md](docs/examples.md) | A status server behind the MCP gateway; a change review as a workflow |
+| [docs/operations.md](docs/operations.md) | Failure behavior, performance numbers, deploy |
+| [docs/development.md](docs/development.md) | What the tests check; the repository layout |
+| [docs/related-work.md](docs/related-work.md) | Docker MCP Gateway, LiteLLM, Google's agent platform; how other tools bind a human's yes |
+| [docs/red-team.md](docs/red-team.md) | The shell test cases, by category |
+| [docs/exploring-the-codebase.md](docs/exploring-the-codebase.md) | Trace one decision to its code and tests |
+| [docs/adr/](docs/adr/) | 14 design records (ADRs): why it works this way |
+| [docs/demo/index.html](docs/demo/index.html) | A step-through replay of a real MCP gateway run |
+| [docs/demo/llm.html](docs/demo/llm.html) | The same for the LLM gateway |
+| [docs/demo/approvals.html](docs/demo/approvals.html) | The approvals page, read-only, with a recorded run |
+
+The demo pages are static files: open them in a browser.
+
+## Status
+
+- v0.1.0: extracted from the guard that runs daily on the author's own agent setup. A newer private copy is in use there.
+- `npm test` runs 1,368 tests, including the 239 red-team regression cases.
 
 ## License
 
