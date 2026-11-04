@@ -3,7 +3,7 @@
 agent-gate guards an AI agent's actions: a shell command guard, an MCP gateway and an LLM gateway. README.md is the overview; the manual is in `docs/`, one file per guard (`shell-guard.md`, `mcp-gateway.md`, `llm-gateway.md`) plus `operations.md` and `development.md`.
 
 ## Build and test
-- `npm ci`, then `npm test`: `tsc` into `dist/`, then `node --test` over every suite (Node 20 or newer). Run it before each commit; it must pass.
+- `npm ci`, then `npm test`: `tsc` into `dist/`, then `node --test` over every suite (the Node version `engines` in `package.json` names). Run it before each commit; it must pass.
 - `npm test` writes `dist/`, so a sandboxed shell needs write access to the repository to run it.
 
 ## Layout
