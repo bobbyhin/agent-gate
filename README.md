@@ -40,11 +40,13 @@ An OpenAI-compatible endpoint between the agent and its model providers.
 
 ## Quick Start
 
-### 1. Install
+### 1. Clone and install
 
-Put this repository on your machine. Then install its dependencies (Node 20 or newer):
+Needs Node 20 or newer.
 
 ```
+git clone https://github.com/bobbyhin/agent-gate.git
+cd agent-gate
 npm install
 ```
 
