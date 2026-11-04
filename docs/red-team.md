@@ -134,7 +134,7 @@ it came from.
 | E | The Codex round, against v3 (`codex-red-team`) | 55 |
 | F | Red-team round 2, against v4 (`red-team-2`) | 38 |
 
-The sizes of D, E and F are the denominators in the history in the README (21 of 48, 43 of 55,
+The sizes of D, E and F are the denominators in the history in docs/shell-guard.md (21 of 48, 43 of 55,
 20 of 38). Suite G is in its own file; see the next section.
 
 ## Suite G: uploads of local files

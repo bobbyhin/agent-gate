@@ -1,9 +1,39 @@
+Back to the [README](../README.md)
+
 # Related work
 
 What the tools around agent-gate already do, and where agent-gate differs. Every statement about
 another product links the page it comes from; all of them were read on 2026-10-31. Products change
 quickly, so check a page before quoting it. Nothing here was benchmarked: this is a comparison of what
 each project documents, not of how well it works.
+
+agent-gate is small next to the gateways it is usually compared with, and it does a different job:
+
+| | agent-gate | [Docker MCP Gateway](https://github.com/docker/mcp-gateway) | [LiteLLM](https://github.com/BerriAI/litellm) | [Google's Agent Gateway](https://docs.cloud.google.com/gemini-enterprise-agent-platform/govern/gateways/agent-gateway-overview) |
+| --- | --- | --- | --- | --- |
+| Main job | decide each call: a policy, a human, a record | run MCP servers safely: containers, a catalog, signed images | one API in front of many model providers | a managed entry and exit point for an agent's traffic (tools, other agents, its model) on Gemini Enterprise Agent Platform |
+| How calls are decided | a JSON policy on tool names and arguments; approvals bound to the arguments' hash, used once | interceptors: your own code before or after a call | budgets, rate limits, guardrails | IAM allow and deny rules on the agent's identity and the tool's name; Model Armor filters; plain-language rules that an LLM checks (Preview) |
+| A human in the loop | an approval queue answered at a CLI | not described in its documentation | no approval queue in the proxy | not described in the Govern pages read on 31 Oct 2026 |
+| Record | an audit line before each call (no line, no call), hashes instead of values, `audit verify` | logs of tool names and argument shapes; OpenTelemetry | spend in its database; OpenTelemetry; audit logs in its Enterprise tier | allow and deny decisions can be logged to Cloud Logging, with the tool's name; access decisions to Cloud Audit Logs |
+| Streamed answers | held until the leak guard has read them (the default) | (tool calls only) | depends on the guardrail: some hold the stream, some read it after the client has it | Model Armor does not screen streaming chat completions; the LLM-checked rules do not support streamed responses |
+
+What agent-gate does not do: run servers in containers, keep a catalog of servers, verify image
+signatures, or translate between provider APIs. Isolation belongs to whatever runs the servers, and
+Docker's gateway does that well; agent-gate decides which calls may run and who said yes, and keeps a
+record that can be checked.
+
+**Where this fits.** On Google Cloud, for agents hosted on its platform, the managed gateway is where
+identity, network rules and content filters belong, and agent-gate does not replace it. What the
+Govern pages read on 31 Oct 2026 do not describe, and agent-gate does, is a human's yes for one exact
+call, spent once, and streamed answers held until they are read. Its dollar caps per key are in force
+now, where Google's token budgets are announced as coming soon; calls in flight hold their estimates,
+so together they can pass a cap only by how far those estimates were low
+([ADR 0002](adr/0002-reserve-then-settle-budgets.md)). Where no managed gateway reaches, as with a coding agent on a laptop, or
+where a team wants its own, agent-gate covers the same points on one host, with its state in files
+([ADR 0003](adr/0003-single-writer-state.md)): a gateway for one team's agents, not for a whole
+company. [docs/related-work.md](#mcp-gateways-docker-mcp-gateway) has the details, with a source for every claim
+about the other tools, and compares how Claude Code, the OpenAI Agents SDK, ADK, Antigravity and
+agent-gate bind a human's yes.
 
 ## MCP gateways: Docker MCP Gateway
 
@@ -108,7 +138,7 @@ irreversible call the human gives back a token the agent never sees ([ADR 0013](
 Code's documentation says the same about its own rules from the other side: a deny or ask rule "isn't
 a security boundary around the program", because `/bin/rm` or `bash -c` gets past a rule on `rm`.
 agent-gate's shell guard reads the command line itself, which catches more of those, but it is a
-heuristic reader too, not a sandbox (see [Known limits](../README.md#known-limits)).
+heuristic reader too, not a sandbox (see [Known limits](shell-guard.md#known-limits)).
 
 **The price, and approval fatigue.** Exact-call approvals mean more questions, and a person who is
 asked about everything learns to say yes without reading. That is an observation from using such

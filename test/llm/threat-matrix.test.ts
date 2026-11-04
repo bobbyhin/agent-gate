@@ -63,9 +63,9 @@ describe("the threat matrix (test/llm/threat-matrix.json)", () => {
     });
   }
 
-  it("README.md gives the same counts", () => {
+  it("docs/llm-gateway.md gives the same counts", () => {
     const covered = matrix.rows.filter((r) => r.covered).length;
-    const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+    const readme = fs.readFileSync(path.join(ROOT, "docs", "llm-gateway.md"), "utf8");
     assert.match(readme, new RegExp(`\`test/llm/threat-matrix\\.json\`\\) holds ${matrix.rows.length} prompts`));
     assert.match(readme, new RegExp(`the leak guard covers ${covered} of them`));
   });

@@ -57,7 +57,7 @@ once.
   queues nothing, until the denial expires, so an agent cannot wear a human down by asking again.
 - The approval id is visible to the agent. The id alone cannot approve anything; that takes the
   CLI and write access to the state directory. An agent that has its own shell outside the gateway
-  could run the CLI, which is why the state directory has to be out of its reach (see the README).
+  could run the CLI, which is why the state directory has to be out of its reach (see docs/mcp-gateway.md).
 - Every request has a lifetime (`approvalTtlHours`, default 24). An approval granted long after
   the request was made does not stay usable indefinitely.
 

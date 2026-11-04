@@ -1,7 +1,7 @@
 # Deploying the LLM gateway
 
 This directory, together with the `Dockerfile` and `docker-compose.yml` at the repository root,
-packages the [LLM gateway](../README.md#llm-gateway) as a container image and deploys it three ways:
+packages the [LLM gateway](../docs/llm-gateway.md) as a container image and deploys it three ways:
 a demo on one machine with Docker Compose, Kubernetes, and Google Cloud Run with Terraform.
 
 **Status: checked, not deployed.** Nothing here has been applied to a real Google Cloud project or a
@@ -42,8 +42,8 @@ that the config names in `apiKeyEnv`, and stops at startup, naming the variable,
 `deploy/k8s/llm-gateway.config.json` is the config for both Kubernetes and Cloud Run. It is a
 template: its upstreams are on `.example` hosts, which do not exist, and its one gateway key hash
 is all zeros, which no key matches. Until you put in real upstreams and the SHA-256 of your own gateway
-keys, it answers every call with 401. The main README shows how to make a key and its hash
-([LLM gateway](../README.md#llm-gateway), under "Set it up").
+keys, it answers every call with 401. docs/llm-gateway.md shows how to make a key and its hash
+([LLM gateway](../docs/llm-gateway.md), under "Set it up").
 
 ## The compose demo
 
@@ -270,8 +270,8 @@ agent-gate usage --verify --config smoke.config.json   # a copy of the deployed 
 ```
 
 The same command without `--url` runs the whole check on the local machine with a fake upstream,
-for nothing; the numbers it gives there are in the main README
-([Performance](../README.md#performance)).
+for nothing; the numbers it gives there are in docs/operations.md
+([Performance](../docs/operations.md#performance)).
 
 Running it:
 
@@ -298,7 +298,7 @@ small. ADR 0003 has the details and the way out.
 
 ## Metrics
 
-The gateway serves Prometheus metrics ([README: Metrics](../README.md#metrics)) only when its config
+The gateway serves Prometheus metrics ([LLM gateway: Metrics](../docs/llm-gateway.md#metrics)) only when its config
 says who may read them. The two ways fit the two platforms:
 
 - **Kubernetes.** A Prometheus server outside the pod scrapes the gateway's own port. Give the metrics

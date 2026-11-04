@@ -1,6 +1,6 @@
 // Indirect prompt injections in tool results (test/gateway/result-injections.json) through the result
 // guard with the example leak policy. Each case says what the guard does; the misses are part of the
-// fixture, so the test fails when the guard starts or stops catching one, and the README's counts are
+// fixture, so the test fails when the guard starts or stops catching one, and docs/mcp-gateway.md's counts are
 // checked against the file.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -76,16 +76,16 @@ describe("indirect prompt injections in tool results", () => {
     });
   }
 
-  it("the README's counts are this file's", () => {
+  it("docs/mcp-gateway.md's counts are this file's", () => {
     const injections = CASES.filter((c) => c.injection);
     const benign = CASES.filter((c) => !c.injection);
     const caught = injections.filter((c) => c.caught).length;
     const falseAlarms = benign.filter((c) => c.caught).length;
-    const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8").replace(/\s+/g, " ");
+    const readme = fs.readFileSync(path.join(ROOT, "docs", "mcp-gateway.md"), "utf8").replace(/\s+/g, " ");
     assert.ok(
       readme.includes(`Of the ${injections.length} results that carry an injection, the guard flags or withholds ${caught} and misses ${injections.length - caught}`),
-      "README states the injection counts",
+      "docs/mcp-gateway.md states the injection counts",
     );
-    assert.ok(readme.includes(`of the ${benign.length} ordinary documents, it flags ${falseAlarms}`), "README states the false alarms");
+    assert.ok(readme.includes(`of the ${benign.length} ordinary documents, it flags ${falseAlarms}`), "docs/mcp-gateway.md states the false alarms");
   });
 });

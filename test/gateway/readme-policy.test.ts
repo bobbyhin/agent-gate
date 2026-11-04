@@ -1,4 +1,4 @@
-// The README's table of example rules (under "### Policy") mirrors policy.example.json: the same rules
+// docs/mcp-gateway.md's table of example rules (under "## Policy") mirrors policy.example.json: the same rules
 // in the same order, every word a rule matches on named in its row, and each decision, request
 // lifetime, standing-approval flag and irreversible flag as the policy file has it.
 import { describe, it } from "node:test";
@@ -20,12 +20,12 @@ interface RawRule {
 }
 
 const policy = JSON.parse(fs.readFileSync(path.join(ROOT, "policy.example.json"), "utf8")) as { default: string; rules: RawRule[]; repeat?: Array<{ id: string; decision: string }> };
-const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+const readme = fs.readFileSync(path.join(ROOT, "docs", "mcp-gateway.md"), "utf8");
 
 /** The rows of the table that follows "`policy.example.json` maps the red lines": [rule, matches, decision]. */
 function tableRows(): Array<[string, string, string]> {
   const start = readme.indexOf("`policy.example.json` maps the red lines");
-  assert.ok(start >= 0, "the README introduces the example policy's table");
+  assert.ok(start >= 0, "docs/mcp-gateway.md introduces the example policy's table");
   const lines = readme.slice(start).split("\n").slice(1);
   const rows: Array<[string, string, string]> = [];
   for (const line of lines.slice(lines.findIndex((l) => l.startsWith("| Rule |")) + 2)) {
@@ -36,7 +36,7 @@ function tableRows(): Array<[string, string, string]> {
   return rows;
 }
 
-describe("README: the example policy's table mirrors policy.example.json", () => {
+describe("docs/mcp-gateway.md: the example policy's table mirrors policy.example.json", () => {
   const rows = tableRows();
   const byId = new Map(rows.map(([rule, matches, decision]) => [/^`([^`]+)`/.exec(rule)?.[1] ?? rule, { matches: matches.toLowerCase(), decision }]));
 

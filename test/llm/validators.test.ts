@@ -126,8 +126,8 @@ describe("the PII rules of llm-policy.example.json", () => {
     assert.throws(() => parseLeakPolicy({ leakGuard: [{ id: "x", action: "redact", regex: "\\d{4}", validator: "mod97" }] }), /validator must be one of luhn, jp-my-number, us-ssn, us-itin/);
   });
 
-  it("README.md's leak-guard table lists every rule of llm-policy.example.json, in order, with its action", () => {
-    const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+  it("docs/llm-gateway.md's leak-guard table lists every rule of llm-policy.example.json, in order, with its action", () => {
+    const readme = fs.readFileSync(path.join(ROOT, "docs", "llm-gateway.md"), "utf8");
     const section = readme.slice(readme.indexOf("`llm-policy.example.json` ships"), readme.indexOf("The formats that are surely secrets block"));
     const rows = [...section.matchAll(/^\| `([^`]+)` \| .* \| (block|redact) \|$/gm)].map((m) => [m[1], m[2]]);
     assert.deepEqual(rows, policy.rules.map((r) => [r.id, r.action]));

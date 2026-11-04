@@ -51,7 +51,7 @@ Each kind of work has a lane, and the guards keep to the first:
 | Lane | Good at | In agent-gate |
 | --- | --- | --- |
 | Code (rules) | Policy: the same answer every time, testable, cheap | All three guards |
-| Classifier (a model that returns a probability) | Ambiguous cases the rules cannot see, such as intent hidden in a script | Not built. The README lists it as a separate layer the guard needs. |
+| Classifier (a model that returns a probability) | Ambiguous cases the rules cannot see, such as intent hidden in a script | Not built. docs/shell-guard.md lists it as a separate layer the guard needs. |
 | LLM (a model that writes text) | Reading a situation and explaining it | Not used at runtime. A second reviewer that can only make a decision stricter is how it would join (ADR 0008). |
 
 The model reads the situation; the code holds the policy. Where neither can decide, the threshold is
@@ -61,8 +61,8 @@ a human: an approval in the queue, bound to the exact call (`argsHash`), used on
 
 - Rules miss what they do not encode. On a held-out set written against a broader hook, the shell
   guard stops 8 of 122 commands that it should (`npm run redteam`); most of the misses are kinds of
-  action it does not look at (single-file overwrites, paid API calls, posting). The README's "Known
-  limits" says what it does not see.
+  action it does not look at (single-file overwrites, paid API calls, posting). The "Known
+  limits" section of docs/shell-guard.md says what it does not see.
 - A rule is a regular expression or a word list, not a parser: `sql-write` and the shell guard read
   text, so they can be fooled by forms they do not know, and they can ask about harmless text.
 - Rules need upkeep. New tools and new tricks mean new rules and new test cases.

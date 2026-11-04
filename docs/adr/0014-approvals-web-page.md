@@ -139,7 +139,7 @@ Each way round, and what closes it:
   session to steal. A link pasted into a tab that is already open works there.
 - **The terminal holds the key.** An agent that can read the human's terminal, or that starts the
   page through a shell of its own outside the gateway, can open the session, as it could run the CLI.
-  Keeping the CLI and the state directory out of the agent's reach (README, "What the gateway does not
+  Keeping the CLI and the state directory out of the agent's reach (docs/mcp-gateway.md, "What the gateway does not
   cover") is what stops it. The example policy's rule stops the plain command through the gateway, but
   it reads text: a quoted or assembled word (`agent-gate approvals 'ui'`) gets past it, as it gets past
   the same rule for `approve` (the tests record this). For irreversible calls the key file is still the

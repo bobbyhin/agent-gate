@@ -2,7 +2,7 @@
 // run through policy.example.json. Each fixture records what the example policy decides today (the
 // decision and the rule), so a change to the policy shows up here as a diff to review, and a summary
 // of how often the policy agrees with the labels, is stricter (it asks about a tool that only reads),
-// or is looser (it lets through a tool that should have asked). The README quotes these summaries.
+// or is looser (it lets through a tool that should have asked). docs/mcp-gateway.md quotes these summaries.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -52,7 +52,7 @@ describe("tool lists through the example policy", () => {
   it("has tool lists", () => assert.ok(files.length > 0));
   for (const file of files) {
     const list = JSON.parse(fs.readFileSync(path.join(LISTS, file), "utf8")) as ToolList;
-    it(`${file}: each tool gets the recorded decision, and the summary is what the README quotes`, () => {
+    it(`${file}: each tool gets the recorded decision, and the summary is what docs/mcp-gateway.md quotes`, () => {
       assert.equal(new Set(list.tools.map((t) => t.name)).size, list.tools.length, "no tool is listed twice");
       for (const tool of list.tools) {
         assert.ok(DECISIONS.includes(tool.label) && tool.why.length > 0, `${tool.name}: a label and a reason`);
@@ -71,10 +71,10 @@ describe("tool lists through the example policy", () => {
     });
   }
 
-  it("gitea-mcp.json: the README's rule on the method argument gives a merge red line 3's 30 minutes, and leaves other methods to the red lines", () => {
-    const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+  it("gitea-mcp.json: docs/mcp-gateway.md's rule on the method argument gives a merge red line 3's 30 minutes, and leaves other methods to the red lines", () => {
+    const readme = fs.readFileSync(path.join(ROOT, "docs", "mcp-gateway.md"), "utf8");
     const snippet = /```json\n(\{ "id": "gitea-merge"[\s\S]*?)\n```/.exec(readme)?.[1];
-    assert.ok(snippet, "the README shows the rule");
+    assert.ok(snippet, "docs/mcp-gateway.md shows the rule");
     const raw = JSON.parse(fs.readFileSync(path.join(ROOT, "policy.example.json"), "utf8")) as { rules: unknown[] };
     const withRule = parsePolicy({ ...raw, rules: [JSON.parse(snippet), ...raw.rules] });
     const merge = evaluate(withRule, { server: "gitea", tool: "pull_request_write", args: { method: "merge", index: 7 } });
@@ -115,15 +115,15 @@ describe("tool lists through the example policy", () => {
     assert.deepEqual(unattended(POLICY), ["set_reminder_for_team"]);
   });
 
-  it("google-workspace-calendar.json: names catch none of the 3 calendar writes; the README's two rules on the action argument ask about each one", () => {
+  it("google-workspace-calendar.json: names catch none of the 3 calendar writes; docs/mcp-gateway.md's two rules on the action argument ask about each one", () => {
     const list = JSON.parse(fs.readFileSync(path.join(LISTS, "google-workspace-calendar.json"), "utf8")) as ToolList;
     const writes = list.tools.filter((t) => t.label === "ask").map((t) => t.name);
     assert.deepEqual(writes, ["manage_event", "manage_out_of_office", "manage_focus_time"]);
     assert.ok(writes.every((tool) => evaluate(POLICY, { server: list.server, tool, args: {} }).decision === "allow"), "the example policy lets each one run by its name");
 
-    const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+    const readme = fs.readFileSync(path.join(ROOT, "docs", "mcp-gateway.md"), "utf8");
     const snippet = /```json\n *(\[\n *\{ "id": "calendar-list"[\s\S]*?\])\n *```/.exec(readme)?.[1];
-    assert.ok(snippet, "the README shows the two rules");
+    assert.ok(snippet, "docs/mcp-gateway.md shows the two rules");
     const raw = JSON.parse(fs.readFileSync(path.join(ROOT, "policy.example.json"), "utf8")) as { rules: unknown[] };
     const withRules = parsePolicy({ ...raw, rules: [...(JSON.parse(snippet) as unknown[]), ...raw.rules] });
     const decide = (tool: string, args: Record<string, unknown>) => {

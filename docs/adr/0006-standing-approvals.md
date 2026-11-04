@@ -52,7 +52,7 @@ The code is in `src/gateway/approvals.ts` (`grant`, `revoke`, `resolveCall`) and
   let through" is a search, and `approvals grants` shows the uses left.
 - **The agent cannot grant itself one.** `agent-gate approvals grant` is in the example policy's
   `no-self-approval` block rule, next to `approve` and `deny`. As for every approval, the state
-  directory must be out of the agent's reach (README, "What the gateway does not cover").
+  directory must be out of the agent's reach (docs/mcp-gateway.md, "What the gateway does not cover").
 
 ## Consequences
 

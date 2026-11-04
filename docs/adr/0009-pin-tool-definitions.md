@@ -49,7 +49,7 @@ gateway whose server changes a description mid-session.
 - **Withhold, not warn.** A warning in a log is read after the model has read the new text. Leaving
   the tool out of the list means injected words never reach the model through the gateway.
 - **Exact, like the rest of the state.** Any change counts, however small, because the hash covers
-  every field the model reads. There is no "close enough" (README, "Why the state is exact").
+  every field the model reads. There is no "close enough" (docs/mcp-gateway.md, "Why the state is exact").
 - **Cheap.** A listing reads `tools.json` under its lock and writes it only when something is new or
   changed (`tool-pins.test.ts` checks that a listing that changes nothing does not rewrite the file).
   A call reads it without the lock, at most twice.
@@ -85,6 +85,6 @@ gateway whose server changes a description mid-session.
   gateways read it. That is pinning done centrally; `tools.json` is the local form. A shared copy
   needs the multi-host state that [ADR 0003](0003-single-writer-state.md) describes.
 - **Trusting annotations such as `destructiveHint`.** They come from the same server whose words are
-  in question (README, "What the gateway does not cover").
+  in question (docs/mcp-gateway.md, "What the gateway does not cover").
 - **Hashing only the name and the input schema.** The description is where poisoning lives, so it
   has to be in the hash.

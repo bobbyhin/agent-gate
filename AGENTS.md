@@ -1,6 +1,6 @@
 # AGENTS.md
 
-agent-gate guards an AI agent's actions: a shell command guard, an MCP gateway and an LLM gateway. README.md is the manual.
+agent-gate guards an AI agent's actions: a shell command guard, an MCP gateway and an LLM gateway. README.md is the overview; the manual is in `docs/`, one file per guard (`shell-guard.md`, `mcp-gateway.md`, `llm-gateway.md`) plus `operations.md` and `development.md`.
 
 ## Build and test
 - `npm ci`, then `npm test`: `tsc` into `dist/`, then `node --test` over every suite (Node 20 or newer). Run it before each commit; it must pass.
@@ -17,4 +17,4 @@ agent-gate guards an AI agent's actions: a shell command guard, an MCP gateway a
 - `analyze()`'s answers are pinned by a hash over `test/generated-commands.js` (in `test/command-guard.test.js`). A change meant to alter answers records the new hash and says why in `docs/red-team.md`. Tune nothing against `test/cases-heldout.json`; raise `test/heldout-baseline.json` when the score improves.
 - Fake secrets are built at run time from pieces, in `test/llm/fake-secrets.ts`; `gitleaks git --pre-commit --staged .` must find nothing before a commit.
 - The repository is public: English only, made-up names, hosts and paths (`example.com`, `/path/to/agent-gate`), no personal data or real credentials.
-- Each README rule table mirrors its policy file (`policy.example.json`, `llm-policy.example.json`), and `deploy/k8s/llm-policy.json` is a byte-identical copy of the latter: change them together.
+- The rule tables in `docs/mcp-gateway.md` and `docs/llm-gateway.md` mirror their policy files (`policy.example.json`, `llm-policy.example.json`), and `deploy/k8s/llm-policy.json` is a byte-identical copy of the latter: change them together.

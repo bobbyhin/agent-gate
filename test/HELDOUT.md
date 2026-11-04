@@ -22,7 +22,7 @@ owner's four red lines were:
 
 This repository's analyzer covers red line 3, recursive deletes and lost work from red line 4, and
 uploads of local files. It does not look at single-file deletes or overwrites, paid API calls,
-posting, or code run by `python3`, `node` and other interpreters (see "Known limits" in the README).
+posting, or code run by `python3`, `node` and other interpreters (see "Known limits" in docs/shell-guard.md).
 So most of the held-out misses are outside what it tries to do. The set is kept whole anyway: it
 measures the gap, and it is the yardstick for work that closes it.
 

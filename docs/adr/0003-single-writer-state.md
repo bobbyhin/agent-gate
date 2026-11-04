@@ -55,7 +55,7 @@ transactional store (see the upgrade path).
   after an idle spell waits for a cold start, since the minimum is 0.
 - **No horizontal scaling.** Throughput is what one Node process gets, and the ledger sets it.
   Measured on a laptop's local SSD on 31 Oct 2026 (`npm run bench` and `npm run loadtest`; the tables
-  are in the README's [Performance](../../README.md#performance) section): one ledger write takes about
+  are in the [Performance](../operations.md#performance) section of docs/operations.md): one ledger write takes about
   5 ms, 4 of them the `fsync` that makes it durable. A call that is let through costs two writes
   (reserve and settle), and a refused call one, because `reserve()` rewrites the file either way. The
   writes are synchronous, so they hold up the event loop, `/healthz` included: with 100 calls at once,
