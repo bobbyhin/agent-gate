@@ -162,6 +162,8 @@ const ASK_RED = [
   { ...mk(NPX + DIR + String.raw`wrangler(?:@\S+)?` + ANY + String.raw`(?:deploy|publish|pages\s+(?:deploy|publish)|versions\s+deploy)\b`), label: "wrangler deploy", why: "Red line 3 — a deploy needs a human decision" },
   { ...mk(DIR + String.raw`(?:fly(?:ctl)?|firebase)` + ANY + String.raw`deploy\b`), label: "deploy (fly/firebase)", why: "Red line 3 — a deploy needs a human decision" },
   { ...mk(DIR + String.raw`gcloud` + ANY + String.raw`(?:app|run|functions)\s+deploy\b`), label: "gcloud deploy", why: "Red line 3 — a deploy needs a human decision" },
+  { ...mk(DIR + String.raw`terraform` + ANY + String.raw`(?:apply|destroy)\b`), label: "terraform apply/destroy", why: "Red line 3 — changing live cloud infrastructure needs a human decision" },
+  { ...mk(DIR + String.raw`chezmoi` + ANY + String.raw`apply\b`), label: "chezmoi apply", why: "Red line 4 — chezmoi source is stale and overwrites live configs" },
   { ...mk(NPX + DIR + String.raw`(?:npm|pnpm|yarn|bun|uv|cargo|poetry|hatch|flit)(?:@\S+)?` + ANY + String.raw`publish` + END), label: "publish package", why: "releases something publicly" },
   { ...mk(DIR + String.raw`(?:twine\s+upload|gem\s+push)\b`), label: "publish package", why: "releases something publicly" },
   { ...mk(DOCKER + String.raw`(?:(?:compose|image)\s+(?:-\S+\s+)*)?push\b`), label: "docker/podman push", why: "pushes an image to a registry" },
@@ -182,7 +184,7 @@ const LONG = String.raw`(?:\s+` + TOK + String.raw`){` + (CHAIN + 1) + String.ra
 const TOO_LONG = { label: `more than ${CHAIN} options or arguments in a row`, why: "too many words to inspect quickly; a human should review it" };
 const LIMITS = [
   { ...plain(new RegExp(START + WRAPPERS + LONG)), ...TOO_LONG }, // sudo, env, xargs, timeout, … and their words
-  { ...mk(NPX + DIR + String.raw`(?:netlify|wrangler|fly(?:ctl)?|firebase|gcloud|npm|pnpm|yarn|bun|uv|cargo|poetry|hatch|flit)(?:@\S+)?` + LONG), ...TOO_LONG },
+  { ...mk(NPX + DIR + String.raw`(?:netlify|wrangler|fly(?:ctl)?|firebase|gcloud|terraform|chezmoi|npm|pnpm|yarn|bun|uv|cargo|poetry|hatch|flit)(?:@\S+)?` + LONG), ...TOO_LONG },
   { ...mk(DIR + String.raw`xargs` + LONG), ...TOO_LONG },
   { ...mk(DIR + String.raw`(?:git|gh|docker|podman)(?:\s+-\S+(?:\s+(?!-)\S+)?){` + (CHAIN + 1) + String.raw`}`), ...TOO_LONG }, // global options
   { ...mk(DIR + String.raw`(?:npx|bunx|pnpx|(?:pnpm|yarn)\s+dlx|npm\s+(?:exec|x))(?:\s+-\S+){` + (CHAIN + 1) + String.raw`}`), ...TOO_LONG },
@@ -261,6 +263,8 @@ const LEGACY_ASK = [
   { pattern: /\bgh\s+api\b(?:(?!\bgh\s+api\b)[^\n])*(-X|--method)\s*['"]?(POST|PUT|PATCH|DELETE)\b/i, label: "gh api write", why: "writes data to GitHub directly" },
   { pattern: /\b(vercel|netlify)\b(?:(?!\b(?:vercel|netlify)\b)[^\n])*(\s--prod\b|\sdeploy\b)/, label: "deploy (vercel/netlify)", why: "Red line 3 — a deploy needs a human decision" },
   { pattern: /\b(wrangler\s+(deploy|publish|pages\s+deploy)|fly(ctl)?\s+deploy|firebase\s+deploy)\b/, label: "deploy", why: "Red line 3 — a deploy needs a human decision" },
+  { pattern: /\bterraform\b[^\n;&|]*\s(apply|destroy)\b/, label: "terraform apply/destroy", why: "Red line 3 — changing live cloud infrastructure needs a human decision" },
+  { pattern: /\bchezmoi\b[^\n;&|]*\sapply\b/, label: "chezmoi apply", why: "Red line 4 — chezmoi source is stale and overwrites live configs" },
   { pattern: /\b(npm|pnpm|yarn)\s+publish\b|\bdocker\s+push\b|\btwine\s+upload\b/, label: "publish/push package", why: "releases something publicly" },
   // Red line 4 — throws work away in a way that is hard to recover (forms that still slipped through)
   { pattern: /rm\s+-[a-zA-QS-Z]*R[a-zA-Z]*\s+[^\s]/, label: "rm -R", why: "deletes a whole folder (the -R form)" },
